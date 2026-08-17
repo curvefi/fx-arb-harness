@@ -1,0 +1,99 @@
+// Synthetic user swap simulation
+#pragma once
+
+#include <cstdint>
+#include <cstddef>
+#include <cmath>
+
+#include "pools/twocrypto_fx/helpers.hpp"
+
+namespace arb {
+namespace harness {
+
+// User swap configuration
+template <typename T>
+struct UserSwapCfg {
+    uint64_t freq_s{0};           // seconds between user swaps (0 = disabled)
+    T        size_frac{T(0.01)};  // fraction of from-side balance per swap
+    T        thresh{T(0.05)};     // max post-fee execution disadvantage vs CEX
+
+    // Runtime state
+    uint64_t next_ts{0};          // next scheduled user swap timestamp
+    size_t   next_dir{0};         // 0 = coin0->coin1, 1 = coin1->coin0
+
+    bool enabled() const { return freq_s > 0 && size_frac > T(0); }
+
+    void init(uint64_t start_ts) {
+        if (enabled()) {
+            next_ts = start_ts + freq_s;
+        }
+    }
+};
+
+// Try to perform a synthetic user swap if due.
+// Alternates direction each swap, only executes if fee-inclusive execution is
+// no worse than CEX by cfg.thresh.
+// Returns true if swap was executed.
+template <typename T, typename Pool>
+bool try_user_swap(
+    Pool& pool,
+    UserSwapCfg<T>& cfg,
+    uint64_t ev_ts,
+    T p_cex
+) {
+    if (!cfg.enabled()) return false;
+    if (cfg.next_ts == 0 || ev_ts < cfg.next_ts) return false;
+
+    // Advance schedule regardless of whether swap succeeds
+    cfg.next_ts += cfg.freq_s;
+
+    // Validate CEX price
+    if (!(p_cex > T(0))) return false;
+
+    // Determine swap direction and amount
+    const size_t i_from = cfg.next_dir & 1;
+    const size_t j_to = i_from ^ 1;
+
+    const T bal_from = pool.balances[i_from];
+    if (!(bal_from > T(0))) return false;
+
+    T frac = cfg.size_frac;
+    if (frac > T(1)) frac = T(1);
+    if (!(frac > T(0))) return false;
+
+    const T dx = bal_from * frac;
+    if (!(dx > T(0))) return false;
+
+    auto [dy_after_fee, sim_fee] = pools::twocrypto_fx::simulate_exchange_once(
+        pool, i_from, j_to, dx);
+    (void)sim_fee;
+    if (!(dy_after_fee > T(0))) return false;
+
+    if (i_from == 0) {
+        // User buys risky asset with stable coin. Lower effective price is better.
+        const T effective_ask = dx / dy_after_fee;
+        if (!(effective_ask <= p_cex * (T(1) + cfg.thresh))) return false;
+    } else {
+        // User sells risky asset for stable coin. Higher effective price is better.
+        const T effective_bid = dy_after_fee / dx;
+        if (!(effective_bid >= p_cex * (T(1) - cfg.thresh))) return false;
+    }
+
+    // pool.exchange commits balances/D before tweak_price, which can throw
+    // ("virtual price decreased") at dust-level vp noise. Restore the
+    // snapshot so `false` always means "pool unchanged" -- the event loop's
+    // edge-input cache and metrics rely on that.
+    const Pool snapshot = pool;
+    try {
+        (void)pool.exchange(static_cast<T>(i_from), static_cast<T>(j_to), dx, T(0));
+        cfg.next_dir ^= 1;  // alternate direction for next swap
+        return true;
+
+    } catch (...) {
+        pool = snapshot;
+        return false;
+    }
+}
+
+} // namespace harness
+} // namespace arb

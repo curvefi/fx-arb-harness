@@ -1,0 +1,219 @@
+"""Pydantic models for curve_fx_eval_v1 protocol frames."""
+
+from enum import Enum
+from typing import Any, Dict, List, Literal, Optional
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class ProtocolModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ObservationKind(str, Enum):
+    SUMMARY = "summary"
+    FULL_TRACE = "full_trace"
+
+
+class MetricProjection(str, Enum):
+    SUMMARY = "summary"
+    FULL = "full"
+
+
+class EvaluatorIdentity(ProtocolModel):
+    binary_sha256: str
+    harness_version: str
+    pool_version: str
+    policy_id: str
+    policy_source_sha256: str
+    policy_abi: str
+    policy_parameter_count: int
+    numeric_mode: Literal["float", "double", "longdouble"]
+    real_type: str
+    compiler: str
+    build_target: str
+    ipo_enabled: bool
+    native_tuning: bool
+
+
+class Limits(ProtocolModel):
+    max_frame_bytes: int = 4194304
+    max_candidates_per_batch: Optional[int] = None  # None = not count-limited
+    max_inflight_batches: int = 1
+
+
+class HelloFrame(ProtocolModel):
+    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    type: Literal["hello"] = "hello"
+    version: int = 1
+    evaluator_identity: EvaluatorIdentity
+    capabilities: List[str] = Field(default_factory=lambda: ["summary", "full_trace", "atomic_sidecars"])
+    yb_modes: List[str] = Field(default_factory=lambda: ["off", "passive", "active_2l"])
+    metric_schema: str = "twocrypto-summary-v1"
+    metric_fields: List[str] = Field(default_factory=list)
+    limits: Limits = Field(default_factory=Limits)
+
+
+class OpenSessionFrame(ProtocolModel):
+    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    type: Literal["open_session"] = "open_session"
+    request_id: str
+    session_id: str
+    template_path: str
+    template_sha256: str
+    manifest_path: str
+    manifest_sha256: str
+    pool_index: int = 0
+    n_candles: int = 0
+    start_time: int = 0
+    end_time: int = 0
+    candle_filter: float = 0.0
+    min_swap: float = 1e-6
+    max_swap: float = 1.0
+    dustswap_freq_s: int = 3600
+    dustswap_random: bool = False
+    dustswap_dynamic_freq_s: int = 0
+    dustswap_dynamic_gap_enabled: bool = False
+    dustswap_dynamic_gap_bps: float = 0.0
+    dustswap_dynamic_heartbeat_s: int = 0
+    dustswap_commit_clock_freq_s: int = 0
+    policy_keeper_enabled: bool = False
+    allow_hybrid_keeper: bool = False
+    user_swap_freq_s: int = 0
+    user_swap_size_frac: float = 0.01
+    user_swap_thresh: float = 0.05
+    disable_slippage_probes: bool = False
+    yb_mode: str = "off"
+    yb_releverage: bool = False
+    yb_releverage_fee: float = 0.012
+    yb_cash_multiplier: float = 1.0
+
+    @model_validator(mode="after")
+    def _reconcile_yb_mode(self) -> "OpenSessionFrame":
+        if self.yb_mode not in {"off", "passive", "active_2l"}:
+            raise ValueError(
+                "yb_mode must be one of 'off', 'passive', 'active_2l'"
+            )
+        if self.yb_mode == "off" and self.yb_releverage:
+            # Legacy alias: yb_releverage=true maps to the active 2L model.
+            self.yb_mode = "active_2l"
+        elif self.yb_mode != "off" and not self.yb_releverage:
+            # Keep the legacy mirror consistent with the canonical mode.
+            self.yb_releverage = True
+        return self
+
+
+class ScenarioInfo(ProtocolModel):
+    id: str
+    events_count: int
+    candles_count: Optional[int] = None
+    start_ts: Optional[int] = None
+    end_ts: Optional[int] = None
+
+
+class SessionReadyFrame(ProtocolModel):
+    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    type: Literal["session_ready"] = "session_ready"
+    request_id: str
+    session_id: str
+    scenarios: List[ScenarioInfo]
+    scenario_set_sha256: str
+    session_fingerprint: str
+    session_config_sha256: str
+    metric_schema_sha256: str
+
+
+class ObservationSpec(ProtocolModel):
+    kind: ObservationKind = ObservationKind.SUMMARY
+    trace_interval: int = Field(default=1, ge=1)
+    trace_actions: bool = False
+    artifact_dir: Optional[str] = None
+
+
+
+
+
+class CandidateSpec(ProtocolModel):
+    ordinal: int
+    candidate_id: str
+    policy_params: List[float] = Field(default_factory=list)
+    pool_overrides: Dict[str, Any] = Field(default_factory=dict)
+
+
+class EvaluateBatchFrame(ProtocolModel):
+    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    type: Literal["evaluate_batch"] = "evaluate_batch"
+    request_id: str
+    session_id: str
+    metric_projection: MetricProjection
+    observation: ObservationSpec = Field(default_factory=ObservationSpec)
+    candidates: List[CandidateSpec]
+
+
+class ArtifactRef(ProtocolModel):
+    trace_path: Optional[str] = None
+    actions_path: Optional[str] = None
+    manifest_path: Optional[str] = None
+    trace_sha256: Optional[str] = None
+    actions_sha256: Optional[str] = None
+    manifest_sha256: Optional[str] = None
+
+
+class ScenarioResult(ProtocolModel):
+    scenario_id: str
+    status: Literal["ok", "failed"] = "ok"
+    error: Optional[str] = None
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+    metrics_vec: Optional[List[Optional[float]]] = None
+
+
+class CandidateResult(ProtocolModel):
+    ordinal: int
+    candidate_id: str
+    status: Literal["ok", "failed", "cancelled"] = "ok"
+    economic_fingerprint: str
+    error: Optional[str] = None
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+    metrics_vec: Optional[List[Optional[float]]] = None
+    scenario_results: List[ScenarioResult] = Field(default_factory=list)
+    artifacts: Optional[ArtifactRef] = None
+
+
+class BatchResultFrame(ProtocolModel):
+    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    type: Literal["batch_result"] = "batch_result"
+    request_id: str
+    session_id: str
+    status: Literal["complete", "partial", "failed", "cancelled"]
+    metric_projection: MetricProjection = MetricProjection.SUMMARY
+    results: List[CandidateResult]
+    elapsed_ms: float
+
+
+class ErrorFrame(ProtocolModel):
+    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    type: Literal["error"] = "error"
+    request_id: str
+    scope: Literal["protocol", "session", "candidate", "evaluation", "sidecar", "internal"]
+    error_code: str
+    message: str
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CloseSessionFrame(ProtocolModel):
+    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    type: Literal["close_session"] = "close_session"
+    request_id: str
+    session_id: str
+
+
+class SessionClosedFrame(ProtocolModel):
+    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    type: Literal["session_closed"] = "session_closed"
+    request_id: str
+    session_id: str
+
+
+class ShutdownFrame(ProtocolModel):
+    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    type: Literal["shutdown"] = "shutdown"
+    request_id: str
