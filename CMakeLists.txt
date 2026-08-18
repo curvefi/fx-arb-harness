@@ -67,13 +67,6 @@ endif()
 # Dependencies
 find_package(Threads REQUIRED)
 
-find_package(OpenMP)
-if(OpenMP_CXX_FOUND)
-    set(OPENMP_CXX_LIB OpenMP::OpenMP_CXX)
-else()
-    set(OPENMP_CXX_LIB "")
-endif()
-
 # Boost (Headers and Boost.JSON)
 find_package(Boost REQUIRED COMPONENTS json)
 
@@ -200,7 +193,6 @@ target_link_libraries(curve_fx_evaluator PUBLIC
     twocrypto::pool
     Boost::json
     Threads::Threads
-    ${OPENMP_CXX_LIB}
 )
 
 if(POLICY_HEADER_PATH)

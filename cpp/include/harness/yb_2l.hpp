@@ -269,13 +269,7 @@ public:
         }
 
         Yb2LActor pre_attempt_actor = *this;
-        const bool scalar_only =
-            pool.policy.kind == pools::twocrypto_fx::PolicyKind::None;
-        const bool compact_policy =
-            pool.policy.kind == pools::twocrypto_fx::PolicyKind::Compiled;
-        PoolTransactionSnapshot<T, Pool> pre_attempt_pool(
-            pool, scalar_only, compact_policy
-        );
+        PoolTransactionSnapshot<Pool> pre_attempt_pool(pool);
 
         const auto rollback_route = [&] (
             bool fill_leg_aborted,
@@ -394,23 +388,18 @@ public:
             result.price_scale_before_donation = pool.cached_price_scale;
             result.virtual_price_before_donation = pool.get_virtual_price();
             result.xcp_profit_before_donation = pool.xcp_profit;
-            PoolTransactionSnapshot<T, Pool> transaction_snapshot(
-                pool, scalar_only, compact_policy
-            );
             std::string rejection;
             try {
                 const auto minted = pool.try_add_donation(
                     {donation, T(0)}, result.donation_min_mint, rejection
                 );
                 if (!minted.has_value()) {
-                    transaction_snapshot.restore(pool);
                     result.donation_reject =
                         classify_donation_reject(rejection);
                     rollback_route(false, false);
                     return result;
                 }
             } catch (...) {
-                transaction_snapshot.restore(pool);
                 result.donation_reject =
                     Yb2LDonationReject::TweakThrow;
                 rollback_route(false, false);

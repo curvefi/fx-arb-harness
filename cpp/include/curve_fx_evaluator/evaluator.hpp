@@ -129,6 +129,9 @@ struct BatchEvaluationResult {
     double elapsed_ms{0.0};
 };
 
+void configure_worker_count(size_t count);
+size_t configured_worker_count();
+
 template <typename T = RealT>
 class ScenarioStore {
 public:
@@ -149,7 +152,8 @@ public:
     std::string compute_session_fingerprint(
         const std::string& binary_sha256,
         const std::string& policy_source_sha256,
-        const std::string& session_config_sha256
+        const std::string& session_config_sha256,
+        size_t pool_index
     ) const;
 
 private:

@@ -214,13 +214,10 @@ EventLoopResult<T> run_event_loop(
     };
 
     auto apply_donation = [&](std::size_t, uint64_t ts) {
-        const Pool action_snapshot = pool;
         auto don_res = make_donation_ex(pool, dcfg, ts, m);
         if (don_res.success) {
             invalidate_edge_inputs();
             action_logger.log_donation(ts, don_res, dcfg);
-        } else {
-            pool = action_snapshot;
         }
     };
 
@@ -267,16 +264,7 @@ EventLoopResult<T> run_event_loop(
             return false;
         }
 
-        const bool scalar_snap_ok =
-            pool.policy.kind == pools::twocrypto_fx::PolicyKind::None;
-        bool compact_policy =
-            pool.policy.kind == pools::twocrypto_fx::PolicyKind::Compiled;
-#if defined(ARB_POLICY_KEEPER_FULL_COPY_REFERENCE)
-        compact_policy = false;
-#endif
-        PoolTransactionSnapshot<T, Pool> transaction_snapshot(
-            pool, scalar_snap_ok, compact_policy
-        );
+        PoolTransactionSnapshot<Pool> transaction_snapshot(pool);
         try {
             const T ps_before = pool.cached_price_scale;
             T oracle_before{};
@@ -342,16 +330,7 @@ EventLoopResult<T> run_event_loop(
     };
 
     auto apply_idle_tick = [&](std::size_t, uint64_t ts, T cex_price) -> bool {
-        const bool scalar_snap_ok =
-            pool.policy.kind == pools::twocrypto_fx::PolicyKind::None;
-        bool compact_policy =
-            pool.policy.kind == pools::twocrypto_fx::PolicyKind::Compiled;
-#if defined(ARB_POLICY_KEEPER_FULL_COPY_REFERENCE)
-        compact_policy = false;
-#endif
-        PoolTransactionSnapshot<T, Pool> transaction_snapshot(
-            pool, scalar_snap_ok, compact_policy
-        );
+        PoolTransactionSnapshot<Pool> transaction_snapshot(pool);
         const T ps_before = pool.cached_price_scale;
         T oracle_before{};
         T xcp_profit_before{};
@@ -396,8 +375,7 @@ EventLoopResult<T> run_event_loop(
             pool.policy.kind == pools::twocrypto_fx::PolicyKind::None;
         bool committed = false;
         if (scalar_snap_ok) {
-            PoolScalarSnapshot<T> snap{};
-            snap.capture(pool);
+            PoolTransactionSnapshot<Pool> transaction_snapshot(pool);
             try {
                 pool.tick();
                 committed = pool.cached_price_scale != ps_before;
@@ -405,7 +383,7 @@ EventLoopResult<T> run_event_loop(
                 committed = false;
             }
             if (!committed) {
-                snap.restore(pool);
+                transaction_snapshot.restore(pool);
             }
         } else {
             committed = try_commit_gated_tick(pool);
@@ -502,57 +480,24 @@ EventLoopResult<T> run_event_loop(
         }
 #endif
         typename Pool::KeeperGapProbe probe{};
-        bool committed_in_place = false;
-        std::optional<Pool> legacy_candidate;
-        bool use_candidate_copy = !policy_owned;
-#if defined(ARB_POLICY_KEEPER_FULL_COPY_REFERENCE)
-        use_candidate_copy = true;
-#endif
-        if (!use_candidate_copy) {
-            PoolScalarSnapshot<T> scalar_before{};
-            scalar_before.capture(pool);
-            const auto policy_snapshot_before = pool.policy.mutable_snapshot();
-            const auto hook_metrics_before = pool.policy_hook_metrics;
-            auto rollback = [&]() {
-                scalar_before.restore(pool);
-                pool.policy.restore_mutable(policy_snapshot_before);
-                pool.policy_hook_metrics = hook_metrics_before;
-            };
-            try {
-                probe = pool.tick_policy_keeper();
-                committed_in_place =
-                    probe.fired && pool.cached_price_scale != ps_before;
-            } catch (...) {
-                policy_attempt_threw = policy_owned;
-                committed_in_place = false;
-            }
-            if (!committed_in_place) {
-                rollback();
-            }
-        } else {
-            legacy_candidate.emplace(pool);
-            try {
-                probe = policy_owned
-                    ? legacy_candidate->tick_policy_keeper()
-                    : legacy_candidate->tick_keeper_gap(
-                        cfg.dustswap_dynamic_gap_bps,
-                        heartbeat_due
-                    );
-            } catch (...) {
-                if (policy_owned) {
-                    policy_attempt_threw = true;
-                }
-                if (policy_owned) {
-                    ++m.policy_keeper_exceptions;
-                }
-                return false;
-            }
+        PoolTransactionSnapshot<Pool> transaction_snapshot(pool);
+        try {
+            probe = policy_owned
+                ? pool.tick_policy_keeper()
+                : pool.tick_keeper_gap(
+                    cfg.dustswap_dynamic_gap_bps,
+                    heartbeat_due
+                );
+        } catch (...) {
+            transaction_snapshot.restore(pool);
+            policy_attempt_threw = policy_owned;
         }
         if (policy_attempt_threw) {
             ++m.policy_keeper_exceptions;
             return false;
         }
         if (!probe.fired) {
+            transaction_snapshot.restore(pool);
             if (policy_submission) {
                 ++m.policy_keeper_unexpected_step_rejects;
             }
@@ -568,11 +513,8 @@ EventLoopResult<T> run_event_loop(
             ++m.dynamic_keeper_heartbeat_fires;
         }
 
-        if (
-            use_candidate_copy
-                ? legacy_candidate->cached_price_scale == ps_before
-                : !committed_in_place
-        ) {
+        if (pool.cached_price_scale == ps_before) {
+            transaction_snapshot.restore(pool);
             if (policy_submission) {
                 if (probe.prospective_lp_evaluated && !probe.lp_gate_passed) {
                     ++m.policy_keeper_final_lp_rejects;
@@ -590,9 +532,6 @@ EventLoopResult<T> run_event_loop(
                 }
             }
             return false;
-        }
-        if (use_candidate_copy) {
-            pool = std::move(*legacy_candidate);
         }
 
         const T ps_after = pool.cached_price_scale;

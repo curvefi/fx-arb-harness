@@ -34,6 +34,7 @@
 #include "core/sha256.hpp"
 #include "curve_fx_evaluator/compiled_policy_identity.hpp"
 #include "curve_fx_evaluator/evaluator.hpp"
+#include "pools/pool_config_parse.hpp"
 
 namespace json = boost::json;
 namespace fs = std::filesystem;
@@ -113,6 +114,39 @@ static const std::vector<std::string> CANONICAL_METRIC_FIELDS = {
     "keeper_successful_submissions", "fixed_keeper_ticks"
 };
 
+json::value normalize_pool_override_identity_value(
+    const json::value& value,
+    std::string_view field
+) {
+    if (value.is_object()) {
+        json::object normalized;
+        for (const auto& item : value.as_object()) {
+            normalized[item.key()] = normalize_pool_override_identity_value(
+                item.value(), item.key());
+        }
+        return normalized;
+    }
+    if (value.is_array()) {
+        json::array normalized;
+        for (const auto& item : value.as_array()) {
+            normalized.push_back(normalize_pool_override_identity_value(
+                item, field));
+        }
+        return normalized;
+    }
+    const bool textual = field == "tag" || field == "kind" ||
+        field == "price_source" || field == "policy";
+    if (!textual && arb::pools::is_number_or_string(value)) {
+        return json::value(arb::canonical_float_string(
+            arb::parse_input_double(value)));
+    }
+    return value;
+}
+
+json::object normalize_pool_override_identity(const json::object& value) {
+    return normalize_pool_override_identity_value(value, "").as_object();
+}
+
 std::string compute_binary_sha256(const char* argv0) {
     if (argv0 == nullptr || *argv0 == '\0') {
         throw std::runtime_error("cannot attest evaluator binary: argv[0] is empty");
@@ -151,10 +185,10 @@ std::string compute_deterministic_candidate_fingerprint(
 
     json::array params_arr;
     for (auto p : policy_params) {
-        params_arr.push_back(static_cast<double>(p));
+        params_arr.push_back(json::value(arb::canonical_float_string(p)));
     }
     fp_obj["params"] = params_arr;
-    fp_obj["overrides"] = pool_overrides;
+    fp_obj["overrides"] = normalize_pool_override_identity(pool_overrides);
 
     // Include all deterministic economic metrics, strictly excluding elapsed_ms and non-deterministic timing
     json::object econ_metrics;
@@ -168,28 +202,34 @@ std::string compute_deterministic_candidate_fingerprint(
 }
 
 std::string compute_session_config_sha256(
-    const curve_fx::evaluator::SessionConfig<RealT>& cfg
+    const curve_fx::evaluator::SessionConfig<RealT>& cfg,
+    size_t pool_index
 ) {
     json::object value;
-    value["min_swap_frac"] = static_cast<double>(cfg.min_swap_frac);
-    value["max_swap_frac"] = static_cast<double>(cfg.max_swap_frac);
+    value["pool_index"] = pool_index;
+    value["min_swap_frac"] = arb::canonical_float_string(cfg.min_swap_frac);
+    value["max_swap_frac"] = arb::canonical_float_string(cfg.max_swap_frac);
     value["dustswap_freq_s"] = cfg.dustswap_freq_s;
     value["dustswap_random"] = cfg.dustswap_random;
     value["dustswap_dynamic_freq_s"] = cfg.dustswap_dynamic_freq_s;
     value["dustswap_dynamic_gap_enabled"] = cfg.dustswap_dynamic_gap_enabled;
-    value["dustswap_dynamic_gap_bps"] = static_cast<double>(cfg.dustswap_dynamic_gap_bps);
+    value["dustswap_dynamic_gap_bps"] =
+        arb::canonical_float_string(cfg.dustswap_dynamic_gap_bps);
     value["dustswap_dynamic_heartbeat_s"] = cfg.dustswap_dynamic_heartbeat_s;
     value["dustswap_commit_clock_freq_s"] = cfg.dustswap_commit_clock_freq_s;
     value["policy_keeper_enabled"] = cfg.policy_keeper_enabled;
     value["allow_hybrid_keeper"] = cfg.allow_hybrid_keeper;
     value["user_swap_freq_s"] = cfg.user_swap_freq_s;
-    value["user_swap_size_frac"] = static_cast<double>(cfg.user_swap_size_frac);
-    value["user_swap_thresh"] = static_cast<double>(cfg.user_swap_thresh);
+    value["user_swap_size_frac"] =
+        arb::canonical_float_string(cfg.user_swap_size_frac);
+    value["user_swap_thresh"] =
+        arb::canonical_float_string(cfg.user_swap_thresh);
     value["enable_slippage_probes"] = cfg.enable_slippage_probes;
     value["yb_mode"] = cfg.yb_mode;
-    value["yb_releverage_fee"] = static_cast<double>(cfg.yb_releverage_fee);
+    value["yb_releverage_fee"] =
+        arb::canonical_float_string(cfg.yb_releverage_fee);
     value["yb_cash_multiplier"] =
-        static_cast<double>(cfg.yb_cash_multiplier);
+        arb::canonical_float_string(cfg.yb_cash_multiplier);
     return arb::sha256_canonical_json(value);
 }
 
@@ -323,6 +363,30 @@ bool is_valid_hex64(std::string_view s) {
     return true;
 }
 
+bool parse_size_t_field(
+    const json::object& object,
+    const char* key,
+    size_t fallback,
+    size_t& result
+) {
+    const auto* value = object.if_contains(key);
+    if (value == nullptr) {
+        result = fallback;
+        return true;
+    }
+    if (value->is_uint64()) {
+        const uint64_t parsed = value->as_uint64();
+        if (parsed > std::numeric_limits<size_t>::max()) return false;
+        result = static_cast<size_t>(parsed);
+        return true;
+    }
+    if (value->is_int64() && value->as_int64() >= 0) {
+        result = static_cast<size_t>(value->as_int64());
+        return true;
+    }
+    return false;
+}
+
 std::optional<std::string> unknown_field(
     const json::object& object,
     std::initializer_list<std::string_view> allowed
@@ -382,6 +446,8 @@ public:
         : bin_hash_(std::move(binary_hash)) {}
 
     void run() {
+        std::cerr << "[evaluator] Worker count: "
+                  << curve_fx::evaluator::configured_worker_count() << "\n";
         // Emit initial hello frame
         write_frame(std::cout, make_hello_frame(bin_hash_));
 
@@ -539,10 +605,18 @@ private:
             return;
         }
 
+        size_t pool_index = 0;
+        if (!parse_size_t_field(req, "pool_index", 0, pool_index)) {
+            write_frame(std::cout, make_error_frame(
+                req_id, "session", "INVALID_ARGUMENT",
+                "pool_index must be a non-negative integer"));
+            return;
+        }
+
         try {
             auto store = std::make_shared<curve_fx::evaluator::ScenarioStore<RealT>>();
             curve_fx::evaluator::ScenarioLoadOptions opts{};
-            opts.pool_index = static_cast<size_t>(arb::get_double_opt(req, "pool_index", 0.0));
+            opts.pool_index = pool_index;
             opts.max_candles = static_cast<size_t>(arb::get_double_opt(req, "n_candles", 0.0));
             opts.start_ts = static_cast<uint64_t>(arb::get_double_opt(req, "start_time", 0.0));
             opts.end_ts = static_cast<uint64_t>(arb::get_double_opt(req, "end_time", 0.0));
@@ -615,11 +689,13 @@ private:
             sess.store = store;
             sess.config = cfg;
             sess.scenario_set_sha256 = store->compute_scenario_set_sha256();
-            sess.session_config_sha256 = compute_session_config_sha256(cfg);
+            sess.session_config_sha256 = compute_session_config_sha256(
+                cfg, opts.pool_index);
             sess.session_fingerprint = store->compute_session_fingerprint(
                 bin_hash_,
                 curve_fx::identity::POLICY_SOURCE_SHA256,
-                sess.session_config_sha256
+                sess.session_config_sha256,
+                opts.pool_index
             );
 
             session_ = std::move(sess);
@@ -1176,29 +1252,79 @@ private:
 } // namespace curve_fx
 
 int main(int argc, char* argv[]) {
-    // Check for --identity-json
+    bool identity_only = false;
+    std::string mode = "serve";
+    bool mode_explicit = false;
+    size_t worker_count = 1;
+
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--identity-json") {
-            try {
-                const std::string bin_hash = compute_binary_sha256(argv[0]);
-                write_frame(std::cout, make_hello_frame(bin_hash));
-                return 0;
-            } catch (const std::exception& error) {
-                std::cerr << "Error: " << error.what() << "\n";
+            identity_only = true;
+            continue;
+        }
+        if (arg == "--workers") {
+            if (++i >= argc) {
+                std::cerr << "Error: --workers requires a positive integer\n";
                 return 1;
             }
+            const std::string value = argv[i];
+            if (value.empty() || !std::all_of(
+                    value.begin(), value.end(), [](unsigned char c) {
+                        return c >= '0' && c <= '9';
+                    })) {
+                std::cerr << "Error: --workers requires a positive integer\n";
+                return 1;
+            }
+            try {
+                const auto parsed = std::stoull(value);
+                if (parsed == 0 || parsed > std::numeric_limits<size_t>::max()) {
+                    throw std::out_of_range("worker count");
+                }
+                worker_count = static_cast<size_t>(parsed);
+            } catch (const std::exception&) {
+                std::cerr << "Error: --workers requires a positive integer\n";
+                return 1;
+            }
+            continue;
         }
         if (arg == "-h" || arg == "--help") {
-            std::cerr << "Usage: " << argv[0] << " [serve | --identity-json]\n\n"
+            std::cerr << "Usage: " << argv[0]
+                      << " [serve | --identity-json] [--workers N]\n\n"
                       << "Modes:\n"
                       << "  serve              Run persistent NDJSON server implementing protocol curve_fx_eval_v1 (stdin/stdout)\n"
-                      << "  --identity-json    Print evaluator identity frame to stdout and exit 0\n";
+                      << "  --identity-json    Print evaluator identity frame to stdout and exit 0\n"
+                      << "Options:\n"
+                      << "  --workers N        Use N evaluator workers (default 1; cannot exceed detected hardware concurrency)\n";
             return 0;
         }
+        if (arg == "serve" && !mode_explicit) {
+            mode = arg;
+            mode_explicit = true;
+            continue;
+        }
+        std::cerr << "Error: Unknown argument '" << arg
+                  << "'. Use --help for usage.\n";
+        return 1;
     }
 
-    const std::string mode = (argc >= 2) ? argv[1] : "serve";
+    try {
+        curve_fx::evaluator::configure_worker_count(worker_count);
+    } catch (const std::exception& error) {
+        std::cerr << "Error: " << error.what() << "\n";
+        return 1;
+    }
+
+    if (identity_only) {
+        try {
+            const std::string bin_hash = compute_binary_sha256(argv[0]);
+            write_frame(std::cout, make_hello_frame(bin_hash));
+            return 0;
+        } catch (const std::exception& error) {
+            std::cerr << "Error: " << error.what() << "\n";
+            return 1;
+        }
+    }
 
     if (mode == "serve") {
         try {
@@ -1211,7 +1337,5 @@ int main(int argc, char* argv[]) {
             return 1;
         }
     }
-
-    std::cerr << "Error: Unknown mode '" << mode << "'. Use --help for usage.\n";
     return 1;
 }

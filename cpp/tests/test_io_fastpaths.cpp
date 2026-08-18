@@ -108,6 +108,30 @@ void test_pool_init_binary64_boundary() {
     );
 }
 
+void test_long_double_identity_decimal() {
+    const long double first = 1.0L;
+    const long double second = std::nextafter(
+        first, std::numeric_limits<long double>::infinity());
+    if constexpr (
+        std::numeric_limits<long double>::digits >
+        std::numeric_limits<double>::digits
+    ) {
+        require(
+            static_cast<double>(first) == static_cast<double>(second),
+            "wider long-double values must collide at the old identity boundary"
+        );
+    }
+    require(
+        arb::canonical_float_string(first) !=
+            arb::canonical_float_string(second),
+        "canonical long-double identity must preserve distinct inputs"
+    );
+    require(
+        arb::canonical_float_string(-0.0L) == "0",
+        "signed zero must have one canonical identity"
+    );
+}
+
 } // namespace
 
 void test_pool_override_materialized_once();
@@ -116,6 +140,7 @@ int main() {
     test_csv_line_splitting();
     test_pool_override_materialized_once();
     test_pool_init_binary64_boundary();
+    test_long_double_identity_decimal();
     std::cout << "test_io_fastpaths: PASSED\n";
     return 0;
 }

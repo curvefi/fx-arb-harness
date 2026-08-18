@@ -9,6 +9,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <limits>
+#include <locale>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -19,6 +21,19 @@
 #include "core/sha256.hpp"
 
 namespace arb {
+
+template <typename T>
+std::string canonical_float_string(T value) {
+    static_assert(std::is_floating_point_v<T>);
+    if (value == T(0)) return "0";
+
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    out << std::scientific
+        << std::setprecision(std::numeric_limits<T>::max_digits10 - 1)
+        << value;
+    return out.str();
+}
 
 // ============================================================================
 // Scaling constants

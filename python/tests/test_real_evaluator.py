@@ -112,6 +112,34 @@ def _economic_metrics(result) -> dict[str, object]:
     return {key: value for key, value in result.metrics.items() if key != "elapsed_ms"}
 
 
+def test_pool_index_changes_session_identity(tmp_path: Path) -> None:
+    assert EVALUATOR is not None
+    template, _, manifest = _write_inputs(tmp_path)
+    template_data = json.loads(template.read_text(encoding="utf-8"))
+    duplicate = json.loads(json.dumps(template_data["pools"][0]))
+    duplicate["tag"] = "protocol_smoke_duplicate"
+    template_data["pools"].append(duplicate)
+    template.write_text(
+        json.dumps(template_data, sort_keys=True), encoding="utf-8"
+    )
+
+    ready = []
+    for pool_index in (0, 1):
+        client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
+        try:
+            ready.append(client.open_session(
+                session_id=f"pool-{pool_index}",
+                template_path=template,
+                manifest_path=manifest,
+                pool_index=pool_index,
+            ))
+        finally:
+            client.shutdown()
+
+    assert ready[0].session_config_sha256 != ready[1].session_config_sha256
+    assert ready[0].session_fingerprint != ready[1].session_fingerprint
+
+
 def test_real_evaluator_rejects_missing_metric_projection(tmp_path: Path) -> None:
     assert EVALUATOR is not None
     template, _, manifest = _write_inputs(tmp_path)
@@ -287,6 +315,24 @@ def test_real_persistent_short_lived_trace_and_attestation(tmp_path: Path) -> No
         assert ready.scenarios[0].candles_count == 10
         assert ready.scenarios[0].end_ts == 1_700_000_000 + 9 * 60
         summary = persistent.evaluate_batch([candidate]).results[0]
+        numeric_override = persistent.evaluate_batch([
+            CandidateSpec(
+                ordinal=0,
+                candidate_id="override-number",
+                policy_params=policy_params,
+                pool_overrides={"pool": {"A": 500000.0}},
+            )
+        ]).results[0]
+        string_override = persistent.evaluate_batch([
+            CandidateSpec(
+                ordinal=0,
+                candidate_id="override-string",
+                policy_params=policy_params,
+                pool_overrides={"pool": {"A": "500000.0"}},
+            )
+        ]).results[0]
+        assert numeric_override.economic_fingerprint == string_override.economic_fingerprint
+        assert _economic_metrics(numeric_override) == _economic_metrics(string_override)
         canonical = persistent.evaluate_batch([
             CandidateSpec(
                 ordinal=9,

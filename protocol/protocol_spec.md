@@ -7,7 +7,7 @@
 Stdout is strictly reserved for protocol NDJSON frames. All logging, progress updates, and diagnostic messages MUST be directed to stderr.
 
 ### Key Tenets
-1. **Immutable Session**: Scenarios, candle data, oracle feeds, and baseline pool templates load once and are attested by cryptographic SHA-256 digests.
+1. **Immutable Session**: The scenario, candle data, oracle feed, and selected baseline pool template load once and are attested by cryptographic SHA-256 digests.
 2. **Deterministic & Ordered**: Result frames match the input candidate batch ordering by ordinal.
 3. **Observation Separation**: Observation level (`summary` vs `full_trace`) does not alter economic state machines, random seeds, or metric outputs. Both share the exact same economic simulation loop and produce identical economic fingerprints.
 4. **Confined Atomic Sidecars**: Trace artifacts and detailed logs are published atomically within run-relative directories with strict rejection of path traversal (`..` or absolute paths).
@@ -94,7 +94,7 @@ Upon launching in `serve` mode (or when invoked with `--identity-json`), the eva
 ```
 
 ### 3.2 Session Initialization: `open_session`
-The client sends an `open_session` frame with file paths and expected SHA-256 hashes. The manifest is the single authority for market files and has one accepted envelope: `schema_version = fxsim_manifest_v1`, `run_kind = session`, a non-empty `run_id`, and `resolved_spec.scenario`. The scenario contains only `id`, optional candle bounds/filter, a non-empty `market_files` array of `{path, kind, sha256}` objects (where `kind` is `market` or `chainlink`), and optional `yb_mode`/`yb_releverage` declarations. The evaluator rejects unknown fields and validates the template, manifest, candle, and optional Chainlink hashes before admitting the session.
+The client sends an `open_session` frame with file paths and expected SHA-256 hashes. The manifest is the single authority for market files and has one accepted envelope: `schema_version = fxsim_manifest_v1`, `run_kind = session`, a non-empty `run_id`, and exactly one `resolved_spec.scenario`. The scenario contains only `id`, optional candle bounds/filter, a non-empty `market_files` array of `{path, kind, sha256}` objects (where `kind` is `market` or `chainlink`), and optional `yb_mode`/`yb_releverage` declarations. The evaluator rejects unknown fields and validates the template, manifest, candle, and optional Chainlink hashes before admitting the session. `pool_index` selects the effective template entry and participates in both `session_config_sha256` and `session_fingerprint`.
 
 `yb_mode` selects the YieldBasis model and must be one of:
 - `"off"` — no YieldBasis: the yb metric family stays empty.
@@ -167,7 +167,7 @@ Response (`session_ready`):
 `metric_projection` is a required top-level request field and is independent of trace capture. Clients MUST send either `"summary"` or `"full"`; omission is rejected.
 
 - `summary`: return aggregate `metrics` and `metrics_vec`; `scenario_results` is an empty array.
-- `full`: return the same aggregate metrics plus ordered per-scenario `scenario_results`.
+- `full`: return the same aggregate metrics plus the admitted scenario's single `scenario_results` row.
 
 It MUST NOT appear inside `observation`; `observation.kind` only selects trace capture (`summary` or `full_trace`).
 
@@ -224,7 +224,7 @@ Response (`batch_result`) echoes the selected projection:
 }
 ```
 
-With `"metric_projection": "full"`, each candidate's `scenario_results` contains all scenario rows in canonical scenario order. Projection changes response detail only; it never changes economic execution or the economic fingerprint.
+With `"metric_projection": "full"`, each candidate's `scenario_results` contains the one admitted scenario row. The array shape is retained for protocol stability. Projection changes response detail only; it never changes economic execution or the economic fingerprint. Candidate policy parameters are hashed as exact canonical decimals of the effective arithmetic type, rather than being narrowed to binary64. Pool override numbers and numeric strings that materialize to the same binary64 input have the same identity.
 ### 3.4 Full Trace Observation (`observation.kind = "full_trace"`)
 When `observation.kind` is `"full_trace"`, a non-empty relative `artifact_dir` is required. Trace records and actions are written to atomic content-addressed files:
 - `<artifact_dir>/<economic_fingerprint>.<scenario_id>.<trace_sha256>.trace.json`

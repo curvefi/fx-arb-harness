@@ -56,6 +56,7 @@ struct ThrowingPool {
         double,
         bool donation
     ) {
+        const auto before = mutable_snapshot();
         require(donation, "the scheduler must mark this add as a donation");
         balances[0] += amounts[0];
         balances[1] += amounts[1];
@@ -64,6 +65,7 @@ struct ThrowingPool {
         block_timestamp = 9876;
         mutation_counter = -1;
         if (throw_on_add) {
+            restore_mutable(before);
             throw std::runtime_error("intentional donation failure");
         }
         return amounts;

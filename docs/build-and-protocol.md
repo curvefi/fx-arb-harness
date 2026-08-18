@@ -41,21 +41,21 @@ cmake --build /path/to/curve-fx-arb-harness/build/compiled \
   --target arb_evaluator_ld --parallel
 ```
 
-`--identity-json` reports the binary digest, harness/pool versions, policy identity and source digest, compiler, numeric mode, capabilities, and limits. Save this frame before submitting an orchestrator run.
+`--identity-json` reports the binary digest, harness/pool versions, policy identity and source digest, compiler, numeric mode, capabilities, and limits. Evaluators default to one worker per process; use `--workers N` to allocate more without exceeding detected hardware concurrency. Serve mode logs the effective count to stderr without changing the strict v1 `hello` schema. Save the identity frame before submitting an orchestrator run.
 
 ## 2. Protocol lifecycle
 
 The production executable is line-oriented:
 
-1. Launch `arb_evaluator_ld serve`; consume the startup `hello` frame.
+1. Launch `arb_evaluator_ld serve --workers N`; consume the startup `hello` frame.
 2. Send `open_session` with evaluator-visible template/manifest paths and each expected 64-hex SHA-256. The sole manifest envelope is `fxsim_manifest_v1`/`session` with one `resolved_spec.scenario`; each `market` or `chainlink` file carries its SHA-256. The evaluator rejects unknown fields, validates all hashes, and loads immutable scenario data once; wait for `session_ready`.
 3. Send `evaluate_batch` with canonical candidate ordinals, policy parameters, pool overrides, a required `metric_projection`, and an observation specification.
-4. Consume `batch_result`; results are ordered by ordinal. `summary` returns aggregate raw metrics; `full` adds ordered scenario rows. `full_trace` observation additionally returns atomic trace/action/manifest sidecars under the run-contained artifact directory.
+4. Consume `batch_result`; results are ordered by ordinal. Because the admitted manifest contains one scenario, `summary` returns its raw metrics as the aggregate and `full` adds its single scenario row. `full_trace` observation additionally returns atomic trace/action/manifest sidecars under the run-contained artifact directory.
 5. Send `close_session`, then `shutdown`.
 
 Stdout is reserved for one JSON object per line. Send logs and diagnostics to stderr.
 
-A full-trace sidecar response carries attested paths and SHA-256 values. The evaluator enforces path containment, hash matching, exact compiled-policy parameter count, unique candidate IDs/ordinals, and at most one admitted batch at a time. Projection and observation level do not change the economic fingerprint.
+A full-trace sidecar response carries attested paths and SHA-256 values. The evaluator enforces path containment, hash matching, exact compiled-policy parameter count, unique candidate IDs/ordinals, and at most one admitted batch at a time. The effective `pool_index` participates in the session config hash and fingerprint. Policy parameters use exact canonical decimals in candidate identity, so long-double inputs are never narrowed to binary64 for hashing. Pool override numbers and numeric strings are normalized at their shared binary64 materialization boundary. Projection and observation level do not change the economic fingerprint.
 
 ## 3. Short-lived smoke mode
 

@@ -15,6 +15,9 @@ namespace curve_fx::evaluator {
 
 namespace {
 
+size_t process_worker_count = 1;
+bool worker_pool_initialized = false;
+
 // ============================================================================
 // Fixed, bounded, process-lifetime worker pool.
 //
@@ -76,16 +79,8 @@ public:
     }
 
 private:
-    static size_t worker_count() {
-        size_t n = std::thread::hardware_concurrency();
-        if (n == 0) n = 1;
-        // Cap well above any single machine (128-core blades) while still
-        // bounding oversubscription; the barrier/generation protocol keeps
-        // each worker's chunk contiguous and canonical.
-        return std::min<size_t>(n, 512);
-    }
-
-    WorkerPool() : cv_start_(worker_count()) {
+    WorkerPool() : cv_start_(process_worker_count) {
+        worker_pool_initialized = true;
         const size_t n = cv_start_.size();
         workers_.reserve(n);
         for (size_t id = 0; id < n; ++id) {
@@ -126,7 +121,7 @@ private:
 
     std::mutex mu_;
     std::condition_variable cv_done_;
-    // Sized to worker_count() in the constructor; condition_variable is
+    // Sized to the configured worker count in the constructor; condition_variable is
     // neither copyable nor movable, so the vector is never resized.
     std::vector<std::condition_variable> cv_start_;
     std::vector<std::thread> workers_;
@@ -441,6 +436,28 @@ void execute_scenario_job(
 }
 
 } // namespace
+
+void configure_worker_count(size_t count) {
+    if (count == 0) {
+        throw std::invalid_argument("worker count must be positive");
+    }
+    const size_t hardware = std::thread::hardware_concurrency();
+    if (hardware != 0 && count > hardware) {
+        throw std::invalid_argument(
+            "worker count " + std::to_string(count) +
+            " exceeds detected hardware concurrency " +
+            std::to_string(hardware)
+        );
+    }
+    if (worker_pool_initialized && count != process_worker_count) {
+        throw std::logic_error("worker pool is already initialized");
+    }
+    process_worker_count = count;
+}
+
+size_t configured_worker_count() {
+    return process_worker_count;
+}
 
 BatchEvaluationResult evaluate_batch_candidates(
     const ScenarioStore<RealT>& store,

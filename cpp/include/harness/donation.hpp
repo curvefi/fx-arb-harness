@@ -73,10 +73,7 @@ DonationResult<T> make_donation_ex(
     const uint64_t ts_due = cfg.next_ts;
     const T ps_before = pool.cached_price_scale;
 
-    // add_liquidity commits the donation before its trailing tweak_price,
-    // which can throw at dust-level vp noise; restore the snapshot so a
-    // failed donation is truly a no-op (cache + metering correctness).
-    const Pool snapshot = pool;
+    // The pool SDK makes add_liquidity atomic across trailing tweak failures.
     try {
         (void)pool.add_liquidity({amt0, amt1}, T(0), /*donation=*/true);
         const T ps_after = pool.cached_price_scale;
@@ -95,8 +92,7 @@ DonationResult<T> make_donation_ex(
         result.price_scale = ps_before;
 
     } catch (...) {
-        // Failed donation (e.g., donation cap exceeded): roll back fully.
-        pool = snapshot;
+        // Failed donation (e.g., donation cap exceeded) is already rolled back.
     }
 
     // Advance schedule by exactly one period (no catch-up)

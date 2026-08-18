@@ -301,12 +301,14 @@ template <typename T>
 std::string ScenarioStore<T>::compute_session_fingerprint(
     const std::string& binary_sha256,
     const std::string& policy_source_sha256,
-    const std::string& session_config_sha256
+    const std::string& session_config_sha256,
+    size_t pool_index
 ) const {
     std::ostringstream oss;
     oss << "bin:" << binary_sha256
         << "|policy:" << policy_source_sha256
         << "|template:" << template_sha256_
+        << "|pool_index:" << pool_index
         << "|scenarios:" << compute_scenario_set_sha256()
         << "|session_config:" << session_config_sha256;
     return arb::crypto::sha256_hex(oss.str());

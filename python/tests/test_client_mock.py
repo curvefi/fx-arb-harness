@@ -3,14 +3,48 @@ import json
 
 import pytest
 from unittest.mock import MagicMock, patch
+from typing import Any, Literal
 
 from curve_fx_harness_client.client import EvaluatorClient
 from curve_fx_harness_client.exceptions import (
     IdentityMismatchError,
     ProtocolViolationError,
 )
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 from curve_fx_harness_client.models import CandidateSpec, EvaluateBatchFrame, HelloFrame
+
+
+class LegacyLimits(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    max_frame_bytes: int
+    max_candidates_per_batch: int | None = None
+    max_inflight_batches: int
+
+
+class LegacyHelloFrame(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    protocol: Literal["curve_fx_eval_v1"]
+    type: Literal["hello"]
+    version: int
+    evaluator_identity: dict[str, Any]
+    capabilities: list[str]
+    yb_modes: list[str] = ["off", "passive", "active_2l"]
+    metric_schema: str
+    metric_fields: list[str]
+    limits: LegacyLimits
+
+
+class LegacySessionReadyFrame(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    protocol: Literal["curve_fx_eval_v1"]
+    type: Literal["session_ready"]
+    request_id: str
+    session_id: str
+    scenarios: list[dict[str, Any]]
+    scenario_set_sha256: str
+    session_fingerprint: str
+    session_config_sha256: str
+    metric_schema_sha256: str
 
 
 @pytest.fixture
@@ -74,6 +108,13 @@ def test_client_identity_mismatch(mock_hello_data, tmp_path):
     with patch("subprocess.Popen", return_value=mock_proc):
         with pytest.raises(IdentityMismatchError, match="policy ID mismatch"):
             client.start()
+
+
+def test_v1_responses_remain_compatible_with_strict_0_1_1_models(
+    mock_hello_data, mock_session_ready_data
+) -> None:
+    LegacyHelloFrame.model_validate(mock_hello_data)
+    LegacySessionReadyFrame.model_validate(mock_session_ready_data)
 
 
 def test_open_session_on_fresh_client_no_deadlock(mock_hello_data, mock_session_ready_data, tmp_path):

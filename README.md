@@ -4,7 +4,7 @@
 
 ## Build prerequisites and independent setup
 
-Requirements: Python 3.12 with uv, CMake 3.14+, a C++17 compiler, Boost with the JSON component, Threads, and (when available) OpenMP. Build/install `twocrypto-cpp` first and point CMake at its install prefix; a sibling source checkout is only an explicit development prerequisite, never a runtime path.
+Requirements: Python 3.12 with uv, CMake 3.14+, a C++17 compiler, Boost with the JSON component, and Threads. Build/install `twocrypto-cpp` first and point CMake at its install prefix; a sibling source checkout is only an explicit development prerequisite, never a runtime path.
 
 From the pool repository:
 
@@ -24,7 +24,7 @@ cmake -S . -B build/native -DCMAKE_BUILD_TYPE=Release \
 cmake --build build/native --target arb_evaluator_ld --parallel
 ```
 
-This produces `build/native/arb_evaluator_ld`, the production long-double evaluator. `curve_fx_evaluator` is the transport-free static library.
+This produces `build/native/arb_evaluator_ld`, the production long-double evaluator. `curve_fx_evaluator` is an internal static build target, not an installed library or stable C++ ABI; the executable protocol is the supported integration boundary.
 
 ## Compiled-policy build and digest attestation
 
@@ -77,14 +77,14 @@ a persistent run. There is no divergent one-shot request path.
 `serve` is the production persistent NDJSON mode. Stdout is protocol-only and stderr is for logs:
 
 ```sh
-/path/to/curve-fx-arb-harness/build/native/arb_evaluator_ld serve
+/path/to/curve-fx-arb-harness/build/native/arb_evaluator_ld serve --workers 1
 ```
 
-The orchestrator starts `serve`, consumes `curve_fx_eval_v1` `hello`, opens one immutable attested session, submits `evaluate_batch` frames, and closes the session/shuts down the process. It uses one admitted batch at a time and canonical ordinal ordering.
+The evaluator defaults to one worker per process so an orchestrator can allocate processes without hidden thread oversubscription. Pass `--workers N` to assign more workers to a process; `N` must not exceed detected hardware concurrency and the effective count is logged to stderr at startup. The v1 `hello` frame remains unchanged for strict existing clients. The orchestrator starts `serve`, consumes `curve_fx_eval_v1` `hello`, opens one immutable attested session, submits `evaluate_batch` frames, and closes the session/shuts down the process. It uses one admitted batch at a time and canonical ordinal ordering.
 
 ## Protocol and artifact contract
 
-Every frame is one UTF-8 JSON object terminated by a newline. The lifecycle is `hello` -> `open_session`/`session_ready` -> one or more `evaluate_batch`/`batch_result` exchanges -> `close_session` and `shutdown`. Session paths and expected SHA-256 digests are checked before scenario/template data is loaded. `metric_projection` (`summary` or `full`) controls returned raw metric detail; `observation.kind` (`summary` or `full_trace`) controls trace capture and is independent of economic identity.
+Every frame is one UTF-8 JSON object terminated by a newline. The lifecycle is `hello` -> `open_session`/`session_ready` -> one or more `evaluate_batch`/`batch_result` exchanges -> `close_session` and `shutdown`. One manifest admits exactly one `resolved_spec.scenario`; the response retains a one-element `scenarios` array for protocol stability. Session paths and expected SHA-256 digests are checked before scenario/template data is loaded. `pool_index` is included in the session config hash and fingerprint. `metric_projection` (`summary` or `full`) controls returned raw metric detail; `observation.kind` (`summary` or `full_trace`) controls trace capture and is independent of economic identity.
 
 Full observation requires a relative artifact directory and writes atomic, run-contained sidecars whose names include the economic fingerprint and content digest. Returned artifact paths and SHA-256 digests are attested by the response. Absolute paths, `..` traversal, and symlink escapes outside the evaluator working directory are rejected. The evaluator returns raw metrics and economic fingerprints; objective scoring and eligibility gates remain in the orchestrator.
 
@@ -92,6 +92,6 @@ See [`protocol/protocol_spec.md`](protocol/protocol_spec.md) for frame schemas a
 
 ## Ownership, provenance, and private data
 
-The harness owns feed parsers, `EventSoA`, arbitrage/user flow, donations, the optional state-mutating YieldBasis 2L releverage model, keepers, metrics, summary/full traces, compiled-policy identity, and the evaluator executable. `yb_releverage=true` selects that sole YieldBasis mode; `yb_releverage_fee` and `yb_cash_multiplier` configure it. The pool owns the installed pool SDK; the orchestrator owns input manifests, data verification, scoring, run artifacts, execution backends, replay, and plots.
+The harness owns feed parsers, `EventSoA`, arbitrage/user flow, donations, the optional YieldBasis 2L model, keepers, metrics, summary/full traces, compiled-policy identity, and the evaluator executable. `yb_mode` selects `off`, metrics-only `passive`, or state-mutating `active_2l`; legacy `yb_releverage=true` maps to `active_2l`. `yb_releverage_fee` and `yb_cash_multiplier` configure enabled modes. The pool owns the installed pool SDK; the orchestrator owns input manifests, data verification, scoring, run artifacts, execution backends, replay, and plots.
 
 Record pool/harness/policy revisions and hashes, compiler/build/numeric mode, scenario/template/input hashes, candidate request, economic configuration, `MetricProjection`, and protocol version for every evaluation. Production data may be Git-LFS material or private fixtures; acquire it through the repository's authorized channel, run orchestrator data verification, and do not assume redistribution or license rights. Do not copy historical binaries, generated runs, or obsolete checkout paths into a build.
