@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from curve_fx_harness_client.client import EvaluatorClient
 from curve_fx_harness_client.exceptions import (
+    AttestationError,
     IdentityMismatchError,
     ProtocolViolationError,
 )
@@ -171,15 +172,33 @@ def test_remote_launch_uses_canonical_frames_without_local_files(
             session_id="test_session",
             template_path="/shared/template.json",
             manifest_path="/shared/manifest.json",
-            template_sha256="a" * 64,
-            manifest_sha256="b" * 64,
         )
 
     assert popen.call_args.args[0] == launch
     request = json.loads(mock_proc.stdin.write.call_args_list[0].args[0])
     assert request["type"] == "open_session"
     assert request["template_path"] == "/shared/template.json"
-    assert request["manifest_sha256"] == "b" * 64
+    assert "template_sha256" not in request
+    assert "manifest_sha256" not in request
+
+
+def test_local_explicit_hash_mismatch_still_fails(mock_hello_data, tmp_path):
+    (tmp_path / "template.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "manifest.json").write_text("{}", encoding="utf-8")
+    client = EvaluatorClient(executable_path="arb_evaluator_f64", work_dir=tmp_path)
+    mock_proc = MagicMock()
+    mock_proc.stdout.readline.return_value = json.dumps(mock_hello_data) + "\n"
+    mock_proc.stderr = io.StringIO("")
+    mock_proc.poll.return_value = None
+
+    with patch("subprocess.Popen", return_value=mock_proc):
+        with pytest.raises(AttestationError, match="Template hash mismatch"):
+            client.open_session(
+                session_id="test_session",
+                template_path="template.json",
+                manifest_path="manifest.json",
+                template_sha256="0" * 64,
+            )
 
 
 @pytest.mark.parametrize(

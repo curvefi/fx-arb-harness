@@ -21,6 +21,17 @@ void require(bool condition, const char* msg) {
 } // namespace
 
 int main() {
+    using Slippage = arb::harness::SlippageProbes<double>;
+    static_assert(
+        Slippage::N_SIZES == 3 && Slippage::SIZE_FRACS[0] == 0.01 &&
+        Slippage::SIZE_FRACS[1] == 0.05 && Slippage::SIZE_FRACS[2] == 0.10);
+
+    Slippage probes{};
+    probes.sample(2, 10, 0.03, 0.06);
+    probes.accumulate_previous(2, 20);
+    require(near(probes.tw_slippage(2), 0.045), "10% slippage probe mismatch");
+    require(near(arb::harness::tvl_growth(100.0, 125.0), 1.25), "tvl_growth ratio mismatch");
+
     arb::harness::MultiScalePositiveGrowthConcentration<double> growth;
     constexpr uint64_t day = 24ULL * 60ULL * 60ULL;
 

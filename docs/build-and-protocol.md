@@ -69,11 +69,10 @@ Stdout is reserved for one JSON object per line. Send logs and diagnostics to st
 
 A full-trace sidecar response carries attested paths and SHA-256 values. The evaluator enforces path containment, hash matching, exact compiled-policy parameter count, unique candidate IDs/ordinals, and at most one admitted batch at a time. The effective `pool_index` participates in the session config hash and fingerprint. Every real-valued request input materializes once as a finite IEEE-754 binary64 value. Long-double builds widen that value for arithmetic; they do not recover decimal precision beyond the wire boundary. Candidate parameters and pool overrides are canonicalized from the materialized binary64 value, so equivalent spellings have one identity and adjacent binary64 values remain distinct. Projection and observation level do not change the economic fingerprint.
 
-## 3. Short-lived smoke mode
+## 3. One-batch smoke
 
-Use one `serve` lifecycle for a single-candidate smoke. Grid, optimization, and
-shiftclick therefore retain the same candidate identity, session attestation,
-scoring, and artifact contract whether a process handles one batch or many.
+Use the same `serve` lifecycle for a single-candidate smoke as for repeated
+batches. The evaluator has no separate one-shot execution path.
 
 ## 4. Python client boundary
 

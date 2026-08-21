@@ -168,7 +168,7 @@ PoolResult<T> run_single_pool(
 
     auto t_start = std::chrono::high_resolution_clock::now();
     try {
-        const uint64_t requested_start_ts = pool_init.start_ts;
+        const uint64_t requested_start_ts = cfg.start_ts ? cfg.start_ts : pool_init.start_ts;
         const bool restore_historical = pool_init.historical_state.enabled;
         const auto anchor = restore_historical
             ? InitialMarketAnchor<T>{

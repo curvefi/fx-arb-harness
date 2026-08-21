@@ -331,14 +331,7 @@ class EvaluatorClient:
                         actual_sha256=computed_man_hash,
                     )
             else:
-                if not template_sha256 or not manifest_sha256:
-                    raise AttestationError(
-                        "Remote inputs require explicit template and manifest SHA-256 digests",
-                        path=f"{template_path};{manifest_path}",
-                        expected_sha256="two explicit SHA-256 digests",
-                    )
-                computed_tpl_hash = template_sha256
-                computed_man_hash = manifest_sha256
+                computed_tpl_hash = computed_man_hash = None
 
             req_id = self._next_request_id("session")
             frame = OpenSessionFrame(
@@ -374,7 +367,7 @@ class EvaluatorClient:
                 yb_cash_multiplier=yb_cash_multiplier,
             )
 
-            resp_data = self._transact(frame.model_dump())
+            resp_data = self._transact(frame.model_dump(exclude_none=True))
             session_ready = SessionReadyFrame.model_validate(resp_data)
             self._current_session_id = session_id
             logger.info(

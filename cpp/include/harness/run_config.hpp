@@ -25,6 +25,7 @@ template <typename T>
 struct RunConfig {
     T min_swap_frac{T(1e-6)};
     T max_swap_frac{T(1.0)};
+    uint64_t start_ts{0};
     uint64_t dustswap_freq_s{3600};
     bool dustswap_random{false};
     uint64_t dustswap_dynamic_freq_s{0};

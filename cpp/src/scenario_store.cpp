@@ -43,7 +43,7 @@ bool is_safe_scenario_id(const std::string& value) {
 } // namespace
 
 template <typename T>
-void ScenarioStore<T>::load_from_manifest(
+void ScenarioStore<T>::load_from_session_manifest(
     const std::string& manifest_path,
     const std::string& template_path,
     const ScenarioLoadOptions& opts

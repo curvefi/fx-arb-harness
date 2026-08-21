@@ -2,6 +2,7 @@
 #include "curve_fx_evaluator/evaluator.hpp"
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -24,13 +25,12 @@ bool worker_pool_initialized = false;
 // One pool per process (contract: "One fixed worker pool per process").
 // Threads are created once and persist for the lifetime of the process. Each
 // batch is tagged with a monotonically increasing generation; each active
-// worker waits on its own condition variable, captures its non-empty chunk
-// exactly once per generation, and marks itself done once. `workers_remaining_`
-// (not total-job subtraction) is the completion barrier, so a fast worker can
-// never loop the same batch twice. Jobs are partitioned into contiguous
-// deterministic chunks, and every job writes only its own preassigned
-// [candidate][scenario] result slot, keeping output canonical regardless of
-// schedule.
+// worker waits on its own condition variable, captures the batch exactly once
+// per generation, and marks itself done once. `workers_remaining_` (not
+// total-job subtraction) is the completion barrier, so a fast worker can never
+// loop the same batch twice. Jobs claim unique indices from `next_job_`, and
+// every job writes only its own preassigned [candidate][scenario] result slot,
+// keeping output canonical regardless of schedule.
 // ============================================================================
 class WorkerPool {
 public:
@@ -53,7 +53,7 @@ public:
 
 
     // Runs `total_jobs` indices [0, total_jobs) once each. Only the workers
-    // owning non-empty contiguous ranges are notified for this generation.
+    // participating in this generation are notified.
     void run_jobs(size_t total_jobs, const std::function<void(size_t)>& fn) {
         if (total_jobs == 0) return;
         std::unique_lock<std::mutex> gate(mu_);
@@ -65,6 +65,7 @@ public:
 
         fn_ = &fn;
         total_ = total_jobs;
+        next_job_.store(0, std::memory_order_relaxed);
         active_workers_ = std::min(total_jobs, workers_.size());
         workers_remaining_ = active_workers_;
         const uint64_t gen = ++generation_;
@@ -101,13 +102,12 @@ private:
             if (stop_) return;
 
             last_generation = generation_;
-            const size_t active = active_workers_;
-            const size_t begin = id * total_ / active;
-            const size_t end = (id + 1) * total_ / active;
             const std::function<void(size_t)>* fn = fn_;
             lock.unlock();
 
-            for (size_t job = begin; job < end; ++job) {
+            for (size_t job = next_job_.fetch_add(1, std::memory_order_relaxed);
+                 job < total_;
+                 job = next_job_.fetch_add(1, std::memory_order_relaxed)) {
                 (*fn)(job);
             }
 
@@ -127,6 +127,7 @@ private:
     std::vector<std::thread> workers_;
     const std::function<void(size_t)>* fn_{nullptr};
     size_t total_{0};
+    std::atomic<size_t> next_job_{0};
     size_t active_workers_{0};
     uint64_t generation_{0};
     size_t workers_remaining_{0};
@@ -265,7 +266,7 @@ void extract_metrics_from_pool_result(
 
     const double tvl_start = static_cast<double>(res.tvl_start);
     const double tvl_end = static_cast<double>(res.balances[0] + res.balances[1] * res.price_scale);
-    m["tvl_growth"] = (tvl_start > 0.0) ? (tvl_end / tvl_start - 1.0) : -1.0;
+    m["tvl_growth"] = arb::harness::tvl_growth(tvl_start, tvl_end);
 
     m["keeper_successful_submissions"] = static_cast<double>(rm.keeper_successful_submissions);
     m["fixed_keeper_ticks"] = static_cast<double>(rm.fixed_keeper_ticks);
@@ -320,8 +321,6 @@ void execute_scenario_job(
                     "Native-default build enforces the native policy; requested non-native policy kind is prohibited"
                 );
             }
-            pool_init.policy_kind = arb::pools::twocrypto_fx::PolicyKind::TwocryptoPolicy;
-            pool_init.policy_config.kind = arb::pools::twocrypto_fx::PolicyKind::TwocryptoPolicy;
         }
 
         const std::size_t expected_policy_params =
@@ -348,6 +347,7 @@ void execute_scenario_job(
         arb::harness::RunConfig<RealT> run_cfg;
         run_cfg.min_swap_frac = session_cfg.min_swap_frac;
         run_cfg.max_swap_frac = session_cfg.max_swap_frac;
+        run_cfg.start_ts = session_cfg.start_ts;
         run_cfg.dustswap_freq_s = session_cfg.dustswap_freq_s;
         run_cfg.dustswap_random = session_cfg.dustswap_random;
         run_cfg.dustswap_dynamic_freq_s = session_cfg.dustswap_dynamic_freq_s;
@@ -503,8 +503,8 @@ BatchEvaluationResult evaluate_batch_candidates(
         // One fixed process-lifetime pool. Both summary and full-trace jobs
         // are submitted through the same pool: TraceArena::acquire() holds the
         // arena mutex for the duration of a full-trace run, which keeps at most
-        // one trace job executing at any instant (one in flight) while summary
-        // jobs still use the deterministic static partition above.
+        // one trace job executing at any instant (one in flight); each job
+        // still writes its canonical candidate/scenario result slot below.
         auto& pool = WorkerPool::global();
         pool.run_jobs(total_jobs, [&](size_t job_idx) {
             const size_t cand_idx = job_idx / n_scenarios;

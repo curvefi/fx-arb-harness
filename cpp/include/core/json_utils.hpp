@@ -190,6 +190,35 @@ inline uint64_t get_u64_opt(const boost::json::object& obj, const char* key, uin
     return fallback;
 }
 
+template <typename UInt>
+bool parse_bounded_uint_field(
+    const boost::json::object& obj,
+    const char* key,
+    UInt fallback,
+    UInt& result
+) {
+    static_assert(std::is_integral_v<UInt> && std::is_unsigned_v<UInt>);
+    const auto* value = obj.if_contains(key);
+    if (value == nullptr) {
+        result = fallback;
+        return true;
+    }
+
+    uint64_t parsed = 0;
+    if (value->is_uint64()) {
+        parsed = value->as_uint64();
+    } else if (value->is_int64() && value->as_int64() >= 0) {
+        parsed = static_cast<uint64_t>(value->as_int64());
+    } else {
+        return false;
+    }
+    if (parsed > static_cast<uint64_t>(std::numeric_limits<UInt>::max())) {
+        return false;
+    }
+    result = static_cast<UInt>(parsed);
+    return true;
+}
+
 inline double get_double_opt(const boost::json::object& obj, const char* key, double fallback) {
     auto it = obj.find(key);
     if (it == obj.end()) return fallback;

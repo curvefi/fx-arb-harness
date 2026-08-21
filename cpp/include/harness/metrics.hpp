@@ -1017,12 +1017,18 @@ struct TimeWeightedMetrics {
     }
 };
 
+inline double tvl_growth(double tvl_start, double tvl_end) {
+    return tvl_start > 0.0 ? tvl_end / tvl_start : -1.0;
+}
+
 template <typename T>
 struct SlippageProbes {
     using F = MetricF<T>;
-    static constexpr size_t N_SIZES = 1;
+    static constexpr size_t N_SIZES = 3;
     static constexpr double SIZE_FRACS[N_SIZES] = {
         0.01,
+        0.05,
+        0.10,
     };
 
     std::array<F, N_SIZES> tw_real_s01_sum_dt{};

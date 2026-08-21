@@ -2,7 +2,9 @@
 
 ## 1. Overview
 
-`curve_fx_eval_v1` is a line-delimited JSON (NDJSON) streaming protocol between simulation coordinators (e.g. `curve-fx-optimization`, grid search runners, TMRBCD optimizers, shiftclick replay tools) and the high-performance evaluator executable (`arb_evaluator_ld`).
+`curve_fx_eval_v1` is a line-delimited JSON (NDJSON) streaming protocol between
+a simulation client and the high-performance evaluator executable
+(`arb_evaluator_ld`).
 
 Stdout is strictly reserved for protocol NDJSON frames. All logging, progress updates, and diagnostic messages MUST be directed to stderr.
 
@@ -101,7 +103,7 @@ These fields are not added to `hello`, because v1 response models may forbid
 unknown fields.
 
 ### 3.2 Session Initialization: `open_session`
-The client sends an `open_session` frame with file paths and expected SHA-256 hashes. The manifest is the single authority for market files and has one accepted envelope: `schema_version = fxsim_manifest_v1`, `run_kind = session`, a non-empty `run_id`, and exactly one `resolved_spec.scenario`. The scenario contains only `id`, optional candle bounds/filter, a non-empty `market_files` array of `{path, kind, sha256}` objects (where `kind` is `market` or `chainlink`), and optional `yb_mode`/`yb_releverage` declarations. The evaluator rejects unknown fields and validates the template, manifest, candle, and optional Chainlink hashes before admitting the session. `pool_index` selects the effective template entry and participates in both `session_config_sha256` and `session_fingerprint`.
+The client sends an `open_session` frame with file paths and optional expected SHA-256 hashes. When supplied, each hash must be a 64-character hex digest and must match; omitted hashes are computed by the evaluator and are not an admission failure. The manifest is the single authority for market files and has one accepted envelope: `schema_version = fxsim_manifest_v1`, `run_kind = session`, a non-empty `run_id`, and exactly one `resolved_spec.scenario`. The scenario contains only `id`, optional candle bounds/filter, a non-empty `market_files` array of `{path, kind, sha256}` objects (where `kind` is `market` or `chainlink`), and optional `yb_mode`/`yb_releverage` declarations. The evaluator rejects unknown fields and validates the template, manifest, candle, and optional Chainlink hashes before admitting the session. `pool_index` selects the effective template entry and participates in both `session_config_sha256` and `session_fingerprint`.
 
 `yb_mode` selects the YieldBasis model and must be one of:
 - `"off"` — no YieldBasis: the yb metric family stays empty.
@@ -169,12 +171,17 @@ Response (`session_ready`):
 }
 ```
 
+`metric_schema_sha256` is the SHA-256 of canonical UTF-8 JSON for
+`{metric_schema, ordered metric_fields}`.
+
 ### 3.3 Batch Evaluation: `evaluate_batch`
 
 `metric_projection` is a required top-level request field and is independent of trace capture. Clients MUST send either `"summary"` or `"full"`; omission is rejected.
 
-- `summary`: return aggregate `metrics` and `metrics_vec`; `scenario_results` is an empty array.
+- `summary`: return aggregate `metrics`; `scenario_results` is an empty array.
 - `full`: return the same aggregate metrics plus the admitted scenario's single `scenario_results` row.
+
+The legacy `metrics_vec` field is omitted from new responses; clients may keep it optional for rolling compatibility.
 
 It MUST NOT appear inside `observation`; `observation.kind` only selects trace capture (`summary` or `full_trace`).
 
@@ -222,7 +229,6 @@ Response (`batch_result`) echoes the selected projection:
       "status": "ok",
       "economic_fingerprint": "8d9e2a...",
       "metrics": {"vp": 1.0452, "apy_net_gm": 0.158, "trades": 450},
-      "metrics_vec": [1.0452, 0.158, 450],
       "scenario_results": [],
       "artifacts": null
     }

@@ -88,8 +88,7 @@ Decision<T> decide_trade(
     const std::array<T, 2> xp_bal = xp_hint != nullptr
         ? *xp_hint
         : fx::pool_xp_current(pool);
-    const bool native_fee_mode =
-        (pool.policy.kind == fx::PolicyKind::None);
+    const bool native_fee_mode = pool.uses_native_fee_model();
     const bool fee_ordered = !(pool.out_fee < pool.mid_fee);
     const T away_floor = fee_ordered ? fee_pool : fee_floor;
     const T floor_fee_01 = (!native_fee_mode || xp_bal[0] < xp_bal[1]) ? fee_floor : away_floor;

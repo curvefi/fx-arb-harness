@@ -214,10 +214,13 @@ EventLoopResult<T> run_event_loop(
     };
 
     auto apply_donation = [&](std::size_t, uint64_t ts) {
+        PoolTransactionSnapshot<Pool> transaction_snapshot(pool);
         auto don_res = make_donation_ex(pool, dcfg, ts, m);
         if (don_res.success) {
             invalidate_edge_inputs();
             action_logger.log_donation(ts, don_res, dcfg);
+        } else {
+            transaction_snapshot.restore(pool);
         }
     };
 

@@ -76,7 +76,7 @@ static constexpr std::string_view SELECTED_POLICY_ID =
     SelectedPolicy::DESCRIPTOR.name;
 static_assert(
     SELECTED_POLICY_PARAM_COUNT <=
-        arb::pools::twocrypto_fx::PolicyConfig<RealT>{}.params.size(),
+        arb::pools::twocrypto_fx::PolicyConfig<RealT>::MAX_POLICY_PARAMS,
     "compiled policy parameter count exceeds the pool ABI capacity"
 );
 
@@ -132,6 +132,28 @@ static const std::vector<std::string> CANONICAL_METRIC_FIELDS = {
     "tvl_growth",
     "keeper_successful_submissions", "fixed_keeper_ticks"
 };
+
+const json::object& canonical_metric_schema() {
+    static const json::object schema = [] {
+        json::array fields;
+        for (const auto& field : CANONICAL_METRIC_FIELDS) {
+            fields.push_back(json::value(field));
+        }
+        return json::object{
+            {"metric_schema", "twocrypto-summary-v1"},
+            {"metric_fields", std::move(fields)},
+        };
+    }();
+    return schema;
+}
+
+const std::string& canonical_metric_schema_sha256() {
+    static const std::string digest = [] {
+        const std::string encoded = arb::canonical_json(canonical_metric_schema());
+        return arb::core::sha256_bytes(encoded);
+    }();
+    return digest;
+}
 
 json::value normalize_pool_override_identity_value(
     const json::value& value,
@@ -228,6 +250,7 @@ std::string compute_session_config_sha256(
     value["pool_index"] = pool_index;
     value["min_swap_frac"] = arb::canonical_binary64_string(cfg.min_swap_frac);
     value["max_swap_frac"] = arb::canonical_binary64_string(cfg.max_swap_frac);
+    value["start_ts"] = cfg.start_ts;
     value["dustswap_freq_s"] = cfg.dustswap_freq_s;
     value["dustswap_random"] = cfg.dustswap_random;
     value["dustswap_dynamic_freq_s"] = cfg.dustswap_dynamic_freq_s;
@@ -386,13 +409,9 @@ json::object make_hello_frame(const std::string& bin_hash) {
     yb_modes.push_back("active_2l");
     hello["yb_modes"] = yb_modes;
 
-    hello["metric_schema"] = "twocrypto-summary-v1";
-
-    json::array fields;
-    for (const auto& f : CANONICAL_METRIC_FIELDS) {
-        fields.push_back(json::value(f));
-    }
-    hello["metric_fields"] = fields;
+    const auto& metric_schema = canonical_metric_schema();
+    hello["metric_schema"] = metric_schema.at("metric_schema");
+    hello["metric_fields"] = metric_schema.at("metric_fields");
 
     json::object limits;
     limits["max_frame_bytes"] = MAX_FRAME_BYTES;
@@ -477,30 +496,6 @@ bool is_valid_hex64(std::string_view s) {
         }
     }
     return true;
-}
-
-bool parse_size_t_field(
-    const json::object& object,
-    const char* key,
-    size_t fallback,
-    size_t& result
-) {
-    const auto* value = object.if_contains(key);
-    if (value == nullptr) {
-        result = fallback;
-        return true;
-    }
-    if (value->is_uint64()) {
-        const uint64_t parsed = value->as_uint64();
-        if (parsed > std::numeric_limits<size_t>::max()) return false;
-        result = static_cast<size_t>(parsed);
-        return true;
-    }
-    if (value->is_int64() && value->as_int64() >= 0) {
-        result = static_cast<size_t>(value->as_int64());
-        return true;
-    }
-    return false;
 }
 
 std::optional<std::string> unknown_field(
@@ -685,13 +680,13 @@ private:
             return;
         }
 
-        if (!is_valid_hex64(tpl_hash)) {
+        if (!tpl_hash.empty() && !is_valid_hex64(tpl_hash)) {
             write_frame(std::cout, make_error_frame(req_id, "session", "INVALID_ARGUMENT",
                 "template_sha256 must be a 64-character hex SHA-256 digest"));
             return;
         }
 
-        if (!is_valid_hex64(man_hash)) {
+        if (!man_hash.empty() && !is_valid_hex64(man_hash)) {
             write_frame(std::cout, make_error_frame(req_id, "session", "INVALID_ARGUMENT",
                 "manifest_sha256 must be a 64-character hex SHA-256 digest"));
             return;
@@ -703,7 +698,7 @@ private:
             return;
         }
         const std::string actual_tpl_hash = arb::core::sha256_file(tpl_path);
-        if (actual_tpl_hash != tpl_hash) {
+        if (!tpl_hash.empty() && actual_tpl_hash != tpl_hash) {
             write_frame(std::cout, make_error_frame(req_id, "session", "ATTESTATION_FAILED",
                 "Template SHA-256 mismatch: expected " + tpl_hash + ", got " + actual_tpl_hash));
             return;
@@ -715,17 +710,37 @@ private:
             return;
         }
         const std::string actual_man_hash = arb::core::sha256_file(man_path);
-        if (actual_man_hash != man_hash) {
+        if (!man_hash.empty() && actual_man_hash != man_hash) {
             write_frame(std::cout, make_error_frame(req_id, "session", "ATTESTATION_FAILED",
                 "Manifest SHA-256 mismatch: expected " + man_hash + ", got " + actual_man_hash));
             return;
         }
 
         size_t pool_index = 0;
-        if (!parse_size_t_field(req, "pool_index", 0, pool_index)) {
+        size_t max_candles = 0;
+        uint64_t start_ts = 0;
+        uint64_t end_ts = 0;
+        uint64_t dustswap_freq_s = 0;
+        uint64_t dustswap_dynamic_freq_s = 0;
+        uint64_t dustswap_dynamic_heartbeat_s = 0;
+        uint64_t dustswap_commit_clock_freq_s = 0;
+        uint64_t user_swap_freq_s = 0;
+        const auto parse_integer = [&](const char* key, auto fallback, auto& out) {
+            if (arb::parse_bounded_uint_field(req, key, fallback, out)) return true;
             write_frame(std::cout, make_error_frame(
                 req_id, "session", "INVALID_ARGUMENT",
-                "pool_index must be a non-negative integer"));
+                std::string(key) + " must be a non-negative integer in range"));
+            return false;
+        };
+        if (!parse_integer("pool_index", size_t{0}, pool_index) ||
+            !parse_integer("n_candles", size_t{0}, max_candles) ||
+            !parse_integer("start_time", uint64_t{0}, start_ts) ||
+            !parse_integer("end_time", uint64_t{0}, end_ts) ||
+            !parse_integer("dustswap_freq_s", uint64_t{3600}, dustswap_freq_s) ||
+            !parse_integer("dustswap_dynamic_freq_s", uint64_t{0}, dustswap_dynamic_freq_s) ||
+            !parse_integer("dustswap_dynamic_heartbeat_s", uint64_t{0}, dustswap_dynamic_heartbeat_s) ||
+            !parse_integer("dustswap_commit_clock_freq_s", uint64_t{0}, dustswap_commit_clock_freq_s) ||
+            !parse_integer("user_swap_freq_s", uint64_t{0}, user_swap_freq_s)) {
             return;
         }
 
@@ -733,36 +748,35 @@ private:
             auto store = std::make_shared<curve_fx::evaluator::ScenarioStore<RealT>>();
             curve_fx::evaluator::ScenarioLoadOptions opts{};
             opts.pool_index = pool_index;
-            opts.max_candles = static_cast<size_t>(arb::get_double_opt(req, "n_candles", 0.0));
-            opts.start_ts = static_cast<uint64_t>(arb::get_double_opt(req, "start_time", 0.0));
-            opts.end_ts = static_cast<uint64_t>(arb::get_double_opt(req, "end_time", 0.0));
+            opts.max_candles = max_candles;
+            opts.start_ts = start_ts;
+            opts.end_ts = end_ts;
             opts.candle_filter_pct = arb::get_double_opt(req, "candle_filter", 0.0);
 
             std::cerr << "[evaluator] Loading scenarios from manifest: " << man_path << " with template: " << tpl_path << "\n";
-            store->load_from_manifest(man_path, tpl_path, opts);
+            store->load_from_session_manifest(man_path, tpl_path, opts);
 
             curve_fx::evaluator::SessionConfig<RealT> cfg{};
             cfg.min_swap_frac = static_cast<RealT>(arb::get_double_opt(req, "min_swap", 1e-6));
             cfg.max_swap_frac = static_cast<RealT>(arb::get_double_opt(req, "max_swap", 1.0));
-            cfg.dustswap_freq_s = static_cast<uint64_t>(arb::get_double_opt(req, "dustswap_freq_s", 3600));
+            cfg.start_ts = start_ts;
+            cfg.dustswap_freq_s = dustswap_freq_s;
             cfg.dustswap_random = req.if_contains("dustswap_random") && req.at("dustswap_random").as_bool();
-            cfg.dustswap_dynamic_freq_s = static_cast<uint64_t>(arb::get_double_opt(req, "dustswap_dynamic_freq_s", 0));
+            cfg.dustswap_dynamic_freq_s = dustswap_dynamic_freq_s;
             cfg.dustswap_dynamic_gap_enabled =
                 req.if_contains("dustswap_dynamic_gap_enabled") &&
                 req.at("dustswap_dynamic_gap_enabled").as_bool();
             cfg.dustswap_dynamic_gap_bps = static_cast<RealT>(
                 arb::get_double_opt(req, "dustswap_dynamic_gap_bps", 0.0));
-            cfg.dustswap_dynamic_heartbeat_s = static_cast<uint64_t>(
-                arb::get_double_opt(req, "dustswap_dynamic_heartbeat_s", 0.0));
-            cfg.dustswap_commit_clock_freq_s = static_cast<uint64_t>(
-                arb::get_double_opt(req, "dustswap_commit_clock_freq_s", 0.0));
+            cfg.dustswap_dynamic_heartbeat_s = dustswap_dynamic_heartbeat_s;
+            cfg.dustswap_commit_clock_freq_s = dustswap_commit_clock_freq_s;
             cfg.policy_keeper_enabled =
                 req.if_contains("policy_keeper_enabled") &&
                 req.at("policy_keeper_enabled").as_bool();
             cfg.allow_hybrid_keeper =
                 req.if_contains("allow_hybrid_keeper") &&
                 req.at("allow_hybrid_keeper").as_bool();
-            cfg.user_swap_freq_s = static_cast<uint64_t>(arb::get_double_opt(req, "user_swap_freq_s", 0));
+            cfg.user_swap_freq_s = user_swap_freq_s;
             cfg.user_swap_size_frac = static_cast<RealT>(arb::get_double_opt(req, "user_swap_size_frac", 0.01));
             cfg.user_swap_thresh = static_cast<RealT>(arb::get_double_opt(req, "user_swap_thresh", 0.05));
             cfg.enable_slippage_probes = !(req.if_contains("disable_slippage_probes") && req.at("disable_slippage_probes").as_bool());
@@ -837,7 +851,7 @@ private:
             resp["scenario_set_sha256"] = session_->scenario_set_sha256;
             resp["session_fingerprint"] = session_->session_fingerprint;
             resp["session_config_sha256"] = session_->session_config_sha256;
-            resp["metric_schema_sha256"] = arb::core::sha256_bytes("twocrypto-summary-v1");
+            resp["metric_schema_sha256"] = canonical_metric_schema_sha256();
 
             write_frame(std::cout, resp);
             std::cerr << "[evaluator] Session '" << session_id << "' initialized successfully with "
@@ -903,9 +917,8 @@ private:
             return;
         }
 
-        // No candidate-count cap: the 4 MiB request-frame guard bounds the
-        // batch. Cluster grids batch up to chunk-size candidates (e.g. 1024)
-        // to saturate blade worker pools.
+        // The frame-size guard bounds both parsed input and the corresponding
+        // result allocation; callers choose batch size within that limit.
 
         // Observation options (trace capture)
         curve_fx::evaluator::ObservationSpec obs_spec{};
@@ -937,16 +950,16 @@ private:
                     "observation.kind must be 'summary' or 'full_trace'"));
                 return;
             }
-            const double trace_interval = arb::get_double_opt(
-                obs_obj, "trace_interval", 1.0);
-            if (!std::isfinite(trace_interval) || trace_interval < 1.0 ||
-                std::floor(trace_interval) != trace_interval) {
+            size_t trace_interval = 1;
+            if (!arb::parse_bounded_uint_field(
+                    obs_obj, "trace_interval", size_t{1}, trace_interval) ||
+                trace_interval == 0) {
                 write_frame(std::cout, make_error_frame(
-                    req_id, "protocol", "INVALID_OBSERVATION",
+                    req_id, "protocol", "INVALID_ARGUMENT",
                     "observation.trace_interval must be a positive integer"));
                 return;
             }
-            obs_spec.trace_interval = static_cast<size_t>(trace_interval);
+            obs_spec.trace_interval = trace_interval;
             if (obs_obj.if_contains("trace_actions") &&
                 !obs_obj.at("trace_actions").is_bool()) {
                 write_frame(std::cout, make_error_frame(
@@ -1003,23 +1016,16 @@ private:
                 return;
             }
             curve_fx::evaluator::EvaluationCandidate<RealT> cand{};
-            const auto* ordinal_value = c_obj.if_contains("ordinal");
-            double ordinal = -1.0;
-            if (ordinal_value != nullptr) {
-                if (ordinal_value->is_int64()) {
-                    ordinal = static_cast<double>(ordinal_value->as_int64());
-                } else if (ordinal_value->is_uint64()) {
-                    ordinal = static_cast<double>(ordinal_value->as_uint64());
-                }
-            }
-            if (ordinal < 0.0 || ordinal > std::numeric_limits<uint32_t>::max() ||
-                std::floor(ordinal) != ordinal) {
+            uint32_t ordinal = 0;
+            if (!c_obj.if_contains("ordinal") ||
+                !arb::parse_bounded_uint_field(
+                    c_obj, "ordinal", uint32_t{0}, ordinal)) {
                 write_frame(std::cout, make_error_frame(
-                    req_id, "candidate", "INVALID_ORDINAL",
+                    req_id, "candidate", "INVALID_ARGUMENT",
                     "candidate ordinal must be an unsigned 32-bit integer"));
                 return;
             }
-            cand.ordinal = static_cast<uint32_t>(ordinal);
+            cand.ordinal = ordinal;
             cand.candidate_id = arb::get_string_opt(c_obj, "candidate_id", "");
 
             if (!is_safe_identifier(cand.candidate_id)) {
@@ -1149,21 +1155,17 @@ private:
                 r["error"] = res.error_message;
             }
 
-            // Raw metrics dictionary and canonical vector
+            // Raw metrics dictionary in canonical field order.
             json::object metrics_obj;
-            json::array metrics_vec;
             for (const auto& field_name : CANONICAL_METRIC_FIELDS) {
                 auto it = res.aggregate_metrics.find(field_name);
                 if (it != res.aggregate_metrics.end()) {
                     metrics_obj[field_name] = it->second;
-                    metrics_vec.push_back(it->second);
                 } else {
                     metrics_obj[field_name] = -1.0;
-                    metrics_vec.push_back(-1.0);
                 }
             }
             r["metrics"] = metrics_obj;
-            r["metrics_vec"] = metrics_vec;
 
             // Scenario results: populated only when metric_projection is "full"
             json::array sc_results;

@@ -1,6 +1,6 @@
 # curve-fx-arb-harness
 
-`curve-fx-arb-harness` owns one transport-free C++17 economic simulation loop and the `curve_fx_eval_v1` evaluator protocol. It consumes an installed `twocrypto::pool`; it does not embed a pool implementation or own grids, optimization, scoring, cluster execution, or plotting. The `curve-fx-optimization` repository invokes this evaluator.
+`curve-fx-arb-harness` owns one transport-free C++17 economic simulation loop and the `curve_fx_eval_v1` evaluator protocol. It consumes an installed `twocrypto::pool`; it does not embed a pool implementation or own client-side scoring or artifact presentation.
 
 ## Build prerequisites and independent setup
 

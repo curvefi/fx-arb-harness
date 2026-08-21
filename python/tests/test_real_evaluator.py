@@ -217,6 +217,63 @@ def _economic_metrics(result) -> dict[str, object]:
     return {key: value for key, value in result.metrics.items() if key != "elapsed_ms"}
 
 
+def test_real_persistent_batches_match_single_candidate_results(tmp_path: Path) -> None:
+    assert EVALUATOR is not None
+    template, _, manifest = _write_inputs(tmp_path)
+    client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
+    try:
+        hello = client.start()
+        policy_params = json.loads(os.environ.get("CURVE_FX_POLICY_PARAMS", "[]"))
+        assert len(policy_params) == hello.evaluator_identity.policy_parameter_count
+        _open(client, template, manifest, "batch-order")
+
+        single = client.evaluate_batch([
+            CandidateSpec(
+                ordinal=7,
+                candidate_id="single",
+                policy_params=policy_params,
+            )
+        ]).results[0]
+        batch = client.evaluate_batch([
+            CandidateSpec(
+                ordinal=7,
+                candidate_id="batched",
+                policy_params=policy_params,
+            ),
+            CandidateSpec(
+                ordinal=3,
+                candidate_id="other",
+                policy_params=policy_params,
+            ),
+        ])
+
+        assert [result.ordinal for result in batch.results] == [3, 7]
+        batched = next(result for result in batch.results if result.ordinal == 7)
+        assert batched.economic_fingerprint == single.economic_fingerprint
+        assert _economic_metrics(batched) == _economic_metrics(single)
+    finally:
+        client.shutdown()
+
+
+def test_real_evaluator_rejects_non_session_manifest(tmp_path: Path) -> None:
+    assert EVALUATOR is not None
+    template, _, manifest = _write_inputs(tmp_path)
+    optimizer_manifest = tmp_path / "optimizer-manifest.json"
+    manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_data["run_kind"] = "optimizer"
+    optimizer_manifest.write_text(
+        json.dumps(manifest_data, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
+    try:
+        with pytest.raises(RemoteEvaluatorError, match="run_kind must be session"):
+            _open(client, template, optimizer_manifest, "optimizer-manifest")
+    finally:
+        client.shutdown()
+
+
 def test_pool_index_changes_session_identity(tmp_path: Path) -> None:
     assert EVALUATOR is not None
     template, _, manifest = _write_inputs(tmp_path)
@@ -438,7 +495,8 @@ def test_real_persistent_short_lived_trace_and_attestation(tmp_path: Path) -> No
         ready = _open(persistent, template, manifest, "persistent")
         assert ready.scenarios[0].candles_count == 10
         assert ready.scenarios[0].end_ts == 1_700_000_000 + 9 * 60
-        summary = persistent.evaluate_batch([candidate]).results[0]
+        summary_frame = persistent.evaluate_batch([candidate], metric_projection="summary")
+        summary = summary_frame.results[0]
         if hello.evaluator_identity.policy_id == "native_passthrough":
             assert policy_params == []
             assert summary.status == "ok"
@@ -500,16 +558,25 @@ def test_real_persistent_short_lived_trace_and_attestation(tmp_path: Path) -> No
             numeric_override.economic_fingerprint
             != adjacent_override.economic_fingerprint
         )
-        full = persistent.evaluate_batch(
+        full_frame = persistent.evaluate_batch(
             [candidate],
+            metric_projection="full",
             observation=ObservationSpec(
                 kind="full_trace",
                 trace_interval=1,
                 trace_actions=True,
                 artifact_dir="trace",
             ),
-        ).results[0]
+        )
+        full = full_frame.results[0]
+        assert summary_frame.metric_projection.value == "summary"
+        assert full_frame.metric_projection.value == "full"
+        assert summary.metrics_vec is None
+        assert full.metrics_vec is None
+        assert summary.scenario_results == []
+        assert len(full.scenario_results) == 1
         assert summary.status == full.status == "ok"
+        assert summary.candidate_id == full.candidate_id == "candidate-0"
         assert summary.economic_fingerprint == full.economic_fingerprint
         assert _economic_metrics(summary) == _economic_metrics(full)
         assert summary.metrics["yb_enabled"] == 0.0

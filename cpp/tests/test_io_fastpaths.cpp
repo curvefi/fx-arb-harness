@@ -140,6 +140,25 @@ void test_binary64_parser_rejects_non_finite_values() {
     }
 }
 
+void test_bounded_uint_parser_is_strict() {
+    const auto values = json::parse(R"JSON({
+        "valid": 7, "negative": -1, "fraction": 1.0,
+        "string": "1", "overflow": 4294967296
+    })JSON").as_object();
+    uint32_t parsed = 0;
+    require(
+        arb::parse_bounded_uint_field(values, "valid", uint32_t{0}, parsed) &&
+            parsed == 7,
+        "bounded uint parser rejected an in-range JSON integer"
+    );
+    for (const char* key : {"negative", "fraction", "string", "overflow"}) {
+        require(
+            !arb::parse_bounded_uint_field(values, key, uint32_t{0}, parsed),
+            "bounded uint parser accepted an invalid integer representation"
+        );
+    }
+}
+
 } // namespace
 
 void test_pool_override_materialized_once();
@@ -150,6 +169,7 @@ int main() {
     test_pool_init_binary64_boundary();
     test_candidate_binary64_identity();
     test_binary64_parser_rejects_non_finite_values();
+    test_bounded_uint_parser_is_strict();
     std::cout << "test_io_fastpaths: PASSED\n";
     return 0;
 }

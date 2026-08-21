@@ -1,6 +1,7 @@
 """One deterministic protocol receipt for each evaluator arithmetic target."""
 
 import json
+import hashlib
 import os
 import subprocess
 from pathlib import Path
@@ -39,16 +40,24 @@ def test_real_evaluator_reports_mode_and_runs_batch(tmp_path: Path) -> None:
     client = EvaluatorClient(evaluator, work_dir=tmp_path)
     try:
         hello = client.start()
+        metric_schema = {
+            "metric_schema": hello.metric_schema,
+            "metric_fields": hello.metric_fields,
+        }
+        expected_metric_digest = hashlib.sha256(json.dumps(
+            metric_schema, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
         identity = hello.evaluator_identity
         assert identity.numeric_mode == expected_mode
         assert identity.real_type == expected_real_type
         assert identity.build_target == build["target"]
         assert len(policy_params) == identity.policy_parameter_count
-        client.open_session(
+        ready = client.open_session(
             session_id="numeric-mode",
             template_path=template,
             manifest_path=manifest,
         )
+        assert ready.metric_schema_sha256 == expected_metric_digest
         result = client.evaluate_batch([
             CandidateSpec(
                 ordinal=0,

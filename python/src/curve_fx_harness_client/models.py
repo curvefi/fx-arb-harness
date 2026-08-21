@@ -67,9 +67,9 @@ class OpenSessionFrame(ProtocolModel):
     request_id: str
     session_id: str
     template_path: str
-    template_sha256: str
+    template_sha256: Optional[str] = None
     manifest_path: str
-    manifest_sha256: str
+    manifest_sha256: Optional[str] = None
     pool_index: int = 0
     n_candles: int = 0
     start_time: int = 0
