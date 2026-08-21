@@ -1,5 +1,6 @@
 import io
 import json
+import math
 
 import pytest
 from unittest.mock import MagicMock, patch
@@ -239,6 +240,22 @@ def test_evaluate_batch_requires_metric_projection() -> None:
             request_id="batch-1",
             session_id="session-1",
             candidates=[CandidateSpec(ordinal=0, candidate_id="candidate-0")],
+        )
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf, "nan", "inf"])
+def test_candidate_rejects_non_finite_binary64_inputs(value: Any) -> None:
+    with pytest.raises(ValidationError, match="finite"):
+        CandidateSpec(
+            ordinal=0,
+            candidate_id="candidate-0",
+            policy_params=[value],
+        )
+    with pytest.raises(ValidationError, match="finite"):
+        CandidateSpec(
+            ordinal=0,
+            candidate_id="candidate-0",
+            pool_overrides={"pool": {"A": value}},
         )
 
 

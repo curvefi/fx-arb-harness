@@ -35,6 +35,16 @@ std::string canonical_float_string(T value) {
     return out.str();
 }
 
+template <typename T>
+std::string canonical_binary64_string(T value) {
+    static_assert(std::is_floating_point_v<T>);
+    const double materialized = static_cast<double>(value);
+    if (!std::isfinite(materialized)) {
+        throw std::runtime_error("real input is outside the finite binary64 domain");
+    }
+    return canonical_float_string(materialized);
+}
+
 // ============================================================================
 // Scaling constants
 // ============================================================================
@@ -47,11 +57,27 @@ constexpr long double FEE_SCALE = 1e10L;
 // double; it must not recover extra bits by parsing the source decimal as long
 // double.  This keeps template-file and JSON-request initialization identical.
 inline double parse_input_double(const boost::json::value& v) {
-    if (v.is_string()) return std::strtod(v.as_string().c_str(), nullptr);
-    if (v.is_double()) return v.as_double();
-    if (v.is_int64()) return static_cast<double>(v.as_int64());
-    if (v.is_uint64()) return static_cast<double>(v.as_uint64());
-    return 0.0;
+    double value = 0.0;
+    if (v.is_string()) {
+        const std::string text(v.as_string().c_str());
+        char* end = nullptr;
+        value = std::strtod(text.c_str(), &end);
+        if (end == text.c_str() || *end != '\0') {
+            throw std::runtime_error("real input must be a base-10 number");
+        }
+    } else if (v.is_double()) {
+        value = v.as_double();
+    } else if (v.is_int64()) {
+        value = static_cast<double>(v.as_int64());
+    } else if (v.is_uint64()) {
+        value = static_cast<double>(v.as_uint64());
+    } else {
+        throw std::runtime_error("real input must be a number or numeric string");
+    }
+    if (!std::isfinite(value)) {
+        throw std::runtime_error("real input must materialize to finite binary64");
+    }
+    return value;
 }
 
 // ============================================================================
@@ -168,15 +194,8 @@ inline double get_double_opt(const boost::json::object& obj, const char* key, do
     auto it = obj.find(key);
     if (it == obj.end()) return fallback;
     const auto& v = it->value();
-    if (v.is_double()) return v.as_double();
-    if (v.is_int64())  return static_cast<double>(v.as_int64());
-    if (v.is_uint64()) return static_cast<double>(v.as_uint64());
-    if (v.is_string()) {
-        try {
-            return std::stod(std::string(v.as_string().c_str()));
-        } catch (...) {
-            return fallback;
-        }
+    if (v.is_double() || v.is_int64() || v.is_uint64() || v.is_string()) {
+        return parse_input_double(v);
     }
     return fallback;
 }

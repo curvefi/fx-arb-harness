@@ -15,16 +15,22 @@ cmake --build build --parallel
 cmake --install build --prefix "$PWD/_install"
 ```
 
-Native harness build (no compiled policy):
+Default compiled-passthrough build (no external policy header):
 
 ```sh
 cd /path/to/curve-fx-arb-harness
 cmake -S . -B build/native -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH=/path/to/twocrypto-cpp/_install
-cmake --build build/native --target arb_evaluator_ld --parallel
+cmake --build build/native \
+  --target arb_evaluator_f64 arb_evaluator_ld --parallel
 ```
 
-This produces `build/native/arb_evaluator_ld`, the production long-double evaluator. `curve_fx_evaluator` is an internal static build target, not an installed library or stable C++ ABI; the executable protocol is the supported integration boundary.
+This produces the binary64-arithmetic `arb_evaluator_f64` and the
+`long double`-arithmetic `arb_evaluator_ld`. Both use the compiled
+`native_passthrough` policy with `policy_params=[]`; its zero hooks delegate fee
+and price-scale decisions to native pool mechanics. The typed evaluator
+libraries are internal build targets, not stable C++ ABIs; the executable v1
+protocol is the supported integration boundary.
 
 ## Compiled-policy build and digest attestation
 
@@ -40,13 +46,15 @@ cmake -S . -B build/compiled -DCMAKE_BUILD_TYPE=Release \
   -DPOLICY_ABI=twocrypto_policy_v1 \
   -DPOLICY_HEADER_PATH="$POLICY" \
   -DPOLICY_EXPECTED_SHA256="$DIGEST"
-cmake --build build/compiled --target arb_evaluator_ld --parallel
+cmake --build build/compiled \
+  --target arb_evaluator_f64 arb_evaluator_ld --parallel
 ```
 
-Record the policy ID, ABI, digest, pool revision, harness revision, compiler/build mode, and binary path in the orchestrator run manifest. The resulting binary identity also contains a binary SHA-256 and policy-source SHA-256; inspect it before use:
+Record the policy ID, ABI, digest, pool revision, harness revision, compiler/build mode, and binary path in the orchestrator run manifest. Inspect both the strict protocol identity and the separate executable-bound build record before use:
 
 ```sh
 /path/to/curve-fx-arb-harness/build/compiled/arb_evaluator_ld --identity-json
+/path/to/curve-fx-arb-harness/build/compiled/arb_evaluator_ld --describe-json
 ```
 
 ## Python client package
@@ -70,6 +78,12 @@ Identity emits one `hello` frame and exits:
 /path/to/curve-fx-arb-harness/build/native/arb_evaluator_ld --identity-json
 ```
 
+`--describe-json` is not a protocol frame. It is the canonical inspectable
+artifact description: binary/source/build identity plus the compiled policy
+descriptor and exact v1 lowering paths for policy, pool, session, and
+observation parameters. Its schema digest is bound to the described binary
+without adding fields to the strict v1 `hello` model.
+
 For a one-candidate smoke, start a short-lived `serve` process, open one
 attested session, evaluate once, and shut it down through the same protocol as
 a persistent run. There is no divergent one-shot request path.
@@ -84,7 +98,7 @@ The evaluator defaults to one worker per process so an orchestrator can allocate
 
 ## Protocol and artifact contract
 
-Every frame is one UTF-8 JSON object terminated by a newline. The lifecycle is `hello` -> `open_session`/`session_ready` -> one or more `evaluate_batch`/`batch_result` exchanges -> `close_session` and `shutdown`. One manifest admits exactly one `resolved_spec.scenario`; the response retains a one-element `scenarios` array for protocol stability. Session paths and expected SHA-256 digests are checked before scenario/template data is loaded. `pool_index` is included in the session config hash and fingerprint. `metric_projection` (`summary` or `full`) controls returned raw metric detail; `observation.kind` (`summary` or `full_trace`) controls trace capture and is independent of economic identity.
+Every frame is one UTF-8 JSON object terminated by a newline. The lifecycle is `hello` -> `open_session`/`session_ready` -> one or more `evaluate_batch`/`batch_result` exchanges -> `close_session` and `shutdown`. All real-valued request inputs materialize once as finite IEEE-754 binary64 values, then widen to the evaluator arithmetic type when needed. One manifest admits exactly one `resolved_spec.scenario`; the response retains a one-element `scenarios` array for protocol stability. Session paths and expected SHA-256 digests are checked before scenario/template data is loaded. `pool_index` is included in the session config hash and fingerprint. `metric_projection` (`summary` or `full`) controls returned raw metric detail; `observation.kind` (`summary` or `full_trace`) controls trace capture and is independent of economic identity.
 
 Full observation requires a relative artifact directory and writes atomic, run-contained sidecars whose names include the economic fingerprint and content digest. Returned artifact paths and SHA-256 digests are attested by the response. Absolute paths, `..` traversal, and symlink escapes outside the evaluator working directory are rejected. The evaluator returns raw metrics and economic fingerprints; objective scoring and eligibility gates remain in the orchestrator.
 

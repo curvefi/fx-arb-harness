@@ -2,6 +2,7 @@
 //
 // Modes:
 //   --identity-json  : Emit evaluator identity and protocol capabilities to stdout and exit 0.
+//   --describe-json  : Emit executable-bound build and lowering schema to stdout and exit 0.
 //   serve            : Persistent NDJSON server implementing protocol curve_fx_eval_v1 over stdin/stdout.
 
 #include <algorithm>
@@ -34,47 +35,65 @@
 #include "core/sha256.hpp"
 #include "curve_fx_evaluator/compiled_policy_identity.hpp"
 #include "curve_fx_evaluator/evaluator.hpp"
+#include "curve_fx_evaluator/parameter_schema.hpp"
 #include "pools/pool_config_parse.hpp"
 
 namespace json = boost::json;
 namespace fs = std::filesystem;
 
-#if defined(ARB_MODE_F)
-using RealT = float;
-static constexpr const char* NUMERIC_MODE_NAME = "float";
-static constexpr const char* REAL_TYPE_NAME = "float";
+#if defined(ARB_MODE_LD) && defined(ARB_MODE_F64)
+#error "select exactly one evaluator arithmetic mode"
 #elif defined(ARB_MODE_LD)
 using RealT = long double;
 static constexpr const char* NUMERIC_MODE_NAME = "longdouble";
 static constexpr const char* REAL_TYPE_NAME = "long double";
-#else
+#elif defined(ARB_MODE_F64)
 using RealT = double;
 static constexpr const char* NUMERIC_MODE_NAME = "double";
 static constexpr const char* REAL_TYPE_NAME = "double";
+#else
+#error "evaluator target must define ARB_MODE_LD or ARB_MODE_F64"
 #endif
 
 #ifndef BUILD_TARGET_NAME
 #define BUILD_TARGET_NAME "arb_evaluator_ld"
 #endif
+#ifndef BUILD_TYPE_NAME
+#define BUILD_TYPE_NAME "unknown"
+#endif
+
+static_assert(
+    std::numeric_limits<double>::is_iec559 &&
+        std::numeric_limits<double>::digits == 53 &&
+        std::numeric_limits<double>::max_exponent == 1024,
+    "curve_fx_eval_v1 requires IEEE-754 binary64 wire inputs"
+);
 
 using SelectedPolicy = arb::pools::twocrypto_fx::ChallengeFeePolicy<RealT>;
 static constexpr std::size_t SELECTED_POLICY_PARAM_COUNT =
-    curve_fx::identity::HAS_COMPILED_POLICY
-        ? SelectedPolicy::PARAM_COUNT
-        : 0;
+    SelectedPolicy::DESCRIPTOR.size();
+static constexpr std::string_view SELECTED_POLICY_ID =
+    SelectedPolicy::DESCRIPTOR.name;
 static_assert(
     SELECTED_POLICY_PARAM_COUNT <=
         arb::pools::twocrypto_fx::PolicyConfig<RealT>{}.params.size(),
     "compiled policy parameter count exceeds the pool ABI capacity"
 );
 
-#if defined(TWOCRYPTO_POLICY_HEADER)
+constexpr bool selected_policy_order_is_canonical() {
+    for (std::size_t i = 0; i < SELECTED_POLICY_PARAM_COUNT; ++i) {
+        if (SelectedPolicy::DESCRIPTOR.parameters[i].order != i) return false;
+    }
+    return true;
+}
+static_assert(selected_policy_order_is_canonical(),
+    "compiled policy descriptor order must be dense and canonical");
+
 static_assert(
-    std::string_view(SelectedPolicy::NAME) ==
-        std::string_view(curve_fx::identity::POLICY_ID),
+    std::string_view(SelectedPolicy::NAME) == SELECTED_POLICY_ID &&
+        SELECTED_POLICY_ID == std::string_view(curve_fx::identity::POLICY_ID),
     "POLICY_ID must equal ChallengeFeePolicy::NAME"
 );
-#endif
 
 namespace {
 
@@ -185,7 +204,7 @@ std::string compute_deterministic_candidate_fingerprint(
 
     json::array params_arr;
     for (auto p : policy_params) {
-        params_arr.push_back(json::value(arb::canonical_float_string(p)));
+        params_arr.push_back(json::value(arb::canonical_binary64_string(p)));
     }
     fp_obj["params"] = params_arr;
     fp_obj["overrides"] = normalize_pool_override_identity(pool_overrides);
@@ -207,29 +226,29 @@ std::string compute_session_config_sha256(
 ) {
     json::object value;
     value["pool_index"] = pool_index;
-    value["min_swap_frac"] = arb::canonical_float_string(cfg.min_swap_frac);
-    value["max_swap_frac"] = arb::canonical_float_string(cfg.max_swap_frac);
+    value["min_swap_frac"] = arb::canonical_binary64_string(cfg.min_swap_frac);
+    value["max_swap_frac"] = arb::canonical_binary64_string(cfg.max_swap_frac);
     value["dustswap_freq_s"] = cfg.dustswap_freq_s;
     value["dustswap_random"] = cfg.dustswap_random;
     value["dustswap_dynamic_freq_s"] = cfg.dustswap_dynamic_freq_s;
     value["dustswap_dynamic_gap_enabled"] = cfg.dustswap_dynamic_gap_enabled;
     value["dustswap_dynamic_gap_bps"] =
-        arb::canonical_float_string(cfg.dustswap_dynamic_gap_bps);
+        arb::canonical_binary64_string(cfg.dustswap_dynamic_gap_bps);
     value["dustswap_dynamic_heartbeat_s"] = cfg.dustswap_dynamic_heartbeat_s;
     value["dustswap_commit_clock_freq_s"] = cfg.dustswap_commit_clock_freq_s;
     value["policy_keeper_enabled"] = cfg.policy_keeper_enabled;
     value["allow_hybrid_keeper"] = cfg.allow_hybrid_keeper;
     value["user_swap_freq_s"] = cfg.user_swap_freq_s;
     value["user_swap_size_frac"] =
-        arb::canonical_float_string(cfg.user_swap_size_frac);
+        arb::canonical_binary64_string(cfg.user_swap_size_frac);
     value["user_swap_thresh"] =
-        arb::canonical_float_string(cfg.user_swap_thresh);
+        arb::canonical_binary64_string(cfg.user_swap_thresh);
     value["enable_slippage_probes"] = cfg.enable_slippage_probes;
     value["yb_mode"] = cfg.yb_mode;
     value["yb_releverage_fee"] =
-        arb::canonical_float_string(cfg.yb_releverage_fee);
+        arb::canonical_binary64_string(cfg.yb_releverage_fee);
     value["yb_cash_multiplier"] =
-        arb::canonical_float_string(cfg.yb_cash_multiplier);
+        arb::canonical_binary64_string(cfg.yb_cash_multiplier);
     return arb::sha256_canonical_json(value);
 }
 
@@ -238,7 +257,7 @@ json::object make_evaluator_identity(const std::string& bin_hash) {
     id["binary_sha256"] = bin_hash;
     id["harness_version"] = curve_fx::identity::HARNESS_VERSION;
     id["pool_version"] = curve_fx::identity::POOL_VERSION;
-    id["policy_id"] = curve_fx::identity::POLICY_ID;
+    id["policy_id"] = std::string(SELECTED_POLICY_ID);
     id["policy_source_sha256"] = curve_fx::identity::POLICY_SOURCE_SHA256;
     id["policy_abi"] = curve_fx::identity::POLICY_ABI;
     id["policy_parameter_count"] = SELECTED_POLICY_PARAM_COUNT;
@@ -249,6 +268,103 @@ json::object make_evaluator_identity(const std::string& bin_hash) {
     id["ipo_enabled"] = curve_fx::identity::ENABLE_IPO;
     id["native_tuning"] = curve_fx::identity::NATIVE_TUNING;
     return id;
+}
+
+json::value source_dirty_value(std::string_view value) {
+    if (value == "true" || value == "TRUE" || value == "1") return true;
+    if (value == "false" || value == "FALSE" || value == "0") return false;
+    return nullptr;
+}
+
+json::object make_parameter_schema() {
+    json::array parameters;
+    for (const auto& descriptor : SelectedPolicy::DESCRIPTOR.parameters) {
+        json::object value;
+        value["name"] = "policy." + std::string(descriptor.name);
+        value["lowering_path"] =
+            "evaluate_batch.candidates[].policy_params[" +
+            std::to_string(descriptor.order) + "]";
+        value["order"] = descriptor.order;
+        value["type"] = "real";
+        value["unit"] = std::string(descriptor.unit);
+        value["wire_representation"] = "finite_binary64";
+        value["classification"] = "candidate";
+        value["default"] = static_cast<double>(descriptor.default_value);
+        value["minimum"] = static_cast<double>(descriptor.minimum);
+        value["maximum"] = static_cast<double>(descriptor.maximum);
+        value["quantum"] = static_cast<double>(descriptor.quantum);
+        parameters.push_back(std::move(value));
+    }
+    for (const auto& descriptor : curve_fx::evaluator::STATIC_PARAMETERS) {
+        json::object value;
+        value["name"] = std::string(descriptor.name);
+        value["lowering_path"] = std::string(descriptor.lowering_path);
+        value["type"] = std::string(descriptor.type);
+        value["unit"] = std::string(descriptor.unit);
+        value["wire_representation"] = std::string(descriptor.wire);
+        value["classification"] = std::string(descriptor.classification);
+        if (!descriptor.default_json.empty()) {
+            value["default"] = json::parse(descriptor.default_json);
+        }
+        if (!descriptor.choices_json.empty()) {
+            value["choices"] = json::parse(descriptor.choices_json);
+        }
+        parameters.push_back(std::move(value));
+    }
+    json::object schema;
+    schema["schema_version"] = "curve_fx_parameter_schema_v1";
+    schema["parameters"] = std::move(parameters);
+    return schema;
+}
+
+json::object make_description(const std::string& bin_hash) {
+    json::object info;
+    info["schema_version"] = "curve_fx_evaluator_description_v1";
+    info["binary_sha256"] = bin_hash;
+
+    json::object harness;
+    harness["version"] = curve_fx::identity::HARNESS_VERSION;
+    harness["revision"] = curve_fx::identity::HARNESS_GIT_REVISION;
+    harness["dirty"] = source_dirty_value(
+        curve_fx::identity::HARNESS_GIT_DIRTY);
+    info["harness"] = std::move(harness);
+
+    json::object pool;
+    pool["version"] = curve_fx::identity::POOL_VERSION;
+    pool["revision"] = curve_fx::identity::POOL_GIT_REVISION;
+    pool["dirty"] = source_dirty_value(curve_fx::identity::POOL_GIT_DIRTY);
+    info["pool"] = std::move(pool);
+
+    json::object policy;
+    policy["id"] = std::string(SELECTED_POLICY_ID);
+    policy["abi"] = curve_fx::identity::POLICY_ABI;
+    policy["source_sha256"] = curve_fx::identity::POLICY_SOURCE_SHA256;
+    policy["parameter_count"] = SELECTED_POLICY_PARAM_COUNT;
+    policy["descriptor_abi_version"] =
+        arb::pools::twocrypto_fx::POLICY_DESCRIPTOR_ABI_VERSION;
+    info["policy"] = std::move(policy);
+
+    json::object build;
+    build["type"] = BUILD_TYPE_NAME;
+    build["compiler"] = curve_fx::identity::COMPILER_ID;
+    build["target"] = BUILD_TARGET_NAME;
+    build["numeric_mode"] = NUMERIC_MODE_NAME;
+    build["real_type"] = REAL_TYPE_NAME;
+    build["real_digits"] = std::numeric_limits<RealT>::digits;
+    build["real_max_digits10"] = std::numeric_limits<RealT>::max_digits10;
+    build["wire_real_type"] = "IEEE-754 binary64";
+    build["wire_real_digits"] = std::numeric_limits<double>::digits;
+    build["ipo_enabled"] = curve_fx::identity::ENABLE_IPO;
+    build["native_tuning"] = curve_fx::identity::NATIVE_TUNING;
+    info["build"] = std::move(build);
+
+    json::object schema = make_parameter_schema();
+    const std::string schema_canonical_json = arb::canonical_json(schema);
+    info["parameter_schema_sha256"] = arb::crypto::sha256_hex(
+        schema_canonical_json.data(), schema_canonical_json.size());
+    info["parameter_schema_canonical_json"] = schema_canonical_json;
+    info["parameter_schema"] = std::move(schema);
+    return info;
 }
 
 json::object make_hello_frame(const std::string& bin_hash) {
@@ -929,20 +1045,13 @@ private:
                     return;
                 }
                 for (const auto& p_val : c_obj.at("policy_params").as_array()) {
-                    double parsed = 0.0;
-                    if (p_val.is_double()) parsed = p_val.as_double();
-                    else if (p_val.is_int64()) parsed = static_cast<double>(p_val.as_int64());
-                    else if (p_val.is_uint64()) parsed = static_cast<double>(p_val.as_uint64());
-                    else {
+                    if (!p_val.is_double() && !p_val.is_int64() &&
+                        !p_val.is_uint64()) {
                         write_frame(std::cout, make_error_frame(req_id, "candidate", "INVALID_POLICY_PARAMS",
                             "every policy parameter must be numeric"));
                         return;
                     }
-                    if (!std::isfinite(parsed)) {
-                        write_frame(std::cout, make_error_frame(req_id, "candidate", "INVALID_POLICY_PARAMS",
-                            "policy parameters must be finite"));
-                        return;
-                    }
+                    const double parsed = arb::parse_input_double(p_val);
                     cand.policy_params.push_back(static_cast<RealT>(parsed));
                 }
             }
@@ -966,6 +1075,23 @@ private:
                     return;
                 }
                 cand.pool_overrides = c_obj.at("pool_overrides").as_object();
+                const auto* nested_pool = cand.pool_overrides.if_contains("pool");
+                if (cand.pool_overrides.if_contains("policy") ||
+                    (nested_pool != nullptr && nested_pool->is_object() &&
+                     nested_pool->as_object().if_contains("policy"))) {
+                    write_frame(std::cout, make_error_frame(
+                        req_id, "candidate", "INVALID_POOL_OVERRIDES",
+                        "candidate pool_overrides.pool.policy is prohibited; use policy_params"));
+                    return;
+                }
+                try {
+                    (void)normalize_pool_override_identity(cand.pool_overrides);
+                } catch (const std::exception& error) {
+                    write_frame(std::cout, make_error_frame(
+                        req_id, "candidate", "INVALID_POOL_OVERRIDES",
+                        error.what()));
+                    return;
+                }
             }
 
 
@@ -1253,6 +1379,7 @@ private:
 
 int main(int argc, char* argv[]) {
     bool identity_only = false;
+    bool describe_only = false;
     std::string mode = "serve";
     bool mode_explicit = false;
     size_t worker_count = 1;
@@ -1261,6 +1388,10 @@ int main(int argc, char* argv[]) {
         const std::string arg = argv[i];
         if (arg == "--identity-json") {
             identity_only = true;
+            continue;
+        }
+        if (arg == "--describe-json") {
+            describe_only = true;
             continue;
         }
         if (arg == "--workers") {
@@ -1290,10 +1421,11 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "-h" || arg == "--help") {
             std::cerr << "Usage: " << argv[0]
-                      << " [serve | --identity-json] [--workers N]\n\n"
+                      << " [serve | --identity-json | --describe-json] [--workers N]\n\n"
                       << "Modes:\n"
                       << "  serve              Run persistent NDJSON server implementing protocol curve_fx_eval_v1 (stdin/stdout)\n"
                       << "  --identity-json    Print evaluator identity frame to stdout and exit 0\n"
+                      << "  --describe-json    Print executable-bound build and lowering schema and exit 0\n"
                       << "Options:\n"
                       << "  --workers N        Use N evaluator workers (default 1; cannot exceed detected hardware concurrency)\n";
             return 0;
@@ -1308,6 +1440,11 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    if (identity_only && describe_only) {
+        std::cerr << "Error: --identity-json and --describe-json are mutually exclusive\n";
+        return 1;
+    }
+
     try {
         curve_fx::evaluator::configure_worker_count(worker_count);
     } catch (const std::exception& error) {
@@ -1319,6 +1456,17 @@ int main(int argc, char* argv[]) {
         try {
             const std::string bin_hash = compute_binary_sha256(argv[0]);
             write_frame(std::cout, make_hello_frame(bin_hash));
+            return 0;
+        } catch (const std::exception& error) {
+            std::cerr << "Error: " << error.what() << "\n";
+            return 1;
+        }
+    }
+
+    if (describe_only) {
+        try {
+            const std::string bin_hash = compute_binary_sha256(argv[0]);
+            write_frame(std::cout, make_description(bin_hash));
             return 0;
         } catch (const std::exception& error) {
             std::cerr << "Error: " << error.what() << "\n";

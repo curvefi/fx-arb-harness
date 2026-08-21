@@ -9,8 +9,13 @@ cmake -S /path/to/curve-fx-arb-harness -B /path/to/curve-fx-arb-harness/build/na
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH=/path/to/twocrypto-cpp/_install
 cmake --build /path/to/curve-fx-arb-harness/build/native \
-  --target arb_evaluator_ld --parallel
+  --target arb_evaluator_f64 arb_evaluator_ld --parallel
 ```
+Both targets implement the same v1 protocol and finite binary64 wire boundary.
+`arb_evaluator_f64` uses `double` arithmetic; `arb_evaluator_ld` uses the
+platform's `long double` arithmetic and reports its actual precision. With no
+external header, both instantiate the attested zero-parameter
+`native_passthrough` compiled policy rather than a separate runtime-native path.
 The throughput flags `CURVE_FX_ENABLE_IPO` and `CURVE_FX_NATIVE_TUNING` are opt-in. Both default to `OFF`, which keeps binaries suitable for heterogeneous blades. For a Release binary dedicated to one compatible host, enable them explicitly:
 
 ```sh
@@ -38,10 +43,17 @@ cmake -S /path/to/curve-fx-arb-harness -B /path/to/curve-fx-arb-harness/build/co
   -DPOLICY_HEADER_PATH="$POLICY" \
   -DPOLICY_EXPECTED_SHA256="$POLICY_SHA"
 cmake --build /path/to/curve-fx-arb-harness/build/compiled \
-  --target arb_evaluator_ld --parallel
+  --target arb_evaluator_f64 arb_evaluator_ld --parallel
 ```
 
-`--identity-json` reports the binary digest, harness/pool versions, policy identity and source digest, compiler, numeric mode, capabilities, and limits. Evaluators default to one worker per process; use `--workers N` to allocate more without exceeding detected hardware concurrency. Serve mode logs the effective count to stderr without changing the strict v1 `hello` schema. Save the identity frame before submitting an orchestrator run.
+`--identity-json` reports the strict v1 `hello` frame. `--describe-json`
+separately reports the one executable-bound artifact description: source/build
+provenance, policy descriptor, and exact v1 lowering paths for every supported
+policy, pool, session, and observation parameter. Keeping this description
+separate preserves strict old-client parsing of `hello`. Save both records
+before submitting an orchestrator run. Evaluators default to one worker per
+process; use `--workers N` to allocate more without exceeding detected hardware
+concurrency.
 
 ## 2. Protocol lifecycle
 
@@ -55,7 +67,7 @@ The production executable is line-oriented:
 
 Stdout is reserved for one JSON object per line. Send logs and diagnostics to stderr.
 
-A full-trace sidecar response carries attested paths and SHA-256 values. The evaluator enforces path containment, hash matching, exact compiled-policy parameter count, unique candidate IDs/ordinals, and at most one admitted batch at a time. The effective `pool_index` participates in the session config hash and fingerprint. Policy parameters use exact canonical decimals in candidate identity, so long-double inputs are never narrowed to binary64 for hashing. Pool override numbers and numeric strings are normalized at their shared binary64 materialization boundary. Projection and observation level do not change the economic fingerprint.
+A full-trace sidecar response carries attested paths and SHA-256 values. The evaluator enforces path containment, hash matching, exact compiled-policy parameter count, unique candidate IDs/ordinals, and at most one admitted batch at a time. The effective `pool_index` participates in the session config hash and fingerprint. Every real-valued request input materializes once as a finite IEEE-754 binary64 value. Long-double builds widen that value for arithmetic; they do not recover decimal precision beyond the wire boundary. Candidate parameters and pool overrides are canonicalized from the materialized binary64 value, so equivalent spellings have one identity and adjacent binary64 values remain distinct. Projection and observation level do not change the economic fingerprint.
 
 ## 3. Short-lived smoke mode
 
@@ -78,7 +90,8 @@ The client starts the binary, checks `hello`, computes/validates input hashes, s
 
 ## 5. Audit bundle
 
-For each binary used by a run, retain the identity frame and record:
+For each binary used by a run, retain the identity frame and
+`curve_fx_evaluator_description_v1` record and record:
 
 - harness and installed pool revisions;
 - compiler ID/version, CMake build type, numeric mode, target;

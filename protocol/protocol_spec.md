@@ -13,6 +13,7 @@ Stdout is strictly reserved for protocol NDJSON frames. All logging, progress up
 4. **Confined Atomic Sidecars**: Trace artifacts and detailed logs are published atomically within run-relative directories with strict rejection of path traversal (`..` or absolute paths).
 5. **Raw Metrics Only**: The evaluator returns raw mathematical metrics without synthesizing optimization scores or penalty losses. All objective functions and penalty modeling remain client-side.
 6. **Explicit Backpressure**: The server advertises its capacity limits (frame size, batch size, in-flight units) and enforces one admitted batch at a time.
+7. **Binary64 Input Boundary**: Every real-valued request input MUST materialize as a finite IEEE-754 binary64 value. Wider evaluator arithmetic starts only after that materialization.
 
 ---
 
@@ -42,8 +43,8 @@ Upon launching in `serve` mode (or when invoked with `--identity-json`), the eva
     "binary_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "harness_version": "1.0.0",
     "pool_version": "1.0.0",
-    "policy_id": "twocrypto_native",
-    "policy_source_sha256": "none",
+    "policy_id": "native_passthrough",
+    "policy_source_sha256": "3f409a11...",
     "policy_abi": "twocrypto_policy_v1",
     "policy_parameter_count": 0,
     "numeric_mode": "longdouble",
@@ -92,6 +93,12 @@ Upon launching in `serve` mode (or when invoked with `--identity-json`), the eva
   }
 }
 ```
+
+`--describe-json` is deliberately outside `curve_fx_eval_v1`. It emits one
+`curve_fx_evaluator_description_v1` object containing executable/source/build
+identity plus the compiled policy descriptor and canonical v1 lowering schema.
+These fields are not added to `hello`, because v1 response models may forbid
+unknown fields.
 
 ### 3.2 Session Initialization: `open_session`
 The client sends an `open_session` frame with file paths and expected SHA-256 hashes. The manifest is the single authority for market files and has one accepted envelope: `schema_version = fxsim_manifest_v1`, `run_kind = session`, a non-empty `run_id`, and exactly one `resolved_spec.scenario`. The scenario contains only `id`, optional candle bounds/filter, a non-empty `market_files` array of `{path, kind, sha256}` objects (where `kind` is `market` or `chainlink`), and optional `yb_mode`/`yb_releverage` declarations. The evaluator rejects unknown fields and validates the template, manifest, candle, and optional Chainlink hashes before admitting the session. `pool_index` selects the effective template entry and participates in both `session_config_sha256` and `session_fingerprint`.
@@ -224,7 +231,7 @@ Response (`batch_result`) echoes the selected projection:
 }
 ```
 
-With `"metric_projection": "full"`, each candidate's `scenario_results` contains the one admitted scenario row. The array shape is retained for protocol stability. Projection changes response detail only; it never changes economic execution or the economic fingerprint. Candidate policy parameters are hashed as exact canonical decimals of the effective arithmetic type, rather than being narrowed to binary64. Pool override numbers and numeric strings that materialize to the same binary64 input have the same identity.
+With `"metric_projection": "full"`, each candidate's `scenario_results` contains the one admitted scenario row. The array shape is retained for protocol stability. Projection changes response detail only; it never changes economic execution or the economic fingerprint. Candidate policy parameters are canonicalized for identity from their finite binary64 wire values before any widening to the evaluator arithmetic type. Pool override numbers and numeric strings that materialize to the same binary64 value have the same identity; adjacent binary64 values have distinct identities.
 ### 3.4 Full Trace Observation (`observation.kind = "full_trace"`)
 When `observation.kind` is `"full_trace"`, a non-empty relative `artifact_dir` is required. Trace records and actions are written to atomic content-addressed files:
 - `<artifact_dir>/<economic_fingerprint>.<scenario_id>.<trace_sha256>.trace.json`

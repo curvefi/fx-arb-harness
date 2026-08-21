@@ -1,4 +1,6 @@
+import hashlib
 import json
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -100,6 +102,109 @@ def _write_inputs(root: Path) -> tuple[Path, Path, Path]:
     return template, candles, manifest
 
 
+def test_description_is_bound_and_complete() -> None:
+    assert EVALUATOR is not None
+    completed = subprocess.run(
+        [EVALUATOR, "--describe-json"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    info = json.loads(completed.stdout)
+    identity = json.loads(subprocess.run(
+        [EVALUATOR, "--identity-json"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout)["evaluator_identity"]
+    assert info["schema_version"] == "curve_fx_evaluator_description_v1"
+    assert info["binary_sha256"] == sha256_file(Path(EVALUATOR).resolve())
+    assert {"version", "revision", "dirty"} <= info["harness"].keys()
+    assert {"version", "revision", "dirty"} <= info["pool"].keys()
+    assert info["build"]["type"]
+    assert info["build"]["real_digits"] >= info["build"]["wire_real_digits"]
+    assert info["build"]["wire_real_type"] == "IEEE-754 binary64"
+    assert info["build"]["wire_real_digits"] == 53
+    assert info["build"]["target"] == identity["build_target"]
+    assert info["build"]["numeric_mode"] == identity["numeric_mode"]
+    assert info["build"]["real_type"] == identity["real_type"]
+    assert info["policy"]["id"] == identity["policy_id"]
+    assert info["policy"]["source_sha256"] == identity["policy_source_sha256"]
+    assert info["policy"]["parameter_count"] == identity["policy_parameter_count"]
+    schema_canonical_json = info["parameter_schema_canonical_json"]
+    assert hashlib.sha256(schema_canonical_json.encode("utf-8")).hexdigest() == (
+        info["parameter_schema_sha256"]
+    )
+    assert json.loads(schema_canonical_json) == info["parameter_schema"]
+
+    parameters = info["parameter_schema"]["parameters"]
+    policy_parameters = [p for p in parameters if p["name"].startswith("policy.")]
+    assert len(policy_parameters) == info["policy"]["parameter_count"]
+    if identity["policy_id"] == "native_passthrough":
+        assert policy_parameters == []
+    else:
+        assert [p["name"] for p in policy_parameters] == [
+            "policy.fast_half_life_s",
+            "policy.slow_half_life_s",
+            "policy.kappa",
+            "policy.min_cap_bps",
+            "policy.deadband_bps",
+        ]
+        assert [p["order"] for p in policy_parameters] == list(range(5))
+        assert {p["type"] for p in policy_parameters} == {"real"}
+        assert {p["wire_representation"] for p in policy_parameters} == {"finite_binary64"}
+        assert [
+            (p["default"], p["minimum"], p["maximum"], p["quantum"])
+            for p in policy_parameters
+        ] == [
+            (3600.0, 60.0, 86400.0, 10.0),
+            (86400.0, 60.0, 604800.0, 10.0),
+            (1.0, 0.0, 5.0, 0.05),
+            (10.0, 0.0, 250.0, 0.5),
+            (0.0, 0.0, 100.0, 0.5),
+        ]
+
+    pool_names = {p["name"] for p in parameters if p["name"].startswith("pool.")}
+    assert "pool.policy" not in pool_names
+    assert pool_names == set("""
+        pool.tag pool.initial_liquidity pool.A pool.gamma pool.mid_fee
+        pool.out_fee pool.fee_gamma pool.adjustment_step_min
+        pool.adjustment_step_max pool.ma_time pool.reserved_profit_fraction
+        pool.admin_fee pool.initial_price pool.start_timestamp
+        pool.historical_state pool.donation_apy pool.donation_frequency
+        pool.donation_duration pool.initial_donation_days
+        pool.donation_coins_ratio pool.user_swap_size_frac
+        pool.costs.arb_fee_bps pool.costs.gas_coin0
+        pool.costs.use_volume_cap pool.costs.volume_cap_mult
+        pool.costs.volume_cap_is_coin_1
+    """.split())
+    run_names = {p["name"] for p in parameters if p["name"].startswith("run.")}
+    assert run_names == set("""
+        run.session_id run.template_path run.template_sha256 run.manifest_path
+        run.manifest_sha256 run.pool_index run.n_candles run.start_time
+        run.end_time run.candle_filter run.min_swap run.max_swap
+        run.dustswap_freq_s run.dustswap_random run.dustswap_dynamic_freq_s
+        run.dustswap_dynamic_gap_enabled run.dustswap_dynamic_gap_bps
+        run.dustswap_dynamic_heartbeat_s run.dustswap_commit_clock_freq_s
+        run.policy_keeper_enabled run.allow_hybrid_keeper run.user_swap_freq_s
+        run.user_swap_size_frac run.user_swap_thresh
+        run.disable_slippage_probes run.yb_mode run.yb_releverage
+        run.yb_releverage_fee run.yb_cash_multiplier run.metric_projection
+        run.observation.kind run.observation.trace_interval
+        run.observation.trace_actions run.observation.artifact_dir
+    """.split())
+    assert all({
+        "name", "lowering_path", "type", "unit",
+        "wire_representation", "classification",
+    } <= parameter.keys() for parameter in parameters)
+    enums = {p["name"]: p["choices"] for p in parameters if p["type"] == "enum"}
+    assert enums == {
+        "run.yb_mode": ["off", "passive", "active_2l"],
+        "run.metric_projection": ["summary", "full"],
+        "run.observation.kind": ["summary", "full_trace"],
+    }
+
+
 def _open(client: EvaluatorClient, template: Path, manifest: Path, session_id: str):
     return client.open_session(
         session_id=session_id,
@@ -190,6 +295,25 @@ def test_real_evaluator_rejects_missing_metric_projection(tmp_path: Path) -> Non
         assert error["type"] == "error"
         assert error["error_code"] == "MISSING_REQUIRED_FIELD"
         assert "metric_projection" in error["message"]
+
+        process.stdin.write(json.dumps({
+            "protocol": "curve_fx_eval_v1",
+            "type": "evaluate_batch",
+            "request_id": "batch-2",
+            "session_id": "missing-projection",
+            "metric_projection": "summary",
+            "candidates": [{
+                "ordinal": 0,
+                "candidate_id": "candidate-nonfinite",
+                "policy_params": policy_params,
+                "pool_overrides": {"pool": {"A": "nan"}},
+            }],
+        }) + "\n")
+        process.stdin.flush()
+        error = json.loads(process.stdout.readline())
+        assert error["type"] == "error"
+        assert error["error_code"] == "INVALID_POOL_OVERRIDES"
+        assert "finite binary64" in error["message"]
 
         process.stdin.write(json.dumps({
             "protocol": "curve_fx_eval_v1",
@@ -315,6 +439,18 @@ def test_real_persistent_short_lived_trace_and_attestation(tmp_path: Path) -> No
         assert ready.scenarios[0].candles_count == 10
         assert ready.scenarios[0].end_ts == 1_700_000_000 + 9 * 60
         summary = persistent.evaluate_batch([candidate]).results[0]
+        if hello.evaluator_identity.policy_id == "native_passthrough":
+            assert policy_params == []
+            assert summary.status == "ok"
+        with pytest.raises(RemoteEvaluatorError, match="pool_overrides.pool.policy"):
+            persistent.evaluate_batch([
+                CandidateSpec(
+                    ordinal=0,
+                    candidate_id="runtime-native-kind",
+                    policy_params=policy_params,
+                    pool_overrides={"pool": {"policy": {"kind": "twocrypto_policy"}}},
+                )
+            ])
         numeric_override = persistent.evaluate_batch([
             CandidateSpec(
                 ordinal=0,
@@ -346,6 +482,24 @@ def test_real_persistent_short_lived_trace_and_attestation(tmp_path: Path) -> No
             ),
         ])
         assert [result.ordinal for result in canonical.results] == [3, 9]
+        assert (
+            canonical.results[0].economic_fingerprint
+            == canonical.results[1].economic_fingerprint
+        )
+        adjacent_override = persistent.evaluate_batch([
+            CandidateSpec(
+                ordinal=0,
+                candidate_id="override-adjacent",
+                policy_params=policy_params,
+                pool_overrides={
+                    "pool": {"A": math.nextafter(500000.0, math.inf)}
+                },
+            )
+        ]).results[0]
+        assert (
+            numeric_override.economic_fingerprint
+            != adjacent_override.economic_fingerprint
+        )
         full = persistent.evaluate_batch(
             [candidate],
             observation=ObservationSpec(
@@ -422,7 +576,7 @@ def test_real_persistent_short_lived_trace_and_attestation(tmp_path: Path) -> No
             ordinal=2,
             candidate_id="unknown-override",
             policy_params=policy_params,
-            pool_overrides={"policy": {"mid_fee_bps": 10}},
+            pool_overrides={"pool": {"mid_fee_bps": 10}},
         )
         rejected = persistent.evaluate_batch([unknown_override]).results[0]
         assert rejected.status == "failed"

@@ -7,12 +7,16 @@
 
 namespace curve_fx::evaluator {
 
-#if defined(ARB_MODE_LD)
+#if defined(ARB_MODE_LD) && defined(ARB_MODE_F64)
+#error "select exactly one evaluator arithmetic mode"
+#elif defined(ARB_MODE_LD)
 using RealT = long double;
 inline constexpr std::string_view NUMERIC_MODE = "longdouble";
-#else
+#elif defined(ARB_MODE_F64)
 using RealT = double;
 inline constexpr std::string_view NUMERIC_MODE = "double";
+#else
+#error "evaluator target must define ARB_MODE_LD or ARB_MODE_F64"
 #endif
 
 template <typename T>

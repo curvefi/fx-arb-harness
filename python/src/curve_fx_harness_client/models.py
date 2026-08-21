@@ -1,12 +1,20 @@
 """Pydantic models for curve_fx_eval_v1 protocol frames."""
 
+import math
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    FiniteFloat,
+    field_validator,
+    model_validator,
+)
 
 
 class ProtocolModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
 class ObservationKind(str, Enum):
@@ -27,7 +35,7 @@ class EvaluatorIdentity(ProtocolModel):
     policy_source_sha256: str
     policy_abi: str
     policy_parameter_count: int
-    numeric_mode: Literal["float", "double", "longdouble"]
+    numeric_mode: Literal["double", "longdouble"]
     real_type: str
     compiler: str
     build_target: str
@@ -66,26 +74,26 @@ class OpenSessionFrame(ProtocolModel):
     n_candles: int = 0
     start_time: int = 0
     end_time: int = 0
-    candle_filter: float = 0.0
-    min_swap: float = 1e-6
-    max_swap: float = 1.0
+    candle_filter: FiniteFloat = 0.0
+    min_swap: FiniteFloat = 1e-6
+    max_swap: FiniteFloat = 1.0
     dustswap_freq_s: int = 3600
     dustswap_random: bool = False
     dustswap_dynamic_freq_s: int = 0
     dustswap_dynamic_gap_enabled: bool = False
-    dustswap_dynamic_gap_bps: float = 0.0
+    dustswap_dynamic_gap_bps: FiniteFloat = 0.0
     dustswap_dynamic_heartbeat_s: int = 0
     dustswap_commit_clock_freq_s: int = 0
     policy_keeper_enabled: bool = False
     allow_hybrid_keeper: bool = False
     user_swap_freq_s: int = 0
-    user_swap_size_frac: float = 0.01
-    user_swap_thresh: float = 0.05
+    user_swap_size_frac: FiniteFloat = 0.01
+    user_swap_thresh: FiniteFloat = 0.05
     disable_slippage_probes: bool = False
     yb_mode: str = "off"
     yb_releverage: bool = False
-    yb_releverage_fee: float = 0.012
-    yb_cash_multiplier: float = 1.0
+    yb_releverage_fee: FiniteFloat = 0.012
+    yb_cash_multiplier: FiniteFloat = 1.0
 
     @model_validator(mode="after")
     def _reconcile_yb_mode(self) -> "OpenSessionFrame":
@@ -135,8 +143,27 @@ class ObservationSpec(ProtocolModel):
 class CandidateSpec(ProtocolModel):
     ordinal: int
     candidate_id: str
-    policy_params: List[float] = Field(default_factory=list)
+    policy_params: List[FiniteFloat] = Field(default_factory=list)
     pool_overrides: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("pool_overrides")
+    @classmethod
+    def _reject_non_finite_overrides(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+        pending: list[Any] = [value]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, dict):
+                pending.extend(item.values())
+            elif isinstance(item, (list, tuple)):
+                pending.extend(item)
+            elif isinstance(item, float) and not math.isfinite(item):
+                raise ValueError("pool override reals must be finite binary64")
+            elif isinstance(item, str) and item.strip().lower() in {
+                "nan", "+nan", "-nan", "inf", "+inf", "-inf",
+                "infinity", "+infinity", "-infinity",
+            }:
+                raise ValueError("pool override reals must be finite binary64")
+        return value
 
 
 class EvaluateBatchFrame(ProtocolModel):

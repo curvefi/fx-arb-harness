@@ -108,28 +108,36 @@ void test_pool_init_binary64_boundary() {
     );
 }
 
-void test_long_double_identity_decimal() {
-    const long double first = 1.0L;
-    const long double second = std::nextafter(
-        first, std::numeric_limits<long double>::infinity());
-    if constexpr (
-        std::numeric_limits<long double>::digits >
-        std::numeric_limits<double>::digits
-    ) {
-        require(
-            static_cast<double>(first) == static_cast<double>(second),
-            "wider long-double values must collide at the old identity boundary"
-        );
-    }
+void test_candidate_binary64_identity() {
+    const double first = 1.0;
+    const double second = std::nextafter(
+        first, std::numeric_limits<double>::infinity());
     require(
-        arb::canonical_float_string(first) !=
-            arb::canonical_float_string(second),
-        "canonical long-double identity must preserve distinct inputs"
+        arb::canonical_binary64_string(first) ==
+            arb::canonical_binary64_string(static_cast<long double>(first)),
+        "one binary64 input must keep one identity after arithmetic widening"
     );
     require(
-        arb::canonical_float_string(-0.0L) == "0",
+        arb::canonical_binary64_string(first) !=
+            arb::canonical_binary64_string(second),
+        "adjacent binary64 candidate inputs must have distinct identities"
+    );
+    require(
+        arb::canonical_binary64_string(-0.0L) == "0",
         "signed zero must have one canonical identity"
     );
+}
+
+void test_binary64_parser_rejects_non_finite_values() {
+    for (const char* text : {"nan", "inf", "-inf", "1e999"}) {
+        bool rejected = false;
+        try {
+            (void)arb::parse_input_double(json::value(text));
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        require(rejected, "non-finite binary64 input was accepted");
+    }
 }
 
 } // namespace
@@ -140,7 +148,8 @@ int main() {
     test_csv_line_splitting();
     test_pool_override_materialized_once();
     test_pool_init_binary64_boundary();
-    test_long_double_identity_decimal();
+    test_candidate_binary64_identity();
+    test_binary64_parser_rejects_non_finite_values();
     std::cout << "test_io_fastpaths: PASSED\n";
     return 0;
 }
