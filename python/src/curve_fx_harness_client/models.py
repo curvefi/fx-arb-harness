@@ -1,4 +1,4 @@
-"""Pydantic models for curve_fx_eval_v1 protocol frames."""
+"""Pydantic models for the curve_fx_eval protocol."""
 
 import math
 from enum import Enum
@@ -9,7 +9,6 @@ from pydantic import (
     Field,
     FiniteFloat,
     field_validator,
-    model_validator,
 )
 
 
@@ -28,11 +27,9 @@ class MetricProjection(str, Enum):
 
 
 class EvaluatorIdentity(ProtocolModel):
-    binary_sha256: str
     harness_version: str
     pool_version: str
     policy_id: str
-    policy_source_sha256: str
     policy_abi: str
     policy_parameter_count: int
     numeric_mode: Literal["double", "longdouble"]
@@ -50,9 +47,8 @@ class Limits(ProtocolModel):
 
 
 class HelloFrame(ProtocolModel):
-    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    protocol: Literal["curve_fx_eval"] = "curve_fx_eval"
     type: Literal["hello"] = "hello"
-    version: int = 1
     evaluator_identity: EvaluatorIdentity
     capabilities: List[str] = Field(default_factory=lambda: ["summary", "full_trace", "atomic_sidecars"])
     yb_modes: List[str] = Field(default_factory=lambda: ["off", "passive", "active_2l"])
@@ -62,14 +58,14 @@ class HelloFrame(ProtocolModel):
 
 
 class OpenSessionFrame(ProtocolModel):
-    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    protocol: Literal["curve_fx_eval"] = "curve_fx_eval"
     type: Literal["open_session"] = "open_session"
     request_id: str
     session_id: str
     template_path: str
-    template_sha256: Optional[str] = None
-    manifest_path: str
-    manifest_sha256: Optional[str] = None
+    scenario_id: str
+    market_path: str
+    chainlink_path: Optional[str] = None
     pool_index: int = 0
     n_candles: int = 0
     start_time: int = 0
@@ -90,24 +86,9 @@ class OpenSessionFrame(ProtocolModel):
     user_swap_size_frac: FiniteFloat = 0.01
     user_swap_thresh: FiniteFloat = 0.05
     disable_slippage_probes: bool = False
-    yb_mode: str = "off"
-    yb_releverage: bool = False
+    yb_mode: Literal["off", "passive", "active_2l"] = "off"
     yb_releverage_fee: FiniteFloat = 0.012
     yb_cash_multiplier: FiniteFloat = 1.0
-
-    @model_validator(mode="after")
-    def _reconcile_yb_mode(self) -> "OpenSessionFrame":
-        if self.yb_mode not in {"off", "passive", "active_2l"}:
-            raise ValueError(
-                "yb_mode must be one of 'off', 'passive', 'active_2l'"
-            )
-        if self.yb_mode == "off" and self.yb_releverage:
-            # Legacy alias: yb_releverage=true maps to the active 2L model.
-            self.yb_mode = "active_2l"
-        elif self.yb_mode != "off" and not self.yb_releverage:
-            # Keep the legacy mirror consistent with the canonical mode.
-            self.yb_releverage = True
-        return self
 
 
 class ScenarioInfo(ProtocolModel):
@@ -119,15 +100,11 @@ class ScenarioInfo(ProtocolModel):
 
 
 class SessionReadyFrame(ProtocolModel):
-    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    protocol: Literal["curve_fx_eval"] = "curve_fx_eval"
     type: Literal["session_ready"] = "session_ready"
     request_id: str
     session_id: str
     scenarios: List[ScenarioInfo]
-    scenario_set_sha256: str
-    session_fingerprint: str
-    session_config_sha256: str
-    metric_schema_sha256: str
 
 
 class ObservationSpec(ProtocolModel):
@@ -167,7 +144,7 @@ class CandidateSpec(ProtocolModel):
 
 
 class EvaluateBatchFrame(ProtocolModel):
-    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    protocol: Literal["curve_fx_eval"] = "curve_fx_eval"
     type: Literal["evaluate_batch"] = "evaluate_batch"
     request_id: str
     session_id: str
@@ -179,10 +156,6 @@ class EvaluateBatchFrame(ProtocolModel):
 class ArtifactRef(ProtocolModel):
     trace_path: Optional[str] = None
     actions_path: Optional[str] = None
-    manifest_path: Optional[str] = None
-    trace_sha256: Optional[str] = None
-    actions_sha256: Optional[str] = None
-    manifest_sha256: Optional[str] = None
 
 
 class ScenarioResult(ProtocolModel):
@@ -190,23 +163,20 @@ class ScenarioResult(ProtocolModel):
     status: Literal["ok", "failed"] = "ok"
     error: Optional[str] = None
     metrics: Dict[str, Any] = Field(default_factory=dict)
-    metrics_vec: Optional[List[Optional[float]]] = None
 
 
 class CandidateResult(ProtocolModel):
     ordinal: int
     candidate_id: str
     status: Literal["ok", "failed", "cancelled"] = "ok"
-    economic_fingerprint: str
     error: Optional[str] = None
     metrics: Dict[str, Any] = Field(default_factory=dict)
-    metrics_vec: Optional[List[Optional[float]]] = None
     scenario_results: List[ScenarioResult] = Field(default_factory=list)
     artifacts: Optional[ArtifactRef] = None
 
 
 class BatchResultFrame(ProtocolModel):
-    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    protocol: Literal["curve_fx_eval"] = "curve_fx_eval"
     type: Literal["batch_result"] = "batch_result"
     request_id: str
     session_id: str
@@ -217,7 +187,7 @@ class BatchResultFrame(ProtocolModel):
 
 
 class ErrorFrame(ProtocolModel):
-    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    protocol: Literal["curve_fx_eval"] = "curve_fx_eval"
     type: Literal["error"] = "error"
     request_id: str
     scope: Literal["protocol", "session", "candidate", "evaluation", "sidecar", "internal"]
@@ -227,20 +197,20 @@ class ErrorFrame(ProtocolModel):
 
 
 class CloseSessionFrame(ProtocolModel):
-    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    protocol: Literal["curve_fx_eval"] = "curve_fx_eval"
     type: Literal["close_session"] = "close_session"
     request_id: str
     session_id: str
 
 
 class SessionClosedFrame(ProtocolModel):
-    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    protocol: Literal["curve_fx_eval"] = "curve_fx_eval"
     type: Literal["session_closed"] = "session_closed"
     request_id: str
     session_id: str
 
 
 class ShutdownFrame(ProtocolModel):
-    protocol: Literal["curve_fx_eval_v1"] = "curve_fx_eval_v1"
+    protocol: Literal["curve_fx_eval"] = "curve_fx_eval"
     type: Literal["shutdown"] = "shutdown"
     request_id: str

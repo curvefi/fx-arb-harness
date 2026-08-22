@@ -1,6 +1,6 @@
 # curve-fx-arb-harness
 
-`curve-fx-arb-harness` owns one transport-free C++17 economic simulation loop and the `curve_fx_eval_v1` evaluator protocol. It consumes an installed `twocrypto::pool`; it does not embed a pool implementation or own client-side scoring or artifact presentation.
+`curve-fx-arb-harness` owns one transport-free C++17 economic simulation loop and the `curve_fx_eval` evaluator protocol. It consumes an installed `twocrypto::pool`; it does not embed a pool implementation or own client-side scoring or artifact presentation.
 
 ## Build prerequisites and independent setup
 
@@ -29,28 +29,26 @@ This produces the binary64-arithmetic `arb_evaluator_f64` and the
 `long double`-arithmetic `arb_evaluator_ld`. Both use the compiled
 `native_passthrough` policy with `policy_params=[]`; its zero hooks delegate fee
 and price-scale decisions to native pool mechanics. The typed evaluator
-libraries are internal build targets, not stable C++ ABIs; the executable v1
+libraries are internal build targets, not stable C++ ABIs; the executable
 protocol is the supported integration boundary.
 
-## Compiled-policy build and digest attestation
+## Compiled-policy build
 
-The checked-in CHF/USD profile uses this explicit sibling prerequisite. The header must be a regular file and its exact bytes must be attested with `POLICY_EXPECTED_SHA256`; configuration fails on a missing digest or mismatch:
+Use an external policy header supplied as a regular file:
 
 ```sh
-POLICY=/path/to/curve-fx-optimization/policies/native_policy_dual_ema_stale_cap_v1.hpp
-DIGEST=$(shasum -a 256 "$POLICY" | cut -d ' ' -f 1)
+POLICY=/path/to/policy.hpp
 cd /path/to/curve-fx-arb-harness
 cmake -S . -B build/compiled -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH=/path/to/twocrypto-cpp/_install \
-  -DPOLICY_ID=native_policy_dual_ema_stale_cap_v1 \
+  -DPOLICY_ID=your_policy_id \
   -DPOLICY_ABI=twocrypto_policy_v1 \
-  -DPOLICY_HEADER_PATH="$POLICY" \
-  -DPOLICY_EXPECTED_SHA256="$DIGEST"
+  -DPOLICY_HEADER_PATH="$POLICY"
 cmake --build build/compiled \
   --target arb_evaluator_f64 arb_evaluator_ld --parallel
 ```
 
-Record the policy ID, ABI, digest, pool revision, harness revision, compiler/build mode, and binary path in the orchestrator run manifest. Inspect both the strict protocol identity and the separate executable-bound build record before use:
+Record the policy ID, ABI, pool revision, harness revision, compiler/build mode, and binary path in the optimizer run record. Inspect both the protocol identity and the separate executable-bound build record before use:
 
 ```sh
 /path/to/curve-fx-arb-harness/build/compiled/arb_evaluator_ld --identity-json
@@ -68,7 +66,7 @@ uv run --frozen --no-sync python -c \
   'import curve_fx_harness_client; print(curve_fx_harness_client.__name__)'
 ```
 
-It provides one synchronous evaluator subprocess client, strict typed protocol models, and SHA-256/session-attestation helpers. The evaluator's scoring remains in Python orchestrator code; the binary returns raw metrics only.
+It provides one synchronous evaluator subprocess client and strict typed protocol models. The evaluator's scoring remains in Python orchestrator code; the binary returns raw metrics only.
 
 ## Evaluator modes
 
@@ -79,13 +77,11 @@ Identity emits one `hello` frame and exits:
 ```
 
 `--describe-json` is not a protocol frame. It is the canonical inspectable
-artifact description: binary/source/build identity plus the compiled policy
-descriptor and exact v1 lowering paths for policy, pool, session, and
-observation parameters. Its schema digest is bound to the described binary
-without adding fields to the strict v1 `hello` model.
+artifact description: source/build identity plus the compiled policy descriptor
+and exact lowering paths for policy, pool, session, and observation parameters.
 
 For a one-candidate smoke, start a short-lived `serve` process, open one
-attested session, evaluate once, and shut it down through the same protocol as
+session, evaluate once, and shut it down through the same protocol as
 a persistent run. There is no divergent one-shot request path.
 
 `serve` is the production persistent NDJSON mode. Stdout is protocol-only and stderr is for logs:
@@ -94,18 +90,18 @@ a persistent run. There is no divergent one-shot request path.
 /path/to/curve-fx-arb-harness/build/native/arb_evaluator_ld serve --workers 1
 ```
 
-The evaluator defaults to one worker per process so an orchestrator can allocate processes without hidden thread oversubscription. Pass `--workers N` to assign more workers to a process; `N` must not exceed detected hardware concurrency and the effective count is logged to stderr at startup. The v1 `hello` frame remains unchanged for strict existing clients. The orchestrator starts `serve`, consumes `curve_fx_eval_v1` `hello`, opens one immutable attested session, submits `evaluate_batch` frames, and closes the session/shuts down the process. It uses one admitted batch at a time and canonical ordinal ordering.
+The evaluator defaults to one worker per process so an orchestrator can allocate processes without hidden thread oversubscription. Pass `--workers N` to assign more workers to a process; `N` must not exceed detected hardware concurrency and the effective count is logged to stderr at startup. The orchestrator starts `serve`, consumes a `curve_fx_eval` `hello`, opens one immutable session, submits `evaluate_batch` frames, and closes the session/shuts down the process. It uses one admitted batch at a time and canonical ordinal ordering.
 
 ## Protocol and artifact contract
 
-Every frame is one UTF-8 JSON object terminated by a newline. The lifecycle is `hello` -> `open_session`/`session_ready` -> one or more `evaluate_batch`/`batch_result` exchanges -> `close_session` and `shutdown`. All real-valued request inputs materialize once as finite IEEE-754 binary64 values, then widen to the evaluator arithmetic type when needed. One manifest admits exactly one `resolved_spec.scenario`; the response retains a one-element `scenarios` array for protocol stability. Session paths and expected SHA-256 digests are checked before scenario/template data is loaded. `pool_index` is included in the session config hash and fingerprint. `metric_projection` (`summary` or `full`) controls returned raw metric detail; `observation.kind` (`summary` or `full_trace`) controls trace capture and is independent of economic identity.
+Every frame is one UTF-8 JSON object terminated by a newline. The lifecycle is `hello` -> `open_session`/`session_ready` -> one or more `evaluate_batch`/`batch_result` exchanges -> `close_session` and `shutdown`. All real-valued request inputs materialize once as finite IEEE-754 binary64 values, then widen to the evaluator arithmetic type when needed. One session admits exactly one scenario. `open_session` supplies `template_path`, `scenario_id`, `market_path`, and optional `chainlink_path`; `yb_mode` is the canonical YB selector. `metric_projection` (`summary` or `full`) controls returned raw metric detail; `observation.kind` (`summary` or `full_trace`) controls trace capture.
 
-Full observation requires a relative artifact directory and writes atomic, run-contained sidecars whose names include the economic fingerprint and content digest. Returned artifact paths and SHA-256 digests are attested by the response. Absolute paths, `..` traversal, and symlink escapes outside the evaluator working directory are rejected. The evaluator returns raw metrics and economic fingerprints; objective scoring and eligibility gates remain in the orchestrator.
+Full observation writes an atomic trace sidecar and, when requested, an action sidecar. The response returns `trace_path` and optional `actions_path` only. The evaluator returns raw metrics; objective scoring, plotting, replay, and placement remain in the optimizer.
 
 See [`protocol/protocol_spec.md`](protocol/protocol_spec.md) for frame schemas and limits.
 
-## Ownership, provenance, and private data
+## Ownership, inputs, and private data
 
-The harness owns feed parsers, `EventSoA`, arbitrage/user flow, donations, the optional YieldBasis 2L model, keepers, metrics, summary/full traces, compiled-policy identity, and the evaluator executable. `yb_mode` selects `off`, metrics-only `passive`, or state-mutating `active_2l`; legacy `yb_releverage=true` maps to `active_2l`. `yb_releverage_fee` and `yb_cash_multiplier` configure enabled modes. The pool owns the installed pool SDK; the orchestrator owns input manifests, data verification, scoring, run artifacts, execution backends, replay, and plots.
+The harness owns feed parsers, `EventSoA`, arbitrage/user flow, donations, the optional YieldBasis 2L model, keepers, metrics, summary/full traces, compiled-policy identity, and the evaluator executable. `yb_mode` selects `off`, metrics-only `passive`, or state-mutating `active_2l`; `yb_releverage_fee` and `yb_cash_multiplier` configure enabled modes. The pool owns the installed pool SDK; the optimizer owns TOML/run.json/results.npz, scoring, plotting, replay, and placement.
 
-Record pool/harness/policy revisions and hashes, compiler/build/numeric mode, scenario/template/input hashes, candidate request, economic configuration, `MetricProjection`, and protocol version for every evaluation. Production data may be Git-LFS material or private fixtures; acquire it through the repository's authorized channel, run orchestrator data verification, and do not assume redistribution or license rights. Do not copy historical binaries, generated runs, or obsolete checkout paths into a build.
+Inputs are ordinary paths supplied by the optimizer TOML. Acquisition of private or Git-LFS data is user-owned; do not assume redistribution or license rights. Do not copy historical binaries, generated runs, or obsolete checkout paths into a build.

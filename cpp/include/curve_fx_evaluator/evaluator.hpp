@@ -14,7 +14,6 @@
 
 #include "core/common.hpp"
 #include "core/json_utils.hpp"
-#include "core/sha256.hpp"
 #include "curve_fx_evaluator/trace.hpp"
 #include "curve_fx_evaluator/types.hpp"
 #include "events/loader.hpp"
@@ -49,9 +48,6 @@ struct Scenario {
     arb::pools::PoolInit<T> base_pool;
     arb::trading::Costs<T> base_costs;
     uint64_t start_ts{0};
-    std::string yb_mode{"off"};  // scenario-declared YieldBasis mode (off|passive|active_2l)
-    std::string scenario_sha256;
-
 };
 
 template <typename T = RealT>
@@ -74,9 +70,7 @@ struct SessionConfig {
     bool enable_slippage_probes{true};
 
     // YieldBasis mode: "off", "passive" (metrics-only shadow of the 2L
-    // transition), or "active_2l" (state-mutating 2L contract model). The
-    // legacy boolean yb_releverage is accepted at the protocol boundary and
-    // mapped true -> "active_2l".
+    // transition), or "active_2l" (state-mutating 2L contract model).
     std::string yb_mode{"off"};
     T yb_releverage_fee{static_cast<T>(0.012)};
 
@@ -138,9 +132,11 @@ class ScenarioStore {
 public:
     ScenarioStore() = default;
 
-    void load_from_session_manifest(
-        const std::string& manifest_path,
+    void load(
         const std::string& template_path,
+        const std::string& scenario_id,
+        const std::string& market_path,
+        const std::string& chainlink_path,
         const ScenarioLoadOptions& opts
     );
 
@@ -148,18 +144,8 @@ public:
         return scenarios_;
     }
 
-    std::string compute_scenario_set_sha256() const;
-
-    std::string compute_session_fingerprint(
-        const std::string& binary_sha256,
-        const std::string& policy_source_sha256,
-        const std::string& session_config_sha256,
-        size_t pool_index
-    ) const;
-
 private:
     std::vector<Scenario<T>> scenarios_;
-    std::string template_sha256_;
 };
 
 // Main evaluation entry point

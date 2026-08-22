@@ -1,4 +1,4 @@
-"""Exceptions for curve_fx_eval_v1 harness client."""
+"""Exceptions for the curve_fx_eval harness client."""
 
 from typing import Any, Dict, Optional
 
@@ -27,15 +27,6 @@ class IdentityMismatchError(HarnessError):
         super().__init__(message)
         self.expected = expected
         self.actual = actual
-
-
-class AttestationError(HarnessError):
-    """Raised when a scenario manifest, template, or market feed file SHA-256 digest fails verification."""
-    def __init__(self, message: str, path: str, expected_sha256: str, actual_sha256: Optional[str] = None):
-        super().__init__(message)
-        self.path = path
-        self.expected_sha256 = expected_sha256
-        self.actual_sha256 = actual_sha256
 
 
 class SessionError(HarnessError):

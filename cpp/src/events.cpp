@@ -1,6 +1,5 @@
 // Events module - implementation (non-templated)
 #include "events/loader.hpp"
-#include "core/sha256.hpp"
 
 #include <boost/json.hpp>
 #include <boost/json/basic_parser_impl.hpp>
@@ -31,10 +30,10 @@ namespace arb {
 
 namespace {
 
-constexpr uint32_t CANDLE_CACHE_VERSION = 2;
+constexpr uint32_t CANDLE_CACHE_VERSION = 3;
 constexpr uint64_t CANDLE_CACHE_ENDIAN_TAG = 0x0102030405060708ULL;
-constexpr char CANDLE_CACHE_MAGIC[8] = {'A','R','B','C','N','D','L','2'};
-constexpr size_t CANDLE_CACHE_HEADER_BYTES = 88;
+constexpr char CANDLE_CACHE_MAGIC[8] = {'A','R','B','C','N','D','L','3'};
+constexpr size_t CANDLE_CACHE_HEADER_BYTES = 64;
 constexpr size_t CANDLE_CACHE_TRAILER_BYTES = 16;
 
 static_assert(sizeof(Candle) == 48, "Candle layout changed; bump cache version");
@@ -44,7 +43,7 @@ static_assert(
 );
 
 struct CandleCacheKey {
-    crypto::Sha256Digest source_sha{};
+    uint64_t source_key{0};
     uint64_t max_candles{0};
     uint64_t squeeze_bits{0};
     uint64_t start_ts{0};
@@ -76,7 +75,7 @@ void serialize_cache_header(
     append(&version, sizeof(version));
     append(&candle_size, sizeof(candle_size));
     append(&CANDLE_CACHE_ENDIAN_TAG, sizeof(CANDLE_CACHE_ENDIAN_TAG));
-    append(key.source_sha.data(), key.source_sha.size());
+    append(&key.source_key, sizeof(key.source_key));
     append(&key.max_candles, sizeof(key.max_candles));
     append(&key.squeeze_bits, sizeof(key.squeeze_bits));
     append(&key.start_ts, sizeof(key.start_ts));
@@ -96,21 +95,12 @@ std::string candle_cache_path(const char* directory, const CandleCacheKey& key) 
     mix(key.start_ts);
     mix(CANDLE_CACHE_VERSION);
     mix(sizeof(Candle));
-    char sha_prefix[17]{};
-    for (size_t index = 0; index < 8; ++index) {
-        std::snprintf(
-            sha_prefix + index * 2,
-            3,
-            "%02x",
-            key.source_sha[index]
-        );
-    }
     char filename[80]{};
     std::snprintf(
         filename,
         sizeof(filename),
-        "candles_%s_%016llx.bin",
-        sha_prefix,
+        "candles_%016llx_%016llx.bin",
+        static_cast<unsigned long long>(key.source_key),
         static_cast<unsigned long long>(params_hash)
     );
     return (std::filesystem::path(directory) / filename).string();
@@ -496,7 +486,7 @@ std::vector<Candle> load_candles(const std::string& path,
         std::error_code ec;
         std::filesystem::create_directories(cache_directory, ec);
         if (!ec) {
-            cache_key.source_sha = crypto::sha256(s.data(), s.size());
+            cache_key.source_key = fnv1a64(s.data(), s.size());
             cache_key.max_candles = static_cast<uint64_t>(max_candles);
             static_assert(sizeof(cache_key.squeeze_bits) == sizeof(squeeze_frac));
             std::memcpy(

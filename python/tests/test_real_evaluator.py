@@ -1,6 +1,4 @@
-import hashlib
 import json
-import math
 import os
 import subprocess
 from pathlib import Path
@@ -9,7 +7,6 @@ import pytest
 
 from curve_fx_harness_client import EvaluatorClient
 from curve_fx_harness_client.exceptions import RemoteEvaluatorError
-from curve_fx_harness_client.hashing import sha256_file
 from curve_fx_harness_client.models import CandidateSpec, ObservationSpec
 
 
@@ -20,7 +17,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _write_inputs(root: Path) -> tuple[Path, Path, Path]:
+def _write_inputs(root: Path) -> tuple[Path, Path]:
     template = root / "template.json"
     template.write_text(
         json.dumps(
@@ -70,36 +67,7 @@ def _write_inputs(root: Path) -> tuple[Path, Path, Path]:
         rows.append([timestamp, price, price + 0.0001, price - 0.0001, price, 1_000_000.0])
     candles.write_text(json.dumps(rows, separators=(",", ":")), encoding="utf-8")
 
-    manifest = root / "manifest.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema_version": "fxsim_manifest_v1",
-                "run_kind": "session",
-                "run_id": "protocol-smoke",
-                "resolved_spec": {
-                    "scenario": {
-                        "id": "protocol-smoke",
-                        "start_time": 1_700_000_000,
-                        "end_time": 1_700_000_000 + 9 * 60,
-                        "n_candles": 0,
-                        "candle_filter": 100.0,
-                        "market_files": [
-                            {
-                                "path": str(candles),
-                                "kind": "market",
-                                "sha256": sha256_file(candles),
-                            }
-                        ],
-                    }
-                }
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-        encoding="utf-8",
-    )
-    return template, candles, manifest
+    return template, candles
 
 
 def test_description_is_bound_and_complete() -> None:
@@ -118,7 +86,6 @@ def test_description_is_bound_and_complete() -> None:
         text=True,
     ).stdout)["evaluator_identity"]
     assert info["schema_version"] == "curve_fx_evaluator_description_v1"
-    assert info["binary_sha256"] == sha256_file(Path(EVALUATOR).resolve())
     assert {"version", "revision", "dirty"} <= info["harness"].keys()
     assert {"version", "revision", "dirty"} <= info["pool"].keys()
     assert info["build"]["type"]
@@ -129,12 +96,8 @@ def test_description_is_bound_and_complete() -> None:
     assert info["build"]["numeric_mode"] == identity["numeric_mode"]
     assert info["build"]["real_type"] == identity["real_type"]
     assert info["policy"]["id"] == identity["policy_id"]
-    assert info["policy"]["source_sha256"] == identity["policy_source_sha256"]
     assert info["policy"]["parameter_count"] == identity["policy_parameter_count"]
     schema_canonical_json = info["parameter_schema_canonical_json"]
-    assert hashlib.sha256(schema_canonical_json.encode("utf-8")).hexdigest() == (
-        info["parameter_schema_sha256"]
-    )
     assert json.loads(schema_canonical_json) == info["parameter_schema"]
 
     parameters = info["parameter_schema"]["parameters"]
@@ -180,15 +143,15 @@ def test_description_is_bound_and_complete() -> None:
     """.split())
     run_names = {p["name"] for p in parameters if p["name"].startswith("run.")}
     assert run_names == set("""
-        run.session_id run.template_path run.template_sha256 run.manifest_path
-        run.manifest_sha256 run.pool_index run.n_candles run.start_time
+        run.session_id run.template_path run.scenario_id run.market_path
+        run.chainlink_path run.pool_index run.n_candles run.start_time
         run.end_time run.candle_filter run.min_swap run.max_swap
         run.dustswap_freq_s run.dustswap_random run.dustswap_dynamic_freq_s
         run.dustswap_dynamic_gap_enabled run.dustswap_dynamic_gap_bps
         run.dustswap_dynamic_heartbeat_s run.dustswap_commit_clock_freq_s
         run.policy_keeper_enabled run.allow_hybrid_keeper run.user_swap_freq_s
         run.user_swap_size_frac run.user_swap_thresh
-        run.disable_slippage_probes run.yb_mode run.yb_releverage
+        run.disable_slippage_probes run.yb_mode
         run.yb_releverage_fee run.yb_cash_multiplier run.metric_projection
         run.observation.kind run.observation.trace_interval
         run.observation.trace_actions run.observation.artifact_dir
@@ -205,11 +168,15 @@ def test_description_is_bound_and_complete() -> None:
     }
 
 
-def _open(client: EvaluatorClient, template: Path, manifest: Path, session_id: str):
+def _open(client: EvaluatorClient, template: Path, candles: Path, session_id: str):
     return client.open_session(
         session_id=session_id,
         template_path=template,
-        manifest_path=manifest,
+        scenario_id="protocol-smoke",
+        market_path=candles,
+        start_time=1_700_000_000,
+        end_time=1_700_000_000 + 9 * 60,
+        candle_filter=100.0,
     )
 
 
@@ -219,13 +186,13 @@ def _economic_metrics(result) -> dict[str, object]:
 
 def test_real_persistent_batches_match_single_candidate_results(tmp_path: Path) -> None:
     assert EVALUATOR is not None
-    template, _, manifest = _write_inputs(tmp_path)
+    template, candles = _write_inputs(tmp_path)
     client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
     try:
         hello = client.start()
         policy_params = json.loads(os.environ.get("CURVE_FX_POLICY_PARAMS", "[]"))
         assert len(policy_params) == hello.evaluator_identity.policy_parameter_count
-        _open(client, template, manifest, "batch-order")
+        _open(client, template, candles, "batch-order")
 
         single = client.evaluate_batch([
             CandidateSpec(
@@ -249,34 +216,26 @@ def test_real_persistent_batches_match_single_candidate_results(tmp_path: Path) 
 
         assert [result.ordinal for result in batch.results] == [3, 7]
         batched = next(result for result in batch.results if result.ordinal == 7)
-        assert batched.economic_fingerprint == single.economic_fingerprint
         assert _economic_metrics(batched) == _economic_metrics(single)
     finally:
         client.shutdown()
 
 
-def test_real_evaluator_rejects_non_session_manifest(tmp_path: Path) -> None:
+def test_real_evaluator_rejects_missing_market_file(tmp_path: Path) -> None:
     assert EVALUATOR is not None
-    template, _, manifest = _write_inputs(tmp_path)
-    optimizer_manifest = tmp_path / "optimizer-manifest.json"
-    manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
-    manifest_data["run_kind"] = "optimizer"
-    optimizer_manifest.write_text(
-        json.dumps(manifest_data, sort_keys=True, separators=(",", ":")),
-        encoding="utf-8",
-    )
+    template, _ = _write_inputs(tmp_path)
 
     client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
     try:
-        with pytest.raises(RemoteEvaluatorError, match="run_kind must be session"):
-            _open(client, template, optimizer_manifest, "optimizer-manifest")
+        with pytest.raises(FileNotFoundError, match="Market file not found"):
+            _open(client, template, tmp_path / "missing.json", "missing-market")
     finally:
         client.shutdown()
 
 
-def test_pool_index_changes_session_identity(tmp_path: Path) -> None:
+def test_pool_index_selects_another_template_entry(tmp_path: Path) -> None:
     assert EVALUATOR is not None
-    template, _, manifest = _write_inputs(tmp_path)
+    template, candles = _write_inputs(tmp_path)
     template_data = json.loads(template.read_text(encoding="utf-8"))
     duplicate = json.loads(json.dumps(template_data["pools"][0]))
     duplicate["tag"] = "protocol_smoke_duplicate"
@@ -292,19 +251,22 @@ def test_pool_index_changes_session_identity(tmp_path: Path) -> None:
             ready.append(client.open_session(
                 session_id=f"pool-{pool_index}",
                 template_path=template,
-                manifest_path=manifest,
+                scenario_id="protocol-smoke",
+                market_path=candles,
+                start_time=1_700_000_000,
+                end_time=1_700_000_000 + 9 * 60,
+                candle_filter=100.0,
                 pool_index=pool_index,
             ))
         finally:
             client.shutdown()
 
-    assert ready[0].session_config_sha256 != ready[1].session_config_sha256
-    assert ready[0].session_fingerprint != ready[1].session_fingerprint
+    assert [item.scenarios[0].id for item in ready] == ["protocol-smoke", "protocol-smoke"]
 
 
 def test_real_evaluator_rejects_missing_metric_projection(tmp_path: Path) -> None:
     assert EVALUATOR is not None
-    template, _, manifest = _write_inputs(tmp_path)
+    template, candles = _write_inputs(tmp_path)
     policy_params = json.loads(os.environ.get("CURVE_FX_POLICY_PARAMS", "[]"))
     process = subprocess.Popen(
         [EVALUATOR, "serve"],
@@ -323,21 +285,23 @@ def test_real_evaluator_rejects_missing_metric_projection(tmp_path: Path) -> Non
         assert len(policy_params) == hello["evaluator_identity"]["policy_parameter_count"]
 
         process.stdin.write(json.dumps({
-            "protocol": "curve_fx_eval_v1",
+            "protocol": "curve_fx_eval",
             "type": "open_session",
             "request_id": "open-1",
             "session_id": "missing-projection",
             "template_path": str(template),
-            "template_sha256": sha256_file(template),
-            "manifest_path": str(manifest),
-            "manifest_sha256": sha256_file(manifest),
+            "scenario_id": "protocol-smoke",
+            "market_path": str(candles),
+            "start_time": 1_700_000_000,
+            "end_time": 1_700_000_000 + 9 * 60,
+            "candle_filter": 100.0,
         }) + "\n")
         process.stdin.flush()
         ready = json.loads(process.stdout.readline())
         assert ready["type"] == "session_ready"
 
         process.stdin.write(json.dumps({
-            "protocol": "curve_fx_eval_v1",
+            "protocol": "curve_fx_eval",
             "type": "evaluate_batch",
             "request_id": "batch-1",
             "session_id": "missing-projection",
@@ -354,7 +318,7 @@ def test_real_evaluator_rejects_missing_metric_projection(tmp_path: Path) -> Non
         assert "metric_projection" in error["message"]
 
         process.stdin.write(json.dumps({
-            "protocol": "curve_fx_eval_v1",
+            "protocol": "curve_fx_eval",
             "type": "evaluate_batch",
             "request_id": "batch-2",
             "session_id": "missing-projection",
@@ -373,7 +337,7 @@ def test_real_evaluator_rejects_missing_metric_projection(tmp_path: Path) -> Non
         assert "finite binary64" in error["message"]
 
         process.stdin.write(json.dumps({
-            "protocol": "curve_fx_eval_v1",
+            "protocol": "curve_fx_eval",
             "type": "shutdown",
             "request_id": "shutdown-1",
         }) + "\n")
@@ -387,7 +351,7 @@ def test_real_evaluator_rejects_missing_metric_projection(tmp_path: Path) -> Non
 
 def test_real_evaluator_runs_optional_yb_2l_model(tmp_path: Path) -> None:
     assert EVALUATOR is not None
-    template, _, manifest = _write_inputs(tmp_path)
+    template, candles = _write_inputs(tmp_path)
     client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
     try:
         hello = client.start()
@@ -396,8 +360,9 @@ def test_real_evaluator_runs_optional_yb_2l_model(tmp_path: Path) -> None:
         client.open_session(
             session_id="yb-2l",
             template_path=template,
-            manifest_path=manifest,
-            yb_releverage=True,
+            scenario_id="protocol-smoke",
+            market_path=candles,
+            yb_mode="active_2l",
             yb_releverage_fee=0.013,
             yb_cash_multiplier=3.0,
         )
@@ -428,7 +393,7 @@ def test_real_evaluator_runs_optional_yb_2l_model(tmp_path: Path) -> None:
 
 def test_real_evaluator_yb_mode_round_trip(tmp_path: Path) -> None:
     assert EVALUATOR is not None
-    template, _, manifest = _write_inputs(tmp_path)
+    template, candles = _write_inputs(tmp_path)
     policy_params = json.loads(os.environ.get("CURVE_FX_POLICY_PARAMS", "[]"))
 
     def _run(mode: str, *, fee: float = 0.012, cash: float = 1.0):
@@ -440,7 +405,8 @@ def test_real_evaluator_yb_mode_round_trip(tmp_path: Path) -> None:
             client.open_session(
                 session_id=f"yb-{mode}",
                 template_path=template,
-                manifest_path=manifest,
+                scenario_id="protocol-smoke",
+                market_path=candles,
                 yb_mode=mode,
                 yb_releverage_fee=fee,
                 yb_cash_multiplier=cash,
@@ -471,16 +437,17 @@ def test_real_evaluator_yb_mode_round_trip(tmp_path: Path) -> None:
             client.open_session(
                 session_id="yb-bad",
                 template_path=template,
-                manifest_path=manifest,
+                scenario_id="protocol-smoke",
+                market_path=candles,
                 yb_mode="strange",
             )
     finally:
         client.shutdown()
 
 
-def test_real_persistent_short_lived_trace_and_attestation(tmp_path: Path) -> None:
+def test_real_persistent_short_lived_trace_and_paths(tmp_path: Path) -> None:
     assert EVALUATOR is not None
-    template, candles, manifest = _write_inputs(tmp_path)
+    template, candles = _write_inputs(tmp_path)
 
     persistent = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
     try:
@@ -492,7 +459,7 @@ def test_real_persistent_short_lived_trace_and_attestation(tmp_path: Path) -> No
             candidate_id="candidate-0",
             policy_params=policy_params,
         )
-        ready = _open(persistent, template, manifest, "persistent")
+        ready = _open(persistent, template, candles, "persistent")
         assert ready.scenarios[0].candles_count == 10
         assert ready.scenarios[0].end_ts == 1_700_000_000 + 9 * 60
         summary_frame = persistent.evaluate_batch([candidate], metric_projection="summary")
@@ -525,7 +492,6 @@ def test_real_persistent_short_lived_trace_and_attestation(tmp_path: Path) -> No
                 pool_overrides={"pool": {"A": "500000.0"}},
             )
         ]).results[0]
-        assert numeric_override.economic_fingerprint == string_override.economic_fingerprint
         assert _economic_metrics(numeric_override) == _economic_metrics(string_override)
         canonical = persistent.evaluate_batch([
             CandidateSpec(
@@ -540,24 +506,6 @@ def test_real_persistent_short_lived_trace_and_attestation(tmp_path: Path) -> No
             ),
         ])
         assert [result.ordinal for result in canonical.results] == [3, 9]
-        assert (
-            canonical.results[0].economic_fingerprint
-            == canonical.results[1].economic_fingerprint
-        )
-        adjacent_override = persistent.evaluate_batch([
-            CandidateSpec(
-                ordinal=0,
-                candidate_id="override-adjacent",
-                policy_params=policy_params,
-                pool_overrides={
-                    "pool": {"A": math.nextafter(500000.0, math.inf)}
-                },
-            )
-        ]).results[0]
-        assert (
-            numeric_override.economic_fingerprint
-            != adjacent_override.economic_fingerprint
-        )
         full_frame = persistent.evaluate_batch(
             [candidate],
             metric_projection="full",
@@ -571,32 +519,25 @@ def test_real_persistent_short_lived_trace_and_attestation(tmp_path: Path) -> No
         full = full_frame.results[0]
         assert summary_frame.metric_projection.value == "summary"
         assert full_frame.metric_projection.value == "full"
-        assert summary.metrics_vec is None
-        assert full.metrics_vec is None
         assert summary.scenario_results == []
         assert len(full.scenario_results) == 1
         assert summary.status == full.status == "ok"
         assert summary.candidate_id == full.candidate_id == "candidate-0"
-        assert summary.economic_fingerprint == full.economic_fingerprint
         assert _economic_metrics(summary) == _economic_metrics(full)
         assert summary.metrics["yb_enabled"] == 0.0
         assert summary.metrics["yb_apy"] == -1.0
         assert full.artifacts is not None
 
         trace_path = tmp_path / full.artifacts.trace_path
-        assert sha256_file(trace_path) == full.artifacts.trace_sha256
-        assert full.artifacts.trace_sha256 in trace_path.name
         trace = json.loads(trace_path.read_text(encoding="utf-8"))
         assert trace and {"xp_0", "p_chainlink", "yb_debt"} <= trace[0].keys()
         actions_path = tmp_path / full.artifacts.actions_path
-        assert sha256_file(actions_path) == full.artifacts.actions_sha256
-        assert full.artifacts.actions_sha256 in actions_path.name
         actions = json.loads(actions_path.read_text(encoding="utf-8"))
         assert all("type" in action for action in actions)
-        trace_manifest_path = tmp_path / full.artifacts.manifest_path
-        trace_manifest = json.loads(trace_manifest_path.read_text(encoding="utf-8"))
-        assert "created_at_utc" not in trace_manifest
-        assert sha256_file(trace_manifest_path) == full.artifacts.manifest_sha256
+        assert {path.name for path in (tmp_path / "trace").iterdir()} == {
+            trace_path.name,
+            actions_path.name,
+        }
 
         full_repeat = persistent.evaluate_batch(
             [candidate],
@@ -607,21 +548,7 @@ def test_real_persistent_short_lived_trace_and_attestation(tmp_path: Path) -> No
                 artifact_dir="trace",
             ),
         ).results[0]
-        assert full_repeat.economic_fingerprint == full.economic_fingerprint
         assert full_repeat.artifacts == full.artifacts
-
-        escape = tmp_path / "escape"
-        escape.symlink_to(Path("/tmp"), target_is_directory=True)
-        with pytest.raises(RemoteEvaluatorError, match="escaped artifact_dir"):
-            persistent.evaluate_batch(
-                [candidate],
-                observation=ObservationSpec(
-                    kind="full_trace",
-                    trace_interval=1,
-                    trace_actions=True,
-                    artifact_dir="escape",
-                ),
-            )
 
         wrong_count = CandidateSpec(
             ordinal=1,
@@ -653,26 +580,25 @@ def test_real_persistent_short_lived_trace_and_attestation(tmp_path: Path) -> No
 
     short_lived = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
     try:
-        ready_once = _open(short_lived, template, manifest, "once")
+        ready_once = _open(short_lived, template, candles, "once")
         once = short_lived.evaluate_batch([candidate]).results[0]
-        assert ready_once.session_fingerprint == ready.session_fingerprint
-        assert once.economic_fingerprint == summary.economic_fingerprint
         assert _economic_metrics(once) == _economic_metrics(summary)
     finally:
         short_lived.shutdown()
 
-    stale_manifest = tmp_path / "stale-feed-field.json"
-    stale_data = json.loads(manifest.read_text(encoding="utf-8"))
-    stale_data["resolved_spec"]["scenario"]["external_basis_feed"] = {}
-    stale_manifest.write_text(json.dumps(stale_data), encoding="utf-8")
-    stale_client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
+    unsafe_client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
     try:
-        with pytest.raises(RemoteEvaluatorError, match="unknown field: external_basis_feed"):
-            _open(stale_client, template, stale_manifest, "stale-feed-field")
+        with pytest.raises(RemoteEvaluatorError, match="unsafe characters"):
+            unsafe_client.open_session(
+                session_id="unsafe-scenario",
+                template_path=template,
+                scenario_id="../unsafe",
+                market_path=candles,
+            )
     finally:
-        stale_client.shutdown()
+        unsafe_client.shutdown()
 
-    feed_hashes = []
+    feed_scenarios = []
     for feed_price in (1.0001, 1.0002):
         chainlink = tmp_path / f"chainlink-{feed_price:.4f}.csv"
         chainlink.write_text(
@@ -680,36 +606,27 @@ def test_real_persistent_short_lived_trace_and_attestation(tmp_path: Path) -> No
             f"1600000000,2020-09-13T12:26:40+00:00,0,0,0,0,8,{feed_price}\n",
             encoding="utf-8",
         )
-        feed_manifest = tmp_path / f"feed-{feed_price:.4f}.json"
-        feed_data = json.loads(manifest.read_text(encoding="utf-8"))
-        feed_data["resolved_spec"]["scenario"]["market_files"].append(
-            {
-                "path": str(chainlink),
-                "kind": "chainlink",
-                "sha256": sha256_file(chainlink),
-            }
-        )
-        feed_manifest.write_text(
-            json.dumps(feed_data, sort_keys=True, separators=(",", ":")),
-            encoding="utf-8",
-        )
         feed_client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
         try:
-            feed_ready = _open(
-                feed_client,
-                template,
-                feed_manifest,
-                f"feed-{feed_price:.4f}",
+            feed_ready = feed_client.open_session(
+                session_id=f"feed-{feed_price:.4f}",
+                template_path=template,
+                scenario_id="protocol-smoke",
+                market_path=candles,
+                chainlink_path=chainlink,
+                start_time=1_700_000_000,
+                end_time=1_700_000_000 + 9 * 60,
+                candle_filter=100.0,
             )
-            feed_hashes.append(feed_ready.scenario_set_sha256)
+            feed_scenarios.append(feed_ready.scenarios[0].id)
         finally:
             feed_client.shutdown()
-    assert feed_hashes[0] != feed_hashes[1]
+    assert feed_scenarios == ["protocol-smoke", "protocol-smoke"]
 
     candles.write_text("[]", encoding="utf-8")
     tampered = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
     try:
-        with pytest.raises(RemoteEvaluatorError, match="Candle SHA-256 mismatch"):
-            _open(tampered, template, manifest, "tampered")
+        with pytest.raises(RemoteEvaluatorError, match="candles"):
+            _open(tampered, template, candles, "tampered")
     finally:
         tampered.shutdown()

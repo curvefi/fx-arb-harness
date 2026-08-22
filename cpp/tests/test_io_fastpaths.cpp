@@ -1,4 +1,3 @@
-#include "core/sha256.hpp"
 #include "events/loader.hpp"
 #include "oracles/chainlink.hpp"
 #include "pools/pool_config_parse.hpp"

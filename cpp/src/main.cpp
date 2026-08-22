@@ -3,7 +3,7 @@
 // Modes:
 //   --identity-json  : Emit evaluator identity and protocol capabilities to stdout and exit 0.
 //   --describe-json  : Emit executable-bound build and lowering schema to stdout and exit 0.
-//   serve            : Persistent NDJSON server implementing protocol curve_fx_eval_v1 over stdin/stdout.
+//   serve            : Persistent NDJSON server implementing protocol curve_fx_eval over stdin/stdout.
 
 #include <algorithm>
 #include <chrono>
@@ -32,7 +32,6 @@
 
 #include "core/common.hpp"
 #include "core/json_utils.hpp"
-#include "core/sha256.hpp"
 #include "curve_fx_evaluator/compiled_policy_identity.hpp"
 #include "curve_fx_evaluator/evaluator.hpp"
 #include "curve_fx_evaluator/parameter_schema.hpp"
@@ -66,7 +65,7 @@ static_assert(
     std::numeric_limits<double>::is_iec559 &&
         std::numeric_limits<double>::digits == 53 &&
         std::numeric_limits<double>::max_exponent == 1024,
-    "curve_fx_eval_v1 requires IEEE-754 binary64 wire inputs"
+    "curve_fx_eval requires IEEE-754 binary64 wire inputs"
 );
 
 using SelectedPolicy = arb::pools::twocrypto_fx::ChallengeFeePolicy<RealT>;
@@ -147,14 +146,6 @@ const json::object& canonical_metric_schema() {
     return schema;
 }
 
-const std::string& canonical_metric_schema_sha256() {
-    static const std::string digest = [] {
-        const std::string encoded = arb::canonical_json(canonical_metric_schema());
-        return arb::core::sha256_bytes(encoded);
-    }();
-    return digest;
-}
-
 json::value normalize_pool_override_identity_value(
     const json::value& value,
     std::string_view field
@@ -188,100 +179,11 @@ json::object normalize_pool_override_identity(const json::object& value) {
     return normalize_pool_override_identity_value(value, "").as_object();
 }
 
-std::string compute_binary_sha256(const char* argv0) {
-    if (argv0 == nullptr || *argv0 == '\0') {
-        throw std::runtime_error("cannot attest evaluator binary: argv[0] is empty");
-    }
-    const fs::path requested(argv0);
-    std::vector<fs::path> candidates;
-    candidates.push_back(requested);
-    if (!requested.has_parent_path()) {
-        if (const char* path_env = std::getenv("PATH")) {
-            std::stringstream paths(path_env);
-            std::string directory;
-            while (std::getline(paths, directory, ':')) {
-                if (!directory.empty()) candidates.emplace_back(fs::path(directory) / requested);
-            }
-        }
-    }
-    for (const auto& candidate : candidates) {
-        std::error_code ec;
-        if (fs::is_regular_file(candidate, ec) && !ec) {
-            return arb::core::sha256_file(fs::canonical(candidate).string());
-        }
-    }
-    throw std::runtime_error(
-        "cannot attest evaluator binary: executable path was not found: " +
-        requested.string());
-}
-
-std::string compute_deterministic_candidate_fingerprint(
-    const std::string& session_fingerprint,
-    const std::vector<RealT>& policy_params,
-    const json::object& pool_overrides,
-    const std::map<std::string, double>& aggregate_metrics
-) {
-    json::object fp_obj;
-    fp_obj["session"] = session_fingerprint;
-
-    json::array params_arr;
-    for (auto p : policy_params) {
-        params_arr.push_back(json::value(arb::canonical_binary64_string(p)));
-    }
-    fp_obj["params"] = params_arr;
-    fp_obj["overrides"] = normalize_pool_override_identity(pool_overrides);
-
-    // Include all deterministic economic metrics, strictly excluding elapsed_ms and non-deterministic timing
-    json::object econ_metrics;
-    for (const auto& [k, v] : aggregate_metrics) {
-        if (k != "elapsed_ms") {
-            econ_metrics[k] = v;
-        }
-    }
-    fp_obj["metrics"] = econ_metrics;
-    return arb::sha256_canonical_json(fp_obj);
-}
-
-std::string compute_session_config_sha256(
-    const curve_fx::evaluator::SessionConfig<RealT>& cfg,
-    size_t pool_index
-) {
-    json::object value;
-    value["pool_index"] = pool_index;
-    value["min_swap_frac"] = arb::canonical_binary64_string(cfg.min_swap_frac);
-    value["max_swap_frac"] = arb::canonical_binary64_string(cfg.max_swap_frac);
-    value["start_ts"] = cfg.start_ts;
-    value["dustswap_freq_s"] = cfg.dustswap_freq_s;
-    value["dustswap_random"] = cfg.dustswap_random;
-    value["dustswap_dynamic_freq_s"] = cfg.dustswap_dynamic_freq_s;
-    value["dustswap_dynamic_gap_enabled"] = cfg.dustswap_dynamic_gap_enabled;
-    value["dustswap_dynamic_gap_bps"] =
-        arb::canonical_binary64_string(cfg.dustswap_dynamic_gap_bps);
-    value["dustswap_dynamic_heartbeat_s"] = cfg.dustswap_dynamic_heartbeat_s;
-    value["dustswap_commit_clock_freq_s"] = cfg.dustswap_commit_clock_freq_s;
-    value["policy_keeper_enabled"] = cfg.policy_keeper_enabled;
-    value["allow_hybrid_keeper"] = cfg.allow_hybrid_keeper;
-    value["user_swap_freq_s"] = cfg.user_swap_freq_s;
-    value["user_swap_size_frac"] =
-        arb::canonical_binary64_string(cfg.user_swap_size_frac);
-    value["user_swap_thresh"] =
-        arb::canonical_binary64_string(cfg.user_swap_thresh);
-    value["enable_slippage_probes"] = cfg.enable_slippage_probes;
-    value["yb_mode"] = cfg.yb_mode;
-    value["yb_releverage_fee"] =
-        arb::canonical_binary64_string(cfg.yb_releverage_fee);
-    value["yb_cash_multiplier"] =
-        arb::canonical_binary64_string(cfg.yb_cash_multiplier);
-    return arb::sha256_canonical_json(value);
-}
-
-json::object make_evaluator_identity(const std::string& bin_hash) {
+json::object make_evaluator_identity() {
     json::object id;
-    id["binary_sha256"] = bin_hash;
     id["harness_version"] = curve_fx::identity::HARNESS_VERSION;
     id["pool_version"] = curve_fx::identity::POOL_VERSION;
     id["policy_id"] = std::string(SELECTED_POLICY_ID);
-    id["policy_source_sha256"] = curve_fx::identity::POLICY_SOURCE_SHA256;
     id["policy_abi"] = curve_fx::identity::POLICY_ABI;
     id["policy_parameter_count"] = SELECTED_POLICY_PARAM_COUNT;
     id["numeric_mode"] = NUMERIC_MODE_NAME;
@@ -340,10 +242,9 @@ json::object make_parameter_schema() {
     return schema;
 }
 
-json::object make_description(const std::string& bin_hash) {
+json::object make_description() {
     json::object info;
     info["schema_version"] = "curve_fx_evaluator_description_v1";
-    info["binary_sha256"] = bin_hash;
 
     json::object harness;
     harness["version"] = curve_fx::identity::HARNESS_VERSION;
@@ -361,7 +262,6 @@ json::object make_description(const std::string& bin_hash) {
     json::object policy;
     policy["id"] = std::string(SELECTED_POLICY_ID);
     policy["abi"] = curve_fx::identity::POLICY_ABI;
-    policy["source_sha256"] = curve_fx::identity::POLICY_SOURCE_SHA256;
     policy["parameter_count"] = SELECTED_POLICY_PARAM_COUNT;
     policy["descriptor_abi_version"] =
         arb::pools::twocrypto_fx::POLICY_DESCRIPTOR_ABI_VERSION;
@@ -383,19 +283,16 @@ json::object make_description(const std::string& bin_hash) {
 
     json::object schema = make_parameter_schema();
     const std::string schema_canonical_json = arb::canonical_json(schema);
-    info["parameter_schema_sha256"] = arb::crypto::sha256_hex(
-        schema_canonical_json.data(), schema_canonical_json.size());
     info["parameter_schema_canonical_json"] = schema_canonical_json;
     info["parameter_schema"] = std::move(schema);
     return info;
 }
 
-json::object make_hello_frame(const std::string& bin_hash) {
+json::object make_hello_frame() {
     json::object hello;
-    hello["protocol"] = "curve_fx_eval_v1";
+    hello["protocol"] = "curve_fx_eval";
     hello["type"] = "hello";
-    hello["version"] = 1;
-    hello["evaluator_identity"] = make_evaluator_identity(bin_hash);
+    hello["evaluator_identity"] = make_evaluator_identity();
 
     json::array caps;
     caps.push_back("summary");
@@ -429,7 +326,7 @@ json::object make_error_frame(
     const json::object& details = json::object{}
 ) {
     json::object err;
-    err["protocol"] = "curve_fx_eval_v1";
+    err["protocol"] = "curve_fx_eval";
     err["type"] = "error";
     err["request_id"] = req_id;
     err["scope"] = scope;
@@ -446,52 +343,10 @@ void write_frame(std::ostream& os, const json::object& obj) {
     os << '\n' << std::flush;
 }
 
-bool is_path_traversal(const std::string& path) {
-    if (path.empty()) return false;
-    if (path.front() == '/' || path.front() == '\\') return true;
-    fs::path p(path);
-    for (const auto& part : p) {
-        if (part == "..") return true;
-    }
-    return false;
-}
-
 bool is_safe_identifier(std::string_view s) {
     if (s.empty()) return false;
     for (char c : s) {
         if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.')) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool resolve_confined_file_path(const fs::path& base_dir, const std::string& relative_filename, fs::path& out_path) {
-    if (relative_filename.empty() || is_path_traversal(relative_filename)) {
-        return false;
-    }
-    fs::path target = base_dir / relative_filename;
-    fs::path norm_root = fs::weakly_canonical(fs::current_path());
-    fs::path norm_base = fs::weakly_canonical(base_dir);
-    fs::path norm_target = fs::weakly_canonical(target);
-
-    auto [r_it, base_it] = std::mismatch(
-        norm_root.begin(), norm_root.end(), norm_base.begin(), norm_base.end());
-    if (r_it != norm_root.end()) {
-        return false;
-    }
-    auto [b_it, t_it] = std::mismatch(norm_base.begin(), norm_base.end(), norm_target.begin(), norm_target.end());
-    if (b_it != norm_base.end()) {
-        return false;
-    }
-    out_path = norm_target;
-    return true;
-}
-
-bool is_valid_hex64(std::string_view s) {
-    if (s.size() != 64) return false;
-    for (char c : s) {
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
             return false;
         }
     }
@@ -511,7 +366,7 @@ std::optional<std::string> unknown_field(
     return std::nullopt;
 }
 
-bool write_atomic_file(const fs::path& p, const std::string& content, std::string& out_sha256) {
+bool write_atomic_file(const fs::path& p, const std::string& content) {
     if (p.has_parent_path()) {
         fs::create_directories(p.parent_path());
     }
@@ -525,7 +380,6 @@ bool write_atomic_file(const fs::path& p, const std::string& content, std::strin
         ofs.flush();
     }
 
-    out_sha256 = arb::core::sha256_file(tmp_p.string());
     std::error_code ec;
     fs::rename(tmp_p, p, ec);
     if (ec) {
@@ -542,25 +396,17 @@ namespace server {
 
 struct ActiveSession {
     std::string session_id;
-    std::string template_path;
-    std::string manifest_path;
-    std::string scenario_set_sha256;
-    std::string session_config_sha256;
-    std::string session_fingerprint;
     std::shared_ptr<curve_fx::evaluator::ScenarioStore<RealT>> store;
     curve_fx::evaluator::SessionConfig<RealT> config;
 };
 
 class EvaluatorServer {
 public:
-    explicit EvaluatorServer(std::string binary_hash)
-        : bin_hash_(std::move(binary_hash)) {}
-
     void run() {
         std::cerr << "[evaluator] Worker count: "
                   << curve_fx::evaluator::configured_worker_count() << "\n";
         // Emit initial hello frame
-        write_frame(std::cout, make_hello_frame(bin_hash_));
+        write_frame(std::cout, make_hello_frame());
 
         std::string line;
         while (std::getline(std::cin, line)) {
@@ -599,11 +445,11 @@ public:
             const std::string type = arb::get_string_opt(req, "type", "");
             const std::string req_id = arb::get_string_opt(req, "request_id", "req-unknown");
 
-            if (protocol != "curve_fx_eval_v1") {
+            if (protocol != "curve_fx_eval") {
                 write_frame(
                     std::cout,
                     make_error_frame(req_id, "protocol", "PROTOCOL_MISMATCH",
-                        "protocol must be 'curve_fx_eval_v1'")
+                        "protocol must be 'curve_fx_eval'")
                 );
                 continue;
             }
@@ -634,15 +480,14 @@ public:
     }
 
 private:
-    std::string bin_hash_;
     std::optional<ActiveSession> session_;
     bool session_ever_opened_{false};
 
     void handle_open_session(const json::object& req, const std::string& req_id) {
         if (const auto field = unknown_field(req, {
                 "protocol", "type", "request_id", "session_id",
-                "template_path", "template_sha256", "manifest_path",
-                "manifest_sha256", "pool_index", "n_candles", "start_time",
+                "template_path", "scenario_id", "market_path", "chainlink_path",
+                "pool_index", "n_candles", "start_time",
                 "end_time", "candle_filter", "min_swap", "max_swap",
                 "dustswap_freq_s", "dustswap_random",
                 "dustswap_dynamic_freq_s", "dustswap_dynamic_gap_enabled",
@@ -650,8 +495,8 @@ private:
                 "dustswap_commit_clock_freq_s", "policy_keeper_enabled",
                 "allow_hybrid_keeper", "user_swap_freq_s",
                 "user_swap_size_frac", "user_swap_thresh",
-                "disable_slippage_probes", "yb_releverage",
-                "yb_releverage_fee", "yb_cash_multiplier", "yb_mode"
+                "disable_slippage_probes", "yb_releverage_fee",
+                "yb_cash_multiplier", "yb_mode"
             })) {
             write_frame(std::cout, make_error_frame(
                 req_id, "protocol", "UNKNOWN_FIELD",
@@ -671,51 +516,30 @@ private:
         }
 
         const std::string tpl_path = arb::get_string_opt(req, "template_path", "");
-        const std::string tpl_hash = arb::get_string_opt(req, "template_sha256", "");
-        const std::string man_path = arb::get_string_opt(req, "manifest_path", "");
-        const std::string man_hash = arb::get_string_opt(req, "manifest_sha256", "");
+        const std::string scenario_id = arb::get_string_opt(req, "scenario_id", "");
+        const std::string market_path = arb::get_string_opt(req, "market_path", "");
+        const std::string chainlink_path = arb::get_string_opt(req, "chainlink_path", "");
 
-        if (tpl_path.empty() || man_path.empty()) {
-            write_frame(std::cout, make_error_frame(req_id, "session", "INVALID_ARGUMENT", "template_path and manifest_path are required"));
+        if (tpl_path.empty() || scenario_id.empty() || market_path.empty()) {
+            write_frame(std::cout, make_error_frame(
+                req_id, "session", "INVALID_ARGUMENT",
+                "template_path, scenario_id, and market_path are required"));
             return;
         }
 
-        if (!tpl_hash.empty() && !is_valid_hex64(tpl_hash)) {
-            write_frame(std::cout, make_error_frame(req_id, "session", "INVALID_ARGUMENT",
-                "template_sha256 must be a 64-character hex SHA-256 digest"));
-            return;
-        }
-
-        if (!man_hash.empty() && !is_valid_hex64(man_hash)) {
-            write_frame(std::cout, make_error_frame(req_id, "session", "INVALID_ARGUMENT",
-                "manifest_sha256 must be a 64-character hex SHA-256 digest"));
-            return;
-        }
-
-        // Verify template attestation
         if (!fs::exists(tpl_path) || fs::is_directory(tpl_path)) {
             write_frame(std::cout, make_error_frame(req_id, "session", "FILE_NOT_FOUND", "Template file not found: " + tpl_path));
             return;
         }
-        const std::string actual_tpl_hash = arb::core::sha256_file(tpl_path);
-        if (!tpl_hash.empty() && actual_tpl_hash != tpl_hash) {
-            write_frame(std::cout, make_error_frame(req_id, "session", "ATTESTATION_FAILED",
-                "Template SHA-256 mismatch: expected " + tpl_hash + ", got " + actual_tpl_hash));
+        if (!fs::exists(market_path) || fs::is_directory(market_path)) {
+            write_frame(std::cout, make_error_frame(req_id, "session", "FILE_NOT_FOUND", "Market file not found: " + market_path));
             return;
         }
-
-        // Verify manifest attestation
-        if (!fs::exists(man_path) || fs::is_directory(man_path)) {
-            write_frame(std::cout, make_error_frame(req_id, "session", "FILE_NOT_FOUND", "Manifest file not found: " + man_path));
+        if (!chainlink_path.empty() &&
+            (!fs::exists(chainlink_path) || fs::is_directory(chainlink_path))) {
+            write_frame(std::cout, make_error_frame(req_id, "session", "FILE_NOT_FOUND", "Chainlink file not found: " + chainlink_path));
             return;
         }
-        const std::string actual_man_hash = arb::core::sha256_file(man_path);
-        if (!man_hash.empty() && actual_man_hash != man_hash) {
-            write_frame(std::cout, make_error_frame(req_id, "session", "ATTESTATION_FAILED",
-                "Manifest SHA-256 mismatch: expected " + man_hash + ", got " + actual_man_hash));
-            return;
-        }
-
         size_t pool_index = 0;
         size_t max_candles = 0;
         uint64_t start_ts = 0;
@@ -753,8 +577,9 @@ private:
             opts.end_ts = end_ts;
             opts.candle_filter_pct = arb::get_double_opt(req, "candle_filter", 0.0);
 
-            std::cerr << "[evaluator] Loading scenarios from manifest: " << man_path << " with template: " << tpl_path << "\n";
-            store->load_from_session_manifest(man_path, tpl_path, opts);
+            std::cerr << "[evaluator] Loading scenario '" << scenario_id
+                      << "' from " << market_path << " with template: " << tpl_path << "\n";
+            store->load(tpl_path, scenario_id, market_path, chainlink_path, opts);
 
             curve_fx::evaluator::SessionConfig<RealT> cfg{};
             cfg.min_swap_frac = static_cast<RealT>(arb::get_double_opt(req, "min_swap", 1e-6));
@@ -796,16 +621,6 @@ private:
                         "yb_mode must be one of 'off', 'passive', 'active_2l'"));
                     return;
                 }
-            } else if (req.if_contains("yb_releverage")) {
-                if (!req.at("yb_releverage").is_bool()) {
-                    write_frame(std::cout, make_error_frame(
-                        req_id, "protocol", "INVALID_ARGUMENT",
-                        "yb_releverage must be a boolean"));
-                    return;
-                }
-                if (req.at("yb_releverage").as_bool()) {
-                    yb_mode = "active_2l";
-                }
             }
             cfg.yb_mode = yb_mode;
             cfg.yb_releverage_fee = static_cast<RealT>(arb::get_double_opt(req, "yb_releverage_fee", 0.012));
@@ -814,25 +629,13 @@ private:
 
             ActiveSession sess;
             sess.session_id = session_id;
-            sess.template_path = tpl_path;
-            sess.manifest_path = man_path;
             sess.store = store;
             sess.config = cfg;
-            sess.scenario_set_sha256 = store->compute_scenario_set_sha256();
-            sess.session_config_sha256 = compute_session_config_sha256(
-                cfg, opts.pool_index);
-            sess.session_fingerprint = store->compute_session_fingerprint(
-                bin_hash_,
-                curve_fx::identity::POLICY_SOURCE_SHA256,
-                sess.session_config_sha256,
-                opts.pool_index
-            );
-
             session_ = std::move(sess);
             session_ever_opened_ = true;
 
             json::object resp;
-            resp["protocol"] = "curve_fx_eval_v1";
+            resp["protocol"] = "curve_fx_eval";
             resp["type"] = "session_ready";
             resp["request_id"] = req_id;
             resp["session_id"] = session_id;
@@ -848,11 +651,6 @@ private:
                 scen_arr.push_back(s);
             }
             resp["scenarios"] = scen_arr;
-            resp["scenario_set_sha256"] = session_->scenario_set_sha256;
-            resp["session_fingerprint"] = session_->session_fingerprint;
-            resp["session_config_sha256"] = session_->session_config_sha256;
-            resp["metric_schema_sha256"] = canonical_metric_schema_sha256();
-
             write_frame(std::cout, resp);
             std::cerr << "[evaluator] Session '" << session_id << "' initialized successfully with "
                       << store->scenarios().size() << " scenarios.\n";
@@ -986,11 +784,6 @@ private:
                 return;
             }
 
-            if (is_path_traversal(artifact_dir)) {
-                write_frame(std::cout, make_error_frame(req_id, "sidecar", "PATH_TRAVERSAL_DETECTED",
-                    "artifact_dir must be a relative path and cannot contain '..' or root: " + artifact_dir));
-                return;
-            }
         }
 
         auto t0 = std::chrono::high_resolution_clock::now();
@@ -1125,7 +918,7 @@ private:
 
         // Build response JSON frame
         json::object resp;
-        resp["protocol"] = "curve_fx_eval_v1";
+        resp["protocol"] = "curve_fx_eval";
         resp["type"] = "batch_result";
         resp["request_id"] = req_id;
         resp["session_id"] = session_->session_id;
@@ -1135,21 +928,10 @@ private:
         json::array results_arr;
         for (size_t c_idx = 0; c_idx < batch_result.candidate_results.size(); ++c_idx) {
             const auto& res = batch_result.candidate_results[c_idx];
-            const auto& cand_req = candidates[c_idx];
-
             json::object r;
             r["ordinal"] = res.ordinal;
             r["candidate_id"] = res.candidate_id;
             r["status"] = res.success ? "ok" : "failed";
-
-            // Compute strictly deterministic economic fingerprint (excluding elapsed_ms)
-            std::string econ_fp = compute_deterministic_candidate_fingerprint(
-                session_->session_fingerprint,
-                cand_req.policy_params,
-                cand_req.pool_overrides,
-                res.aggregate_metrics
-            );
-            r["economic_fingerprint"] = econ_fp;
 
             if (!res.success) {
                 r["error"] = res.error_message;
@@ -1187,147 +969,53 @@ private:
             }
             r["scenario_results"] = sc_results;
 
-            // Write full trace sidecars and unified manifest if requested
+            // A direct session has exactly one scenario, so its sidecars are
+            // already an unambiguous candidate result.
             if (obs_spec.kind == curve_fx::evaluator::ObservationKind::FullTrace && !artifact_dir.empty() && res.success) {
                 json::object art_obj;
                 fs::path base_art_path(artifact_dir);
                 bool all_writes_ok = true;
                 std::vector<fs::path> written_paths;
-                const auto cleanup_bundle = [&]() {
+                const auto cleanup_sidecars = [&]() {
                     for (const auto& path : written_paths) {
                         std::error_code ignored;
                         fs::remove(path, ignored);
                     }
                 };
 
-                json::object scenarios_manifest_map;
-                std::string first_trace_path;
-                std::string first_trace_sha256;
-                std::string first_actions_path;
-                std::string first_actions_sha256;
-
-                for (const auto& sc_res : res.scenario_results) {
-                    if (sc_res.has_trace) {
-                        if (!is_safe_identifier(sc_res.scenario_id)) {
-                            write_frame(std::cout, make_error_frame(req_id, "sidecar", "INVALID_SCENARIO_ID",
-                                "scenario_id contains unsafe path characters: " + sc_res.scenario_id));
-                            return;
-                        }
-
-                        const std::string expected_trace_sha256 =
-                            arb::crypto::sha256_hex(sc_res.trace_json);
-                        std::string rel_trace_name = econ_fp + "." +
-                            sc_res.scenario_id + "." + expected_trace_sha256 +
-                            ".trace.json";
-                        fs::path trace_full_path;
-                        if (!resolve_confined_file_path(base_art_path, rel_trace_name, trace_full_path)) {
-                            write_frame(std::cout, make_error_frame(req_id, "sidecar", "PATH_TRAVERSAL_DETECTED",
-                                "Trace path escaped artifact_dir: " + rel_trace_name));
-                            return;
-                        }
-
-                        std::string trace_sha256;
-                        const bool trace_preexisting = fs::exists(trace_full_path);
-                        bool trace_written = write_atomic_file(trace_full_path, sc_res.trace_json, trace_sha256);
-                        if (!trace_written || trace_sha256 != expected_trace_sha256) {
-                            all_writes_ok = false;
-                            break;
-                        }
-                        if (!trace_preexisting) written_paths.push_back(trace_full_path);
-                        std::string rel_trace_path_str = artifact_dir + "/" + rel_trace_name;
-                        if (first_trace_path.empty()) {
-                            first_trace_path = rel_trace_path_str;
-                            first_trace_sha256 = trace_sha256;
-                        }
-
-                        fs::path act_full_path;
-                        std::string act_sha256;
-                        bool act_written = false;
-                        std::string rel_act_path_str;
-                        if (!sc_res.actions_json.empty()) {
-                            const std::string expected_actions_sha256 =
-                                arb::crypto::sha256_hex(sc_res.actions_json);
-                            std::string rel_act_name = econ_fp + "." +
-                                sc_res.scenario_id + "." +
-                                expected_actions_sha256 + ".actions.json";
-                            if (resolve_confined_file_path(base_art_path, rel_act_name, act_full_path)) {
-                                const bool actions_preexisting = fs::exists(act_full_path);
-                                act_written = write_atomic_file(act_full_path, sc_res.actions_json, act_sha256);
-                                if (!act_written || act_sha256 != expected_actions_sha256) {
-                                    all_writes_ok = false;
-                                    break;
-                                }
-                                if (!actions_preexisting) written_paths.push_back(act_full_path);
-                                rel_act_path_str = artifact_dir + "/" + rel_act_name;
-                                if (first_actions_path.empty()) {
-                                    first_actions_path = rel_act_path_str;
-                                    first_actions_sha256 = act_sha256;
-                                }
-                            } else {
-                                all_writes_ok = false;
-                                break;
-                            }
-                        }
-
-                        json::object sc_desc;
-                        json::object t_desc;
-                        t_desc["path"] = rel_trace_path_str;
-                        t_desc["sha256"] = trace_sha256;
-                        t_desc["size_bytes"] = static_cast<int64_t>(sc_res.trace_json.size());
-                        t_desc["record_count"] = static_cast<int64_t>(sc_res.trace_record_count);
-                        sc_desc["trace"] = t_desc;
-
-                        if (act_written) {
-                            json::object a_desc;
-                            a_desc["path"] = rel_act_path_str;
-                            a_desc["sha256"] = act_sha256;
-                            a_desc["size_bytes"] = static_cast<int64_t>(sc_res.actions_json.size());
-                            a_desc["action_count"] = static_cast<int64_t>(sc_res.action_count);
-                            sc_desc["actions"] = a_desc;
-                        }
-
-                        scenarios_manifest_map[sc_res.scenario_id] = sc_desc;
+                if (res.scenario_results.size() != 1 || !res.scenario_results.front().has_trace) {
+                    all_writes_ok = false;
+                } else {
+                    const auto& sc_res = res.scenario_results.front();
+                    if (!is_safe_identifier(sc_res.scenario_id)) {
+                        write_frame(std::cout, make_error_frame(req_id, "sidecar", "INVALID_SCENARIO_ID",
+                            "scenario_id contains unsafe path characters: " + sc_res.scenario_id));
+                        return;
                     }
-                }
 
-                if (all_writes_ok && !scenarios_manifest_map.empty()) {
-                    json::object trace_man;
-                    trace_man["manifest_version"] = "curve_fx_trace_manifest_v1";
-                    trace_man["session_id"] = session_->session_id;
-                    trace_man["candidate_id"] = res.candidate_id;
-                    trace_man["economic_fingerprint"] = econ_fp;
-                    trace_man["scenarios"] = scenarios_manifest_map;
+                    const std::string stem = "candidate_" +
+                        std::to_string(res.ordinal) + "." + sc_res.scenario_id;
+                    const fs::path trace_path = base_art_path / (stem + ".trace.json");
+                    const bool trace_preexisting = fs::exists(trace_path);
+                    all_writes_ok = write_atomic_file(trace_path, sc_res.trace_json);
+                    if (all_writes_ok) {
+                        if (!trace_preexisting) written_paths.push_back(trace_path);
+                        art_obj["trace_path"] = trace_path.string();
+                    }
 
-                    std::string man_json = json::serialize(trace_man);
-                    const std::string expected_manifest_sha256 =
-                        arb::crypto::sha256_hex(man_json);
-                    const std::string rel_man_name = econ_fp + "." +
-                        expected_manifest_sha256 + ".manifest.json";
-                    fs::path man_full_path;
-                    std::string man_sha256;
-                    const bool manifest_path_resolved = resolve_confined_file_path(
-                        base_art_path, rel_man_name, man_full_path);
-                    const bool manifest_preexisting =
-                        manifest_path_resolved && fs::exists(man_full_path);
-                    if (!manifest_path_resolved ||
-                        !write_atomic_file(man_full_path, man_json, man_sha256) ||
-                        man_sha256 != expected_manifest_sha256) {
-                        all_writes_ok = false;
-                    } else {
-                        if (!manifest_preexisting) written_paths.push_back(man_full_path);
-                        art_obj["manifest_path"] = artifact_dir + "/" + rel_man_name;
-                        art_obj["manifest_sha256"] = man_sha256;
-                        art_obj["trace_path"] = first_trace_path;
-                        art_obj["trace_sha256"] = first_trace_sha256;
-                        if (!first_actions_path.empty()) {
-                            art_obj["actions_path"] = first_actions_path;
-                            art_obj["actions_sha256"] = first_actions_sha256;
+                    if (all_writes_ok && !sc_res.actions_json.empty()) {
+                        const fs::path actions_path = base_art_path / (stem + ".actions.json");
+                        const bool actions_preexisting = fs::exists(actions_path);
+                        all_writes_ok = write_atomic_file(actions_path, sc_res.actions_json);
+                        if (all_writes_ok) {
+                            if (!actions_preexisting) written_paths.push_back(actions_path);
+                            art_obj["actions_path"] = actions_path.string();
                         }
                     }
                 }
 
-                if (!all_writes_ok || scenarios_manifest_map.empty()) {
-                    cleanup_bundle();
+                if (!all_writes_ok) {
+                    cleanup_sidecars();
                     r["artifacts"] = nullptr;
                 } else {
                     r["artifacts"] = art_obj;
@@ -1368,7 +1056,7 @@ private:
             session_.reset();
         }
         json::object resp;
-        resp["protocol"] = "curve_fx_eval_v1";
+        resp["protocol"] = "curve_fx_eval";
         resp["type"] = "session_closed";
         resp["request_id"] = req_id;
         resp["session_id"] = sid;
@@ -1425,7 +1113,7 @@ int main(int argc, char* argv[]) {
             std::cerr << "Usage: " << argv[0]
                       << " [serve | --identity-json | --describe-json] [--workers N]\n\n"
                       << "Modes:\n"
-                      << "  serve              Run persistent NDJSON server implementing protocol curve_fx_eval_v1 (stdin/stdout)\n"
+                      << "  serve              Run persistent NDJSON server implementing protocol curve_fx_eval (stdin/stdout)\n"
                       << "  --identity-json    Print evaluator identity frame to stdout and exit 0\n"
                       << "  --describe-json    Print executable-bound build and lowering schema and exit 0\n"
                       << "Options:\n"
@@ -1455,31 +1143,18 @@ int main(int argc, char* argv[]) {
     }
 
     if (identity_only) {
-        try {
-            const std::string bin_hash = compute_binary_sha256(argv[0]);
-            write_frame(std::cout, make_hello_frame(bin_hash));
-            return 0;
-        } catch (const std::exception& error) {
-            std::cerr << "Error: " << error.what() << "\n";
-            return 1;
-        }
+        write_frame(std::cout, make_hello_frame());
+        return 0;
     }
 
     if (describe_only) {
-        try {
-            const std::string bin_hash = compute_binary_sha256(argv[0]);
-            write_frame(std::cout, make_description(bin_hash));
-            return 0;
-        } catch (const std::exception& error) {
-            std::cerr << "Error: " << error.what() << "\n";
-            return 1;
-        }
+        write_frame(std::cout, make_description());
+        return 0;
     }
 
     if (mode == "serve") {
         try {
-            const std::string bin_hash = compute_binary_sha256(argv[0]);
-            curve_fx::server::EvaluatorServer server(bin_hash);
+            curve_fx::server::EvaluatorServer server;
             server.run();
             return 0;
         } catch (const std::exception& error) {

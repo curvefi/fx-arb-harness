@@ -18,7 +18,6 @@
 #include <type_traits>
 #include <vector>
 
-#include "core/sha256.hpp"
 
 namespace arb {
 
@@ -318,12 +317,6 @@ inline std::string canonical_json(const boost::json::value& v) {
     std::string out;
     detection_for_canonical::canonical_append(out, v);
     return out;
-}
-
-// SHA-256 (hex) of the canonical JSON serialization of a value.
-inline std::string sha256_canonical_json(const boost::json::value& v) {
-    const std::string canonical = canonical_json(v);
-    return crypto::sha256_hex(canonical.data(), canonical.size());
 }
 
 } // namespace arb

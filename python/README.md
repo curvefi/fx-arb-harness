@@ -1,6 +1,6 @@
 # curve-fx-harness-client
 
-Typed Python client and protocol models for the `curve_fx_eval_v1` simulation harness.
+Typed Python client and protocol models for the `curve_fx_eval` simulation harness.
 
 ## Installation
 ```bash
@@ -15,7 +15,9 @@ with EvaluatorClient(executable_path="../build/arb_evaluator_ld") as client:
     client.open_session(
         session_id="btc-2024",
         template_path="templates/pool_btc.json",
-        manifest_path="manifests/scenarios_btc.json",
+        scenario_id="btc-2024",
+        market_path="markets/btc.json",
+        chainlink_path="markets/btc_chainlink.json",
     )
     result = client.evaluate_batch(
         candidates=[

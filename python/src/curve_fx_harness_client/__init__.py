@@ -2,7 +2,6 @@
 
 from .client import EvaluatorClient
 from .exceptions import (
-    AttestationError,
     EvaluatorProcessError,
     HarnessError,
     IdentityMismatchError,
@@ -10,7 +9,6 @@ from .exceptions import (
     RemoteEvaluatorError,
     SessionError,
 )
-from .hashing import sha256_file
 from .models import (
     ArtifactRef,
     BatchResultFrame,
@@ -58,8 +56,6 @@ __all__ = [
     "ProtocolViolationError",
     "EvaluatorProcessError",
     "IdentityMismatchError",
-    "AttestationError",
     "SessionError",
     "RemoteEvaluatorError",
-    "sha256_file",
 ]

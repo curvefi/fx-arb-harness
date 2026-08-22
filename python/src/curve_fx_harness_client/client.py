@@ -10,14 +10,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from .exceptions import (
-    AttestationError,
     EvaluatorProcessError,
     IdentityMismatchError,
     ProtocolViolationError,
     RemoteEvaluatorError,
     SessionError,
 )
-from .hashing import sha256_file
 from .models import (
     BatchResultFrame,
     CandidateSpec,
@@ -45,7 +43,6 @@ class EvaluatorClient:
         executable_path: Union[str, Path] = "arb_evaluator_ld",
         work_dir: Optional[Union[str, Path]] = None,
         expected_policy_id: Optional[str] = None,
-        expected_policy_source_sha256: Optional[str] = None,
         expected_policy_abi: Optional[str] = None,
         expected_policy_parameter_count: Optional[int] = None,
         launch_argv: Optional[Sequence[Union[str, Path]]] = None,
@@ -55,7 +52,6 @@ class EvaluatorClient:
         self.executable_path = str(executable_path)
         self.work_dir = Path(work_dir) if work_dir else Path.cwd()
         self.expected_policy_id = expected_policy_id
-        self.expected_policy_source_sha256 = expected_policy_source_sha256
         self.expected_policy_abi = expected_policy_abi
         self.expected_policy_parameter_count = expected_policy_parameter_count
         self.launch_argv = (
@@ -123,15 +119,6 @@ class EvaluatorClient:
             raise IdentityMismatchError(
                 f"Evaluator policy ID mismatch: expected '{self.expected_policy_id}', got '{identity.policy_id}'",
                 expected={"policy_id": self.expected_policy_id},
-                actual=identity.model_dump(),
-            )
-        if (
-            self.expected_policy_source_sha256
-            and identity.policy_source_sha256 != self.expected_policy_source_sha256
-        ):
-            raise IdentityMismatchError(
-                "Evaluator policy source SHA-256 digest mismatch",
-                expected={"policy_source_sha256": self.expected_policy_source_sha256},
                 actual=identity.model_dump(),
             )
         if self.expected_policy_abi and identity.policy_abi != self.expected_policy_abi:
@@ -256,9 +243,9 @@ class EvaluatorClient:
         self,
         session_id: str,
         template_path: Union[str, Path],
-        manifest_path: Union[str, Path],
-        template_sha256: Optional[str] = None,
-        manifest_sha256: Optional[str] = None,
+        scenario_id: str,
+        market_path: Union[str, Path],
+        chainlink_path: Optional[Union[str, Path]] = None,
         pool_index: int = 0,
         n_candles: int = 0,
         start_time: int = 0,
@@ -279,68 +266,45 @@ class EvaluatorClient:
         user_swap_size_frac: float = 0.01,
         user_swap_thresh: float = 0.05,
         disable_slippage_probes: bool = False,
-        yb_mode: Optional[str] = None,
-        yb_releverage: bool = False,
+        yb_mode: str = "off",
         yb_releverage_fee: float = 0.012,
         yb_cash_multiplier: float = 1.0,
     ) -> SessionReadyFrame:
-        """Open an immutable evaluation session with attested template, manifest, and feed files.
+        """Open an immutable evaluation session from direct scenario inputs.
 
         ``yb_mode`` selects the YieldBasis mode: "off" (default), "passive"
         (metrics-only shadow of the 2L transition; the primary simulation is
-        untouched), or "active_2l" (state-mutating 2L model). The legacy
-        ``yb_releverage`` boolean is still accepted and maps to
-        ``yb_mode="active_2l"`` when ``yb_mode`` is not given.
+        untouched), or "active_2l" (state-mutating 2L model).
         """
-        if yb_mode is not None:
-            if yb_mode not in {"off", "passive", "active_2l"}:
-                raise ValueError(
-                    "yb_mode must be one of 'off', 'passive', 'active_2l'"
-                )
-            effective_yb_mode = yb_mode
-        else:
-            effective_yb_mode = "active_2l" if yb_releverage else "off"
         with self._lock:
             if self._proc is None:
                 self._start_unlocked()
 
             if self.verify_local_inputs:
                 full_tpl = self.work_dir / template_path
-                full_man = self.work_dir / manifest_path
+                full_market = self.work_dir / market_path
 
                 if not full_tpl.exists():
                     raise FileNotFoundError(f"Template file not found: {full_tpl}")
-                if not full_man.exists():
-                    raise FileNotFoundError(f"Manifest file not found: {full_man}")
-
-                computed_tpl_hash = sha256_file(full_tpl)
-                if template_sha256 and computed_tpl_hash != template_sha256:
-                    raise AttestationError(
-                        f"Template hash mismatch for {template_path}",
-                        path=str(template_path),
-                        expected_sha256=template_sha256,
-                        actual_sha256=computed_tpl_hash,
-                    )
-
-                computed_man_hash = sha256_file(full_man)
-                if manifest_sha256 and computed_man_hash != manifest_sha256:
-                    raise AttestationError(
-                        f"Manifest hash mismatch for {manifest_path}",
-                        path=str(manifest_path),
-                        expected_sha256=manifest_sha256,
-                        actual_sha256=computed_man_hash,
-                    )
-            else:
-                computed_tpl_hash = computed_man_hash = None
+                if not full_market.exists():
+                    raise FileNotFoundError(f"Market file not found: {full_market}")
+                if chainlink_path is not None:
+                    full_chainlink = self.work_dir / chainlink_path
+                    if not full_chainlink.exists():
+                        raise FileNotFoundError(
+                            f"Chainlink file not found: {full_chainlink}"
+                        )
 
             req_id = self._next_request_id("session")
             frame = OpenSessionFrame(
                 request_id=req_id,
                 session_id=session_id,
                 template_path=str(template_path),
-                template_sha256=template_sha256 or computed_tpl_hash,
-                manifest_path=str(manifest_path),
-                manifest_sha256=manifest_sha256 or computed_man_hash,
+                scenario_id=scenario_id,
+                market_path=str(market_path),
+                chainlink_path=(
+                    str(chainlink_path) if chainlink_path is not None else None
+                ),
                 pool_index=pool_index,
                 n_candles=n_candles,
                 start_time=start_time,
@@ -361,8 +325,7 @@ class EvaluatorClient:
                 user_swap_size_frac=user_swap_size_frac,
                 user_swap_thresh=user_swap_thresh,
                 disable_slippage_probes=disable_slippage_probes,
-                yb_mode=effective_yb_mode,
-                yb_releverage=yb_releverage,
+                yb_mode=yb_mode,
                 yb_releverage_fee=yb_releverage_fee,
                 yb_cash_multiplier=yb_cash_multiplier,
             )
@@ -370,12 +333,7 @@ class EvaluatorClient:
             resp_data = self._transact(frame.model_dump(exclude_none=True))
             session_ready = SessionReadyFrame.model_validate(resp_data)
             self._current_session_id = session_id
-            logger.info(
-                "Session '%s' ready with %d scenarios (set_sha256=%s)",
-                session_id,
-                len(session_ready.scenarios),
-                session_ready.scenario_set_sha256[:12],
-            )
+            logger.info("Session '%s' ready with %d scenarios", session_id, len(session_ready.scenarios))
             return session_ready
 
     def evaluate_batch(

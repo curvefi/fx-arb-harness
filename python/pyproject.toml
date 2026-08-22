@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "curve_fx_harness_client"
 version = "0.1.1"
-description = "Typed client and protocol models for curve_fx_eval_v1 simulation harness"
+description = "Typed client and protocol models for the curve_fx_eval simulation harness"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
