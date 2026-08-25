@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <initializer_list>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -444,6 +445,7 @@ struct PoolOverride {
 
     PoolInit<T> pool{};
     arb::trading::Costs<T> costs{};
+    std::optional<T> yb_releverage_fee{};
     uint32_t pool_fields{0};
     uint32_t cost_fields{0};
 
@@ -485,10 +487,12 @@ struct PoolOverride {
 template <typename T>
 PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
     PoolOverride<T> out;
-    parse_pool_entry<T>(entry, out.pool, out.costs);
+    boost::json::object pool_entry = entry;
+    pool_entry.erase("run");
+    parse_pool_entry<T>(pool_entry, out.pool, out.costs);
 
-    const bool wrapped_pool = entry.contains("pool");
-    const auto& pool = wrapped_pool ? entry.at("pool").as_object() : entry;
+    const bool wrapped_pool = pool_entry.contains("pool");
+    const auto& pool = wrapped_pool ? pool_entry.at("pool").as_object() : pool_entry;
     const auto has = [&](const char* key) { return pool.if_contains(key) != nullptr; };
     if (auto* tag = entry.if_contains("tag"); tag != nullptr && tag->is_string()) out.pool_fields |= PoolOverride<T>::Tag;
     if (auto* liq = pool.if_contains("initial_liquidity"); liq != nullptr &&
@@ -514,13 +518,29 @@ PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
     if (has("donation_coins_ratio")) out.pool_fields |= PoolOverride<T>::DonationCoinsRatio;
     if (has("user_swap_size_frac")) out.pool_fields |= PoolOverride<T>::UserSwapSizeFrac;
 
-    if (auto* costs = entry.if_contains("costs"); costs != nullptr) {
+    if (auto* costs = pool_entry.if_contains("costs"); costs != nullptr) {
         const auto& co = costs->as_object();
         if (co.if_contains("arb_fee_bps")) out.cost_fields |= PoolOverride<T>::ArbFeeBps;
         if (co.if_contains("gas_coin0")) out.cost_fields |= PoolOverride<T>::GasCoin0;
         if (co.if_contains("use_volume_cap")) out.cost_fields |= PoolOverride<T>::UseVolumeCap;
         if (co.if_contains("volume_cap_mult")) out.cost_fields |= PoolOverride<T>::VolumeCapMult;
         if (co.if_contains("volume_cap_is_coin_1")) out.cost_fields |= PoolOverride<T>::VolumeCapIsCoin1;
+    }
+    if (auto* run = entry.if_contains("run"); run != nullptr) {
+        if (!run->is_object()) {
+            throw std::runtime_error("candidate run override must be an object");
+        }
+        const auto& ro = run->as_object();
+        reject_unknown_fields(ro, {"yb_releverage_fee"}, "candidate run override");
+        if (auto* fee = ro.if_contains("yb_releverage_fee"); fee != nullptr) {
+            const T value = parse_plain_real<T>(*fee);
+            if (value < T(0) || value > T(1)) {
+                throw std::runtime_error(
+                    "candidate run override yb_releverage_fee must be in [0, 1]"
+                );
+            }
+            out.yb_releverage_fee = value;
+        }
     }
     return out;
 }

@@ -43,6 +43,7 @@ inline constexpr std::array<StaticParameterDescriptor, 60> STATIC_PARAMETERS{{
     {"pool.costs.use_volume_cap", "pool_overrides.costs.use_volume_cap", "boolean", "flag", "json_boolean", "candidate", ""},
     {"pool.costs.volume_cap_mult", "pool_overrides.costs.volume_cap_mult", "real", "ratio", "binary64", "candidate", ""},
     {"pool.costs.volume_cap_is_coin_1", "pool_overrides.costs.volume_cap_is_coin_1", "boolean", "flag", "json_boolean_or_binary64", "candidate", ""},
+    {"pool.run.yb_releverage_fee", "pool_overrides.run.yb_releverage_fee", "real", "fee_fraction", "binary64", "candidate", ""},
     {"run.session_id", "open_session.session_id", "string", "identifier", "utf8", "session", ""},
     {"run.template_path", "open_session.template_path", "string", "path", "utf8", "session", ""},
     {"run.scenario_id", "open_session.scenario_id", "string", "identifier", "utf8", "session", ""},

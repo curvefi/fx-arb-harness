@@ -373,7 +373,10 @@ void execute_scenario_job(
                 "' (expected 'off', 'passive', or 'active_2l')"
             );
         }
-        run_cfg.yb_releverage_fee = session_cfg.yb_releverage_fee;
+        run_cfg.yb_releverage_fee =
+            pool_override != nullptr && pool_override->yb_releverage_fee.has_value()
+                ? *pool_override->yb_releverage_fee
+                : session_cfg.yb_releverage_fee;
         run_cfg.yb_cash_multiplier = session_cfg.yb_cash_multiplier;
 
         std::vector<arb::harness::Action<RealT>>* actions_ptr = nullptr;
