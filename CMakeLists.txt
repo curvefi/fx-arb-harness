@@ -17,6 +17,9 @@ option(CURVE_FX_ENABLE_IPO
 option(CURVE_FX_NATIVE_TUNING
     "Tune evaluator code for the build host CPU (not portable across blades)"
     OFF)
+option(CURVE_FX_EDGE_GATE_DIAGNOSTICS
+    "Collect per-event geometry and fee-gate counters"
+    OFF)
 
 if(CURVE_FX_ENABLE_IPO)
     include(CheckIPOSupported)
@@ -204,6 +207,11 @@ function(add_curve_fx_evaluator TARGET_NAME LIBRARY_NAME MODE_DEFINE)
         Boost::json
         Threads::Threads
     )
+    if(CURVE_FX_EDGE_GATE_DIAGNOSTICS)
+        target_compile_definitions(${LIBRARY_NAME} PUBLIC
+            ARB_EDGE_GATE_DIAGNOSTICS=1
+        )
+    endif()
     if(POLICY_HEADER_PATH)
         target_include_directories(${LIBRARY_NAME} PRIVATE "${POLICY_INCLUDE_DIR}")
         # Public headers instantiate the selected policy. Consumers must use

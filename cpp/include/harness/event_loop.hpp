@@ -188,6 +188,7 @@ EventLoopResult<T> run_event_loop_impl(
     bool geometry_valid = false;
     bool fee_valid = false;
     T edge_p_now{};
+    T edge_floor_scaled_p{};
     T edge_fee{};
     std::array<T, 2> edge_xp{};
     const T omf_floor = std::max(T(1) - pool.fee_lower_bound(), T(1e-12));
@@ -197,15 +198,20 @@ EventLoopResult<T> run_event_loop_impl(
         edge_p_now = pools::twocrypto_fx::MathOps<T>::get_p(
             edge_xp, pool.D, {pool.A, pool.gamma}
         ) * pool.cached_price_scale;
+        edge_floor_scaled_p = omf_floor * edge_p_now;
         geometry_valid = true;
+#if defined(ARB_EDGE_GATE_DIAGNOSTICS)
         ++m.geometry_refreshes;
+#endif
     };
     auto refresh_edge_fee = [&]() {
         refresh_geometry();
         if (fee_cacheable && fee_valid) return;
         edge_fee = pool.fee(edge_xp);
         fee_valid = true;
+#if defined(ARB_EDGE_GATE_DIAGNOSTICS)
         ++m.actual_fee_calls;
+#endif
     };
     auto invalidate_edge_inputs = [&]() {
         geometry_valid = false;
@@ -247,10 +253,12 @@ EventLoopResult<T> run_event_loop_impl(
     auto execute_arb = [&](size_t ev_idx, uint64_t ev_ts, T cex_price) -> bool {
         refresh_geometry();
         if (!(omf_floor * (cex_fee_discount * cex_price) > edge_p_now) &&
-            !(omf_floor * edge_p_now > cex_fee_markup * cex_price)) {
+            !(edge_floor_scaled_p > cex_fee_markup * cex_price)) {
             return false;
         }
+#if defined(ARB_EDGE_GATE_DIAGNOSTICS)
         ++m.floor_gate_passes;
+#endif
         refresh_edge_fee();
         T volume_cap = std::numeric_limits<T>::infinity();
         if (costs.use_volume_cap) {
@@ -885,7 +893,9 @@ EventLoopResult<T> run_event_loop_impl(
     }
 
     for (size_t ev_idx = first_event_idx; ev_idx < n_events; ++ev_idx) {
+#if defined(ARB_EDGE_GATE_DIAGNOSTICS)
         ++m.events_total;
+#endif
         const uint64_t ev_ts = events.ts[ev_idx];
         const T price_scale_at_event_start = pool.cached_price_scale;
 
