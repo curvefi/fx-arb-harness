@@ -2,6 +2,12 @@
 
 `curve-fx-arb-harness` owns one transport-free C++17 economic simulation loop and the `curve_fx_eval` evaluator protocol. It consumes an installed `twocrypto::pool`; it does not embed a pool implementation or own client-side scoring or artifact presentation.
 
+## Repository split
+
+- [`twocrypto-cpp`](https://github.com/curvefi/twocrypto-cpp) — C++ Twocrypto pool implementation and Vyper parity; no market simulation or experiment orchestration.
+- [`fx-arb-harness`](https://github.com/curvefi/fx-arb-harness) — C++ arbitrage simulation and evaluator protocol; owns market-event execution and raw metrics.
+- [`fx-optimization`](https://github.com/curvefi/fx-optimization) — cluster orchestration, parameter grids, scoring, result storage, robustness analysis, heatmaps, and replay.
+
 ## Build prerequisites and independent setup
 
 Requirements: Python 3.12 with uv, CMake 3.14+, a C++17 compiler, Boost with the JSON component, and Threads. Build/install `twocrypto-cpp` first and point CMake at its install prefix; a sibling source checkout is only an explicit development prerequisite, never a runtime path.
