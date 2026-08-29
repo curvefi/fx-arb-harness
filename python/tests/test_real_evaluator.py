@@ -152,7 +152,7 @@ def test_description_is_bound_and_complete() -> None:
         run.dustswap_dynamic_heartbeat_s run.dustswap_commit_clock_freq_s
         run.policy_keeper_enabled run.allow_hybrid_keeper run.user_swap_freq_s
         run.user_swap_size_frac run.user_swap_thresh
-        run.enable_slippage_probes run.yb_mode
+        run.enable_slippage_probes run.event_cursor run.metric_profile run.yb_mode
         run.yb_releverage_fee run.yb_cash_multiplier run.metric_projection
         run.observation.kind run.observation.trace_interval
         run.observation.trace_actions run.observation.artifact_dir
@@ -163,6 +163,8 @@ def test_description_is_bound_and_complete() -> None:
     } <= parameter.keys() for parameter in parameters)
     enums = {p["name"]: p["choices"] for p in parameters if p["type"] == "enum"}
     assert enums == {
+        "run.event_cursor": ["scalar", "exact_skip"],
+        "run.metric_profile": ["full_summary", "grid_core"],
         "run.yb_mode": ["off", "active_2l", "reference_2l"],
         "run.metric_projection": ["summary", "full"],
         "run.observation.kind": ["summary", "full_trace"],

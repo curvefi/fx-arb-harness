@@ -28,6 +28,23 @@ struct Event {
     uint32_t candle_idx;  // index into candle vector (used for detailed logging)
 };
 
+struct PriceBlockIndex {
+    static constexpr size_t BLOCK_SIZE = 16;
+
+    size_t block_count{0};
+    std::vector<double> min_positive;
+    std::vector<double> max_positive;
+
+    void build(const std::vector<double>& prices);
+
+    bool ready_for(size_t event_count) const {
+        return block_count ==
+                (event_count + BLOCK_SIZE - 1) / BLOCK_SIZE &&
+            min_positive.size() == block_count &&
+            max_positive.size() == block_count;
+    }
+};
+
 // Structure-of-arrays event stream consumed by the event loop. The hot path
 // reads only ts and p_cex per event; volume is touched on edge candidates,
 // candle_idx only when detailed/YB sampling is on, and p_chainlink only by
@@ -43,6 +60,7 @@ struct EventSoA {
     std::vector<double> p_chainlink;  // empty unless a chainlink feed was attached
     std::vector<uint64_t> chainlink_ts;
     std::vector<uint64_t> chainlink_answer_index;
+    PriceBlockIndex price_blocks;
 
     size_t size() const { return ts.size(); }
     bool empty() const { return ts.empty(); }

@@ -17,6 +17,16 @@ enum class YbMode : uint8_t {
     Reference2l,   // contract-derived VirtualPool/LevAMM reference candidate
 };
 
+enum class EventCursor : uint8_t {
+    Scalar = 0,
+    ExactSkip,
+};
+
+enum class MetricProfile : uint8_t {
+    FullSummary = 0,
+    GridCore,
+};
+
 template <typename T>
 struct RunConfig {
     T min_swap_frac{T(1e-6)};
@@ -48,6 +58,11 @@ struct RunConfig {
 
     // Slippage probe sampling
     bool enable_slippage_probes{false};
+
+    // Scalar remains the reference cursor. ExactSkip is admitted only when
+    // skipped events are provably observationally irrelevant.
+    EventCursor event_cursor{EventCursor::Scalar};
+    MetricProfile metric_profile{MetricProfile::FullSummary};
 
 };
 

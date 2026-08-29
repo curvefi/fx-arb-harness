@@ -51,7 +51,7 @@ struct YbLoopState {
           apy_gm_30d(30ULL * 24ULL * 60ULL * 60ULL, F(0.01)) {}
 };
 
-template <bool EnableYb, typename T, typename Pool>
+template <bool EnableYb, bool GridCore, typename T, typename Pool>
 EventLoopResult<T> run_event_loop_impl(
     Pool& pool,
     const EventSoA& events,
@@ -226,14 +226,18 @@ EventLoopResult<T> run_event_loop_impl(
         last_tw_sample_ts = ts;
         have_tw_sample = true;
 
-        tw.sample_price_error(ts, pool.cached_price_scale, cex_price);
+        tw.template sample_price_error<GridCore>(
+            ts, pool.cached_price_scale, cex_price
+        );
 
         const T x0p = pool.balances[0];
         const T x1p = pool.balances[1] * cex_price;
-        tw.sample_imbalance(ts, x0p, x1p);
+        tw.template sample_imbalance<GridCore>(ts, x0p, x1p);
 
-        refresh_edge_fee();
-        tw.sample_fee(ts, edge_fee);
+        if constexpr (!GridCore) {
+            refresh_edge_fee();
+            tw.sample_fee(ts, edge_fee);
+        }
     };
 
     auto apply_donation = [&](std::size_t, uint64_t ts) {
@@ -601,6 +605,130 @@ EventLoopResult<T> run_event_loop_impl(
     uint64_t last_gap_check_ts = 0;
     bool have_gap_check = false;
     uint64_t last_price_scale_change_ts = pool.last_timestamp;
+
+    const bool exact_skip_on =
+        cfg.event_cursor == EventCursor::ExactSkip &&
+        !EnableYb && !detailed_on && !action_logger.enabled() &&
+        !enable_slippage_probes && !user_swap_on && !cfg.dustswap_random &&
+        !dynamic_keeper_on && !gap_keeper_on && !policy_keeper_on &&
+        !commit_clock_keeper_on &&
+        pool.policy.quote_cache_safe() &&
+        pool.mid_fee == pool.out_fee &&
+        events.price_blocks.ready_for(n_events);
+
+    const auto event_passes_floor_gate = [&](double raw_price) {
+        if (!(raw_price > 0.0)) return false;
+        const T cex_price = static_cast<T>(raw_price);
+        return
+            omf_floor * (cex_fee_discount * cex_price) > edge_p_now ||
+            edge_floor_scaled_p > cex_fee_markup * cex_price;
+    };
+    const auto block_passes_floor_gate = [&](double min_price, double max_price) {
+        if (
+            max_price > 0.0 &&
+            omf_floor * (
+                cex_fee_discount * static_cast<T>(max_price)
+            ) > edge_p_now
+        ) {
+            return true;
+        }
+        return
+            min_price > 0.0 &&
+            edge_floor_scaled_p >
+                cex_fee_markup * static_cast<T>(min_price);
+    };
+    const auto due_after = [](uint64_t base, uint64_t delay) {
+        return delay > std::numeric_limits<uint64_t>::max() - base
+            ? std::numeric_limits<uint64_t>::max()
+            : base + delay;
+    };
+    const auto next_mandatory_ts = [&]() {
+        uint64_t next = result.t_end;  // Preserve final timestamp/context.
+        const auto include_due = [&](uint64_t due_ts) {
+            next = std::min(next, due_ts);
+        };
+        if (!have_tw_sample) {
+            return result.t_start;
+        } else {
+            include_due(due_after(
+                last_tw_sample_ts,
+                TimeWeightedMetrics<T>::PRICE_DIFF_BUCKET_S
+            ));
+        }
+        if (!apy_net_gm.have_sample) {
+            return result.t_start;
+        } else {
+            include_due(due_after(
+                apy_net_gm.last_sample_ts,
+                RollingGeoApy90d<F>::SAMPLE_S
+            ));
+        }
+        if (donation_on && dcfg.next_ts != 0) {
+            include_due(dcfg.next_ts);
+        }
+        if (icfg.enabled()) {
+            include_due(due_after(
+                pool.last_timestamp,
+                icfg.interval_after(pool.last_timestamp)
+            ));
+        }
+        return next;
+    };
+    const auto next_event_index = [&](size_t start) {
+        if (!exact_skip_on || start >= n_events) return start;
+
+        const uint64_t mandatory_ts = next_mandatory_ts();
+        if (events.ts[start] >= mandatory_ts) return start;
+        refresh_geometry();
+        const auto finish_jump = [&](size_t destination) {
+#if defined(ARB_VALIDATE_EVENT_JUMPS)
+            for (size_t index = start; index < destination; ++index) {
+                if (events.ts[index] >= mandatory_ts) {
+                    throw std::logic_error(
+                        "exact event cursor skipped a mandatory event"
+                    );
+                }
+                if (event_passes_floor_gate(events.p_cex[index])) {
+                    throw std::logic_error(
+                        "exact event cursor skipped an arb-floor survivor"
+                    );
+                }
+            }
+#endif
+            return destination;
+        };
+
+        size_t cursor = start;
+        constexpr size_t block_size = PriceBlockIndex::BLOCK_SIZE;
+        while (cursor < n_events) {
+            const size_t block = cursor / block_size;
+            const size_t block_begin = block * block_size;
+            const size_t block_end = std::min(
+                block_begin + block_size, n_events
+            );
+            if (
+                cursor == block_begin &&
+                events.ts[block_end - 1] < mandatory_ts &&
+                !block_passes_floor_gate(
+                    events.price_blocks.min_positive[block],
+                    events.price_blocks.max_positive[block]
+                )
+            ) {
+                cursor = block_end;
+                continue;
+            }
+            for (; cursor < block_end; ++cursor) {
+                if (events.ts[cursor] >= mandatory_ts) {
+                    return finish_jump(cursor);
+                }
+                if (event_passes_floor_gate(events.p_cex[cursor])) {
+                    return finish_jump(cursor);
+                }
+            }
+        }
+        return finish_jump(n_events);
+    };
+
     if constexpr (EnableYb) {
         if (yb_on) {
             m.yb_2l_start_collateral =
@@ -892,10 +1020,11 @@ EventLoopResult<T> run_event_loop_impl(
         }
     }
 
-    for (size_t ev_idx = first_event_idx; ev_idx < n_events; ++ev_idx) {
 #if defined(ARB_EDGE_GATE_DIAGNOSTICS)
-        ++m.events_total;
+    m.events_total = n_events - first_event_idx;
 #endif
+    size_t ev_idx = first_event_idx;
+    while (ev_idx < n_events) {
         const uint64_t ev_ts = events.ts[ev_idx];
         const T price_scale_at_event_start = pool.cached_price_scale;
 
@@ -913,6 +1042,7 @@ EventLoopResult<T> run_event_loop_impl(
                 last_price_scale_change_ts = ev_ts;
             }
             sample_apy_net_gm(ev_ts);
+            ev_idx = next_event_index(ev_idx + 1);
             continue;
         }
 
@@ -1050,6 +1180,7 @@ EventLoopResult<T> run_event_loop_impl(
         }
 
         sample_apy_net_gm(ev_ts);
+        ev_idx = next_event_index(ev_idx + 1);
     }
 
     result.apy_net_gm = apy_net_gm.value();
@@ -1150,12 +1281,23 @@ EventLoopResult<T> run_event_loop(
     std::vector<DetailedEntry<T>>* out_detailed_entries = nullptr
 ) {
     if (cfg.yb_mode == YbMode::Off) {
-        return run_event_loop_impl<false>(
+        if (cfg.metric_profile == MetricProfile::GridCore) {
+            return run_event_loop_impl<false, true>(
+                pool, events, costs, dcfg, icfg, ucfg, cfg, candles,
+                event_start_floor_ts, out_actions, out_detailed_entries
+            );
+        }
+        return run_event_loop_impl<false, false>(
             pool, events, costs, dcfg, icfg, ucfg, cfg, candles,
             event_start_floor_ts, out_actions, out_detailed_entries
         );
     }
-    return run_event_loop_impl<true>(
+    if (cfg.metric_profile == MetricProfile::GridCore) {
+        throw std::invalid_argument(
+            "grid_core metric profile does not support YieldBasis"
+        );
+    }
+    return run_event_loop_impl<true, false>(
         pool, events, costs, dcfg, icfg, ucfg, cfg, candles,
         event_start_floor_ts, out_actions, out_detailed_entries
     );

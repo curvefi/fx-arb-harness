@@ -515,18 +515,21 @@ struct TimeWeightedMetrics {
         return summary;
     }
 
+    template <bool GridCore = false>
     void sample_price_error(uint64_t ts, T price_scale, T p_cex) {
         if (!have_err) {
             first_ts_err = ts;
         }
 
-        if (!have_price_scale) {
-            min_price_scale = price_scale;
-            max_price_scale = price_scale;
-            have_price_scale = true;
-        } else {
-            if (price_scale < min_price_scale) min_price_scale = price_scale;
-            if (price_scale > max_price_scale) max_price_scale = price_scale;
+        if constexpr (!GridCore) {
+            if (!have_price_scale) {
+                min_price_scale = price_scale;
+                max_price_scale = price_scale;
+                have_price_scale = true;
+            } else {
+                if (price_scale < min_price_scale) min_price_scale = price_scale;
+                if (price_scale > max_price_scale) max_price_scale = price_scale;
+            }
         }
 
         T cur_rel_abs = T(0);
@@ -543,14 +546,16 @@ struct TimeWeightedMetrics {
             sum_abs_rel_dt += static_cast<F>(last_rel_abs) * dt;
             const F g = static_cast<F>(last_rel_gap);
             sum_dt += dt;
-            const F thr = static_cast<F>(EPISODE_GAP_THRESHOLD);
-            if (g > thr) {
-                cur_episode_gap_energy += (g - thr) * dt / F(86400);
-            } else {
-                if (cur_episode_gap_energy > max_episode_gap_energy_acc) {
-                    max_episode_gap_energy_acc = cur_episode_gap_energy;
+            if constexpr (!GridCore) {
+                const F thr = static_cast<F>(EPISODE_GAP_THRESHOLD);
+                if (g > thr) {
+                    cur_episode_gap_energy += (g - thr) * dt / F(86400);
+                } else {
+                    if (cur_episode_gap_energy > max_episode_gap_energy_acc) {
+                        max_episode_gap_energy_acc = cur_episode_gap_energy;
+                    }
+                    cur_episode_gap_energy = F(0);
                 }
-                cur_episode_gap_energy = F(0);
             }
             const F th_in = static_cast<F>(DETACH_TH_IN);
             const F th_out = static_cast<F>(DETACH_TH_OUT);
@@ -670,6 +675,7 @@ struct TimeWeightedMetrics {
         }
     }
 
+    template <bool GridCore = false>
     void sample_imbalance(uint64_t ts, T x0p, T x1p) {
         if (!have_imbalance) {
             first_ts_imbalance = ts;
@@ -680,19 +686,27 @@ struct TimeWeightedMetrics {
         const T denom = x0p + x1p;
         if (denom > T(0)) {
             cur_imbalance = (T(4) * x0p * x1p) / (denom * denom);
-            const T dominant = x0p > x1p ? x0p : x1p;
-            cur_skew = dominant / denom;
+            if constexpr (!GridCore) {
+                const T dominant = x0p > x1p ? x0p : x1p;
+                cur_skew = dominant / denom;
+            }
         }
 
         if (have_imbalance && ts > last_ts_imbalance) {
             const F dt = static_cast<F>(ts - last_ts_imbalance);
             sum_imbalance_dt += static_cast<F>(last_imbalance) * dt;
             imbalance_dt += dt;
-            sample_7d_skew(last_ts_imbalance, ts, static_cast<F>(last_skew));
+            if constexpr (!GridCore) {
+                sample_7d_skew(
+                    last_ts_imbalance, ts, static_cast<F>(last_skew)
+                );
+            }
         }
 
         last_imbalance = cur_imbalance;
-        last_skew = cur_skew;
+        if constexpr (!GridCore) {
+            last_skew = cur_skew;
+        }
         last_ts_imbalance = ts;
         have_imbalance = true;
     }

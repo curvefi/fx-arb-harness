@@ -16,7 +16,7 @@ struct StaticParameterDescriptor {
     std::string_view choices_json{};
 };
 
-inline constexpr std::array<StaticParameterDescriptor, 60> STATIC_PARAMETERS{{
+inline constexpr std::array<StaticParameterDescriptor, 62> STATIC_PARAMETERS{{
     {"pool.tag", "pool_overrides.tag", "string", "identifier", "utf8", "candidate", ""},
     {"pool.initial_liquidity", "pool_overrides.pool.initial_liquidity", "real_pair", "token_amount", "binary64_from_wad_1e18", "candidate", ""},
     {"pool.A", "pool_overrides.pool.A", "real", "pool_raw", "binary64", "candidate", ""},
@@ -69,6 +69,8 @@ inline constexpr std::array<StaticParameterDescriptor, 60> STATIC_PARAMETERS{{
     {"run.user_swap_size_frac", "open_session.user_swap_size_frac", "real", "ratio", "binary64", "session", "0.01"},
     {"run.user_swap_thresh", "open_session.user_swap_thresh", "real", "ratio", "binary64", "session", "0.05"},
     {"run.enable_slippage_probes", "open_session.enable_slippage_probes", "boolean", "flag", "json_boolean", "observation", "false"},
+    {"run.event_cursor", "open_session.event_cursor", "enum", "event_cursor", "utf8", "session", "\"scalar\"", "[\"scalar\",\"exact_skip\"]"},
+    {"run.metric_profile", "open_session.metric_profile", "enum", "metric_profile", "utf8", "session", "\"full_summary\"", "[\"full_summary\",\"grid_core\"]"},
     {"run.yb_mode", "open_session.yb_mode", "enum", "yb_mode", "utf8", "session", "\"off\"", "[\"off\",\"active_2l\",\"reference_2l\"]"},
     {"run.yb_releverage_fee", "open_session.yb_releverage_fee", "real", "fee_fraction", "binary64", "session", "0.012"},
     {"run.yb_cash_multiplier", "open_session.yb_cash_multiplier", "real", "ratio", "binary64", "session", "1.0"},

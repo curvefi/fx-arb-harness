@@ -451,7 +451,37 @@ EventSoA EventSoA::from_events(const std::vector<Event>& evs) {
             s.chainlink_answer_index.push_back(e.chainlink_answer_index);
         }
     }
+    s.price_blocks.build(s.p_cex);
     return s;
+}
+
+void PriceBlockIndex::build(const std::vector<double>& prices) {
+    block_count = (prices.size() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    if (block_count == 0) {
+        min_positive.clear();
+        max_positive.clear();
+        return;
+    }
+
+    min_positive.assign(
+        block_count, std::numeric_limits<double>::infinity()
+    );
+    max_positive.assign(block_count, 0.0);
+
+    for (size_t block = 0; block < block_count; ++block) {
+        const size_t begin = block * BLOCK_SIZE;
+        const size_t end = std::min(begin + BLOCK_SIZE, prices.size());
+        double minimum = std::numeric_limits<double>::infinity();
+        double maximum = 0.0;
+        for (size_t index = begin; index < end; ++index) {
+            const double price = prices[index];
+            if (!(price > 0.0)) continue;
+            minimum = std::min(minimum, price);
+            maximum = std::max(maximum, price);
+        }
+        min_positive[block] = minimum;
+        max_positive[block] = maximum;
+    }
 }
 
 std::vector<Candle> load_candles(const std::string& path,

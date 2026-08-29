@@ -133,6 +133,17 @@ static const std::vector<std::string> CANONICAL_METRIC_FIELDS = {
     "keeper_successful_submissions", "fixed_keeper_ticks"
 };
 
+static const std::unordered_set<std::string> GRID_CORE_METRIC_FIELDS = {
+    "vp", "lp_xcp_profit", "apy", "apy_net", "apy_net_gm",
+    "avg_rel_price_diff", "max_rel_price_diff", "max_7d_rel_price_diff",
+    "final_rel_price_diff", "trades", "n_rebalances",
+    "arb_guarded_loss_coin0", "elapsed_ms", "fee_capture_rate",
+    "donations", "donation_coin0_total", "avg_imbalance", "tvl_growth",
+    "detach_energy", "detach_energy_ungated",
+    "detach_energy_ungated_3pct", "detach_energy_ungated_5pct",
+    "detach_energy_short3h",
+};
+
 const json::object& canonical_metric_schema() {
     static const json::object schema = [] {
         json::array fields;
@@ -497,7 +508,8 @@ private:
                 "allow_hybrid_keeper", "user_swap_freq_s",
                 "user_swap_size_frac", "user_swap_thresh",
                 "enable_slippage_probes", "yb_releverage_fee",
-                "yb_cash_multiplier", "yb_mode"
+                "yb_cash_multiplier", "yb_mode", "event_cursor",
+                "metric_profile"
             })) {
             write_frame(std::cout, make_error_frame(
                 req_id, "protocol", "UNKNOWN_FIELD",
@@ -608,6 +620,45 @@ private:
             cfg.enable_slippage_probes =
                 req.if_contains("enable_slippage_probes") &&
                 req.at("enable_slippage_probes").as_bool();
+            std::string event_cursor = "scalar";
+            if (req.if_contains("event_cursor")) {
+                if (!req.at("event_cursor").is_string()) {
+                    write_frame(std::cout, make_error_frame(
+                        req_id, "protocol", "INVALID_ARGUMENT",
+                        "event_cursor must be a string"));
+                    return;
+                }
+                event_cursor = std::string(req.at("event_cursor").as_string());
+                if (event_cursor != "scalar" && event_cursor != "exact_skip") {
+                    write_frame(std::cout, make_error_frame(
+                        req_id, "protocol", "INVALID_ARGUMENT",
+                        "event_cursor must be 'scalar' or 'exact_skip'"));
+                    return;
+                }
+            }
+            cfg.event_cursor = event_cursor;
+            std::string metric_profile = "full_summary";
+            if (req.if_contains("metric_profile")) {
+                if (!req.at("metric_profile").is_string()) {
+                    write_frame(std::cout, make_error_frame(
+                        req_id, "protocol", "INVALID_ARGUMENT",
+                        "metric_profile must be a string"));
+                    return;
+                }
+                metric_profile = std::string(
+                    req.at("metric_profile").as_string()
+                );
+                if (
+                    metric_profile != "full_summary" &&
+                    metric_profile != "grid_core"
+                ) {
+                    write_frame(std::cout, make_error_frame(
+                        req_id, "protocol", "INVALID_ARGUMENT",
+                        "metric_profile must be 'full_summary' or 'grid_core'"));
+                    return;
+                }
+            }
+            cfg.metric_profile = metric_profile;
             std::string yb_mode = "off";
             if (req.if_contains("yb_mode")) {
                 if (!req.at("yb_mode").is_string()) {
@@ -626,6 +677,15 @@ private:
                 }
             }
             cfg.yb_mode = yb_mode;
+            if (
+                cfg.metric_profile == "grid_core" &&
+                (cfg.yb_mode != "off" || cfg.enable_slippage_probes)
+            ) {
+                write_frame(std::cout, make_error_frame(
+                    req_id, "session", "INVALID_METRIC_PROFILE",
+                    "grid_core requires yb_mode='off' and slippage disabled"));
+                return;
+            }
             cfg.yb_releverage_fee = static_cast<RealT>(arb::get_double_opt(req, "yb_releverage_fee", 0.012));
             cfg.yb_cash_multiplier = static_cast<RealT>(
                 arb::get_double_opt(req, "yb_cash_multiplier", 1.0));
@@ -762,6 +822,16 @@ private:
                 metric_fields.push_back(name);
             }
         }
+        if (session_->config.metric_profile == "grid_core") {
+            for (const auto& name : metric_fields) {
+                if (GRID_CORE_METRIC_FIELDS.count(name) == 0) {
+                    write_frame(std::cout, make_error_frame(
+                        req_id, "protocol", "INVALID_METRIC_PROFILE",
+                        "grid_core does not provide metric field: " + name));
+                    return;
+                }
+            }
+        }
         if (!req.if_contains("candidates") || !req.at("candidates").is_array()) {
             write_frame(std::cout, make_error_frame(req_id, "candidate", "INVALID_ARGUMENT", "candidates array is required"));
             return;
@@ -842,6 +912,15 @@ private:
                 return;
             }
 
+        }
+        if (
+            session_->config.metric_profile == "grid_core" &&
+            obs_spec.kind != curve_fx::evaluator::ObservationKind::Summary
+        ) {
+            write_frame(std::cout, make_error_frame(
+                req_id, "protocol", "INVALID_METRIC_PROFILE",
+                "grid_core supports summary observation only"));
+            return;
         }
 
         auto t0 = std::chrono::high_resolution_clock::now();

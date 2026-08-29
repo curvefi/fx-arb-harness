@@ -372,6 +372,26 @@ void execute_scenario_job(
         run_cfg.user_swap_size_frac = session_cfg.user_swap_size_frac;
         run_cfg.user_swap_thresh = session_cfg.user_swap_thresh;
         run_cfg.enable_slippage_probes = session_cfg.enable_slippage_probes;
+        if (session_cfg.event_cursor == "exact_skip") {
+            run_cfg.event_cursor = arb::harness::EventCursor::ExactSkip;
+        } else if (session_cfg.event_cursor == "scalar") {
+            run_cfg.event_cursor = arb::harness::EventCursor::Scalar;
+        } else {
+            throw std::invalid_argument(
+                "unknown event_cursor '" + session_cfg.event_cursor +
+                "' (expected 'scalar' or 'exact_skip')"
+            );
+        }
+        if (session_cfg.metric_profile == "grid_core") {
+            run_cfg.metric_profile = arb::harness::MetricProfile::GridCore;
+        } else if (session_cfg.metric_profile == "full_summary") {
+            run_cfg.metric_profile = arb::harness::MetricProfile::FullSummary;
+        } else {
+            throw std::invalid_argument(
+                "unknown metric_profile '" + session_cfg.metric_profile +
+                "' (expected 'full_summary' or 'grid_core')"
+            );
+        }
         if (session_cfg.yb_mode == "active_2l") {
             run_cfg.yb_mode = arb::harness::YbMode::Active2l;
         } else if (session_cfg.yb_mode == "reference_2l") {

@@ -20,6 +20,9 @@ option(CURVE_FX_NATIVE_TUNING
 option(CURVE_FX_EDGE_GATE_DIAGNOSTICS
     "Collect per-event geometry and fee-gate counters"
     OFF)
+option(CURVE_FX_VALIDATE_EVENT_JUMPS
+    "Validate every event skipped by the exact event cursor"
+    OFF)
 
 if(CURVE_FX_ENABLE_IPO)
     include(CheckIPOSupported)
@@ -210,6 +213,11 @@ function(add_curve_fx_evaluator TARGET_NAME LIBRARY_NAME MODE_DEFINE)
     if(CURVE_FX_EDGE_GATE_DIAGNOSTICS)
         target_compile_definitions(${LIBRARY_NAME} PUBLIC
             ARB_EDGE_GATE_DIAGNOSTICS=1
+        )
+    endif()
+    if(CURVE_FX_VALIDATE_EVENT_JUMPS)
+        target_compile_definitions(${LIBRARY_NAME} PUBLIC
+            ARB_VALIDATE_EVENT_JUMPS=1
         )
     endif()
     if(POLICY_HEADER_PATH)
