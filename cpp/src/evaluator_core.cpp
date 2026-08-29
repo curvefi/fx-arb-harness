@@ -234,6 +234,10 @@ void extract_metrics_from_pool_result(
     m["arb_invalid_size_rejections"] = static_cast<double>(rm.arb_invalid_size_rejections);
     m["arb_nonpositive_profit_rejections"] = static_cast<double>(rm.arb_nonpositive_profit_rejections);
     m["arb_guarded_loss_coin0"] = static_cast<double>(rm.arb_guarded_loss_coin0);
+    m["events_total"] = static_cast<double>(rm.events_total);
+    m["geometry_refreshes"] = static_cast<double>(rm.geometry_refreshes);
+    m["floor_gate_passes"] = static_cast<double>(rm.floor_gate_passes);
+    m["actual_fee_calls"] = static_cast<double>(rm.actual_fee_calls);
 
     m["yb_enabled"] = res.yb_releverage_enabled ? 1.0 : 0.0;
     m["yb_apy"] = res.yb_releverage_apy;

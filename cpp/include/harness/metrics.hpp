@@ -61,6 +61,12 @@ struct Metrics {
     size_t arb_nonpositive_profit_rejections{0};
     T arb_guarded_loss_coin0{0};
 
+    // Edge-gate telemetry for validating geometry and fee-cache efficiency.
+    size_t events_total{0};
+    size_t geometry_refreshes{0};
+    size_t floor_gate_passes{0};
+    size_t actual_fee_calls{0};
+
     // Commit-gated dynamic keeper.  Attempts are speculative pool ticks;
     // commits are the subset which changed price_scale exactly.
     size_t dynamic_keeper_attempts{0};

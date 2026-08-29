@@ -182,25 +182,35 @@ EventLoopResult<T> run_event_loop_impl(
         }
     };
 
-    const bool edge_cacheable =
+    const bool fee_cacheable =
         pool.policy.kind == pools::twocrypto_fx::PolicyKind::None
         || pool.policy.quote_cache_safe();
-    bool edge_valid = false;
+    bool geometry_valid = false;
+    bool fee_valid = false;
     T edge_p_now{};
     T edge_fee{};
     std::array<T, 2> edge_xp{};
     const T omf_floor = std::max(T(1) - pool.fee_lower_bound(), T(1e-12));
-    auto refresh_edge_inputs = [&]() {
-        if (edge_cacheable && edge_valid) return;
-        const auto xp_now = pools::twocrypto_fx::pool_xp_current(pool);
+    auto refresh_geometry = [&]() {
+        if (geometry_valid) return;
+        edge_xp = pools::twocrypto_fx::pool_xp_current(pool);
         edge_p_now = pools::twocrypto_fx::MathOps<T>::get_p(
-            xp_now, pool.D, {pool.A, pool.gamma}
+            edge_xp, pool.D, {pool.A, pool.gamma}
         ) * pool.cached_price_scale;
-        edge_fee = pool.fee(xp_now);
-        edge_xp = xp_now;
-        edge_valid = true;
+        geometry_valid = true;
+        ++m.geometry_refreshes;
     };
-    auto invalidate_edge_inputs = [&]() { edge_valid = false; };
+    auto refresh_edge_fee = [&]() {
+        refresh_geometry();
+        if (fee_cacheable && fee_valid) return;
+        edge_fee = pool.fee(edge_xp);
+        fee_valid = true;
+        ++m.actual_fee_calls;
+    };
+    auto invalidate_edge_inputs = [&]() {
+        geometry_valid = false;
+        fee_valid = false;
+    };
     uint64_t last_tw_sample_ts = 0;
     bool have_tw_sample = false;
     auto sample_pre_trade = [&](uint64_t ts, T cex_price) {
@@ -216,7 +226,7 @@ EventLoopResult<T> run_event_loop_impl(
         const T x1p = pool.balances[1] * cex_price;
         tw.sample_imbalance(ts, x0p, x1p);
 
-        refresh_edge_inputs();
+        refresh_edge_fee();
         tw.sample_fee(ts, edge_fee);
     };
 
@@ -238,11 +248,13 @@ EventLoopResult<T> run_event_loop_impl(
     };
 
     auto execute_arb = [&](size_t ev_idx, uint64_t ev_ts, T cex_price) -> bool {
-        refresh_edge_inputs();
+        refresh_geometry();
         if (!(omf_floor * (cex_fee_discount * cex_price) > edge_p_now) &&
             !(omf_floor * edge_p_now > cex_fee_markup * cex_price)) {
             return false;
         }
+        ++m.floor_gate_passes;
+        refresh_edge_fee();
         T volume_cap = std::numeric_limits<T>::infinity();
         if (costs.use_volume_cap) {
             volume_cap = static_cast<T>(events.volume[ev_idx]) * costs.volume_cap_mult;
@@ -878,6 +890,7 @@ EventLoopResult<T> run_event_loop_impl(
     }
 
     for (size_t ev_idx = first_event_idx; ev_idx < n_events; ++ev_idx) {
+        ++m.events_total;
         const uint64_t ev_ts = events.ts[ev_idx];
         const T price_scale_at_event_start = pool.cached_price_scale;
 
