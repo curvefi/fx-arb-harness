@@ -3,6 +3,8 @@
 #include <iostream>
 #include <stdexcept>
 
+#include "harness/donation.hpp"
+#include "harness/user_swap.hpp"
 #include "pools/twocrypto_fx/twocrypto.hpp"
 
 namespace fx = arb::pools::twocrypto_fx;
@@ -180,6 +182,66 @@ bool test_policy_exception_reverts_exchange() {
     return true;
 }
 
+bool test_failed_harness_donation_preserves_pool_and_metrics() {
+    Pool pool = make_pool();
+    pool.set_block_timestamp(1);
+    pool.policy.compiled_state.throw_on_update = true;
+    const Pool before = pool;
+    arb::harness::DonationCfg<double> cfg;
+    cfg.init(0.05, 3600.0, 0.5, 1);
+    arb::harness::Metrics<double> metrics;
+
+    const auto result = arb::harness::make_donation_ex(pool, cfg, 1, metrics);
+    if (result.success || !same_pool_state(pool, before) ||
+        metrics.donations != 0 || metrics.n_rebalances != 0 ||
+        metrics.donation_coin0_total != 0.0 ||
+        metrics.donation_amounts_total != std::array<double, 2>{0.0, 0.0}) {
+        std::printf("failed harness donation leaked pool state or metrics\n");
+        return false;
+    }
+    return true;
+}
+
+bool test_failed_user_swap_preserves_pool_and_direction() {
+    Pool pool = make_pool();
+    pool.set_block_timestamp(1);
+    pool.policy.compiled_state.throw_on_update = true;
+    const Pool before = pool;
+    arb::harness::UserSwapCfg<double> cfg;
+    cfg.freq_s = 1;
+    cfg.size_frac = 0.01;
+    cfg.thresh = 10.0;
+    cfg.next_ts = 1;
+
+    if (arb::harness::try_user_swap(pool, cfg, 1, 1.0) ||
+        !same_pool_state(pool, before) || cfg.next_dir != 0) {
+        std::printf("failed harness user swap leaked pool state or direction\n");
+        return false;
+    }
+    return true;
+}
+
+bool test_failed_preview_commit_preserves_pool() {
+    Pool pool = make_pool();
+    pool.set_block_timestamp(1);
+    const double dx = 10'000.0;
+    const auto preview = fx::simulate_exchange_once(pool, 0, 1, dx);
+    pool.policy.compiled_state.throw_on_update = true;
+    const Pool before = pool;
+
+    try {
+        (void)pool.exchange_from_preview(0, 1, dx, preview.first, preview.second);
+        std::printf("failed preview commit did not propagate\n");
+        return false;
+    } catch (const std::runtime_error&) {
+    }
+    if (!same_pool_state(pool, before)) {
+        std::printf("failed preview commit leaked pool state\n");
+        return false;
+    }
+    return true;
+}
+
 bool test_policy_exception_reverts_fixed_out_and_output() {
     Pool pool = make_pool();
     pool.set_block_timestamp(100'000);
@@ -215,6 +277,9 @@ int main() {
         !test_slippage_reverts_withdrawal() ||
         !test_policy_exception_reverts_add() ||
         !test_policy_exception_reverts_exchange() ||
+        !test_failed_harness_donation_preserves_pool_and_metrics() ||
+        !test_failed_user_swap_preserves_pool_and_direction() ||
+        !test_failed_preview_commit_preserves_pool() ||
         !test_policy_exception_reverts_fixed_out_and_output()) {
         return 1;
     }

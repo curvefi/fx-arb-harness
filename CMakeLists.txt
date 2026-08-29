@@ -263,6 +263,9 @@ if(BUILD_TESTING)
 
     # test_balanced_withdrawal uses rejecting_fixed_policy.hpp
     add_executable(test_balanced_withdrawal cpp/tests/test_balanced_withdrawal.cpp)
+    target_include_directories(test_balanced_withdrawal PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/cpp/include"
+    )
     target_compile_definitions(test_balanced_withdrawal PRIVATE
         TWOCRYPTO_POLICY_HEADER="${CMAKE_CURRENT_SOURCE_DIR}/cpp/tests/rejecting_fixed_policy.hpp"
     )

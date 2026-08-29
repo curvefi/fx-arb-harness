@@ -4,7 +4,6 @@
 #include <stdexcept>
 
 #include "harness/donation.hpp"
-#include "harness/pool_snapshot.hpp"
 
 namespace {
 
@@ -57,6 +56,7 @@ struct ThrowingPool {
         double,
         bool donation
     ) {
+        const auto before = mutable_snapshot();
         require(donation, "the scheduler must mark this add as a donation");
         balances[0] += amounts[0];
         balances[1] += amounts[1];
@@ -65,6 +65,7 @@ struct ThrowingPool {
         block_timestamp = 9876;
         mutation_counter = -1;
         if (throw_on_add) {
+            restore_mutable(before);
             throw std::runtime_error("intentional donation failure");
         }
         return amounts;
@@ -120,11 +121,7 @@ int main() {
     const auto donation_coin0_before = metrics.donation_coin0_total;
     const auto donation_amounts_before = metrics.donation_amounts_total;
 
-    arb::harness::PoolTransactionSnapshot<ThrowingPool> transaction_snapshot(pool);
     auto result = arb::harness::make_donation_ex(pool, high_ratio, 5000, metrics);
-    if (!result.success) {
-        transaction_snapshot.restore(pool);
-    }
 
     require(!result.success, "a throwing pool must report a failed donation");
     require(same_pool(pool, pool_before), "failed donation must restore the complete pool");

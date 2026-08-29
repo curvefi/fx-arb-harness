@@ -231,13 +231,10 @@ EventLoopResult<T> run_event_loop_impl(
     };
 
     auto apply_donation = [&](std::size_t, uint64_t ts) {
-        PoolTransactionSnapshot<Pool> transaction_snapshot(pool);
         auto don_res = make_donation_ex(pool, dcfg, ts, m);
         if (don_res.success) {
             invalidate_edge_inputs();
             action_logger.log_donation(ts, don_res, dcfg);
-        } else {
-            transaction_snapshot.restore(pool);
         }
     };
 
@@ -286,7 +283,6 @@ EventLoopResult<T> run_event_loop_impl(
             return false;
         }
 
-        PoolTransactionSnapshot<Pool> transaction_snapshot(pool);
         try {
             const T ps_before = pool.cached_price_scale;
             T oracle_before{};
@@ -339,7 +335,6 @@ EventLoopResult<T> run_event_loop_impl(
             }
             return true;
         } catch (...) {
-            transaction_snapshot.restore(pool);
             return false;
         }
     };

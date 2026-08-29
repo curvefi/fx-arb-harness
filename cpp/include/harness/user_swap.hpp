@@ -79,18 +79,13 @@ bool try_user_swap(
         if (!(effective_bid >= p_cex * (T(1) - cfg.thresh))) return false;
     }
 
-    // pool.exchange commits balances/D before tweak_price, which can throw
-    // ("virtual price decreased") at dust-level vp noise. Restore the
-    // snapshot so `false` always means "pool unchanged" -- the event loop's
-    // edge-input cache and metrics rely on that.
-    const Pool snapshot = pool;
+    // The pool SDK makes exchange atomic across trailing tweak failures.
     try {
         (void)pool.exchange(static_cast<T>(i_from), static_cast<T>(j_to), dx, T(0));
         cfg.next_dir ^= 1;  // alternate direction for next swap
         return true;
 
     } catch (...) {
-        pool = snapshot;
         return false;
     }
 }
