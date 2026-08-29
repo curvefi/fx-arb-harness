@@ -64,6 +64,7 @@ They are loaded once at admission.
   "min_swap": 1e-6,
   "max_swap": 1.0,
   "dustswap_freq_s": 3600,
+  "enable_slippage_probes": false,
   "yb_mode": "off",
   "yb_releverage_fee": 0.012,
   "yb_cash_multiplier": 1.0
@@ -75,7 +76,8 @@ The remaining optional session controls are `dustswap_random`,
 `dustswap_dynamic_gap_bps`, `dustswap_dynamic_heartbeat_s`,
 `dustswap_commit_clock_freq_s`, `policy_keeper_enabled`, `allow_hybrid_keeper`,
 `user_swap_freq_s`, `user_swap_size_frac`, `user_swap_thresh`, and
-`disable_slippage_probes`. `yb_mode` is `off`, `active_2l`, or `reference_2l`.
+`enable_slippage_probes`. Slippage probes are off unless explicitly enabled.
+`yb_mode` is `off`, `active_2l`, or `reference_2l`.
 The enabled modes use `yb_releverage_fee` and `yb_cash_multiplier`, and evaluate
 after every causal event. Summary valuation is hourly for GM accounting and once
 at the final endpoint for raw APY. `reference_2l` is a floating candidate lane

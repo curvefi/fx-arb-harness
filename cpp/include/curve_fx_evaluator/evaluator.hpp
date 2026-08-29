@@ -67,7 +67,7 @@ struct SessionConfig {
     uint64_t user_swap_freq_s{0};
     T user_swap_size_frac{static_cast<T>(0.01)};
     T user_swap_thresh{static_cast<T>(0.05)};
-    bool enable_slippage_probes{true};
+    bool enable_slippage_probes{false};
 
     // YieldBasis mode: "off", "active_2l" (established Observer2-equivalent
     // lane), or "reference_2l" (contract-derived candidate lane).

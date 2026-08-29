@@ -495,7 +495,7 @@ private:
                 "dustswap_commit_clock_freq_s", "policy_keeper_enabled",
                 "allow_hybrid_keeper", "user_swap_freq_s",
                 "user_swap_size_frac", "user_swap_thresh",
-                "disable_slippage_probes", "yb_releverage_fee",
+                "enable_slippage_probes", "yb_releverage_fee",
                 "yb_cash_multiplier", "yb_mode"
             })) {
             write_frame(std::cout, make_error_frame(
@@ -604,7 +604,9 @@ private:
             cfg.user_swap_freq_s = user_swap_freq_s;
             cfg.user_swap_size_frac = static_cast<RealT>(arb::get_double_opt(req, "user_swap_size_frac", 0.01));
             cfg.user_swap_thresh = static_cast<RealT>(arb::get_double_opt(req, "user_swap_thresh", 0.05));
-            cfg.enable_slippage_probes = !(req.if_contains("disable_slippage_probes") && req.at("disable_slippage_probes").as_bool());
+            cfg.enable_slippage_probes =
+                req.if_contains("enable_slippage_probes") &&
+                req.at("enable_slippage_probes").as_bool();
             std::string yb_mode = "off";
             if (req.if_contains("yb_mode")) {
                 if (!req.at("yb_mode").is_string()) {

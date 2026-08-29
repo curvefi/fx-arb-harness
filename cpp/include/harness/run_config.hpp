@@ -47,7 +47,7 @@ struct RunConfig {
     T yb_cash_multiplier{T(1)};
 
     // Slippage probe sampling
-    bool enable_slippage_probes{true};
+    bool enable_slippage_probes{false};
 
 };
 

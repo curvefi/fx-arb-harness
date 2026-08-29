@@ -72,9 +72,6 @@ bool looks_balanced_at_price(const T& liq0, const T& liq1, const T& price) {
 // Result from running a single pool - includes all metrics
 template <typename T>
 struct PoolResult {
-    std::string tag;
-    size_t pool_index{0};
-
     // Core trading metrics
     Metrics<T> metrics{};
 
@@ -102,9 +99,6 @@ struct PoolResult {
     uint64_t yb_releverage_gm_windows{0};
     uint64_t yb_releverage_gm_floored_windows{0};
     double yb_releverage_gm_floor_share{-1.0};
-    double lp_gm_90d_worst_window{-1.0};
-    double lp_gm_90d_median_window{-1.0};
-    double lp_gm_90d_floor_share{-1.0};
     double yb_gm_90d_worst_window{-1.0};
     double yb_gm_90d_median_window{-1.0};
     double yb_gm_90d_floor_share{-1.0};
@@ -114,28 +108,13 @@ struct PoolResult {
     double yb_growth_step_share_3d{-1.0};
     double yb_growth_step_share_7d{-1.0};
     double yb_growth_top10_step_share{-1.0};
-    double max_abs_drift_1d{-1.0};
-    double max_abs_drift_3d{-1.0};
-    double drift_3d_time_share_over_2pct{-1.0};
-    double drift_stall_tau_max_days{-1.0};
-    double drift_stalled_share{-1.0};
 
     // Final pool state
     std::array<T, 2> balances{T(0), T(0)};
-    std::array<T, 2> admin_balances{T(0), T(0)};
-    T D{0};
-    T totalSupply{0};
     T price_scale{0};
-    T price_oracle{0};
     T virtual_price{0};
     T xcp_profit{0};
     T lp_xcp_profit{0};
-    T vp_boosted{0};
-    T donation_shares{0};
-    T donation_unlocked{0};
-    T last_prices{0};
-    uint64_t timestamp{0};
-    pools::twocrypto_fx::PolicyHookMetrics<T> policy_hook_metrics{};
 
     // Timing
     double elapsed_ms{0};
@@ -163,9 +142,6 @@ PoolResult<T> run_single_pool(
     using Pool = pools::twocrypto_fx::TwoCryptoPool<T>;
 
     PoolResult<T> result;
-    result.tag = pool_init.tag;
-    result.pool_index = pool_init.global_index;
-
     auto t_start = std::chrono::high_resolution_clock::now();
     try {
         const uint64_t requested_start_ts = cfg.start_ts ? cfg.start_ts : pool_init.start_ts;
@@ -379,9 +355,6 @@ PoolResult<T> run_single_pool(
             loop_result.yb_releverage_gm_floored_windows;
         result.yb_releverage_gm_floor_share =
             loop_result.yb_releverage_gm_floor_share;
-        result.lp_gm_90d_worst_window = loop_result.lp_gm_90d_worst_window;
-        result.lp_gm_90d_median_window = loop_result.lp_gm_90d_median_window;
-        result.lp_gm_90d_floor_share = loop_result.lp_gm_90d_floor_share;
         result.yb_gm_90d_worst_window = loop_result.yb_gm_90d_worst_window;
         result.yb_gm_90d_median_window = loop_result.yb_gm_90d_median_window;
         result.yb_gm_90d_floor_share = loop_result.yb_gm_90d_floor_share;
@@ -391,30 +364,12 @@ PoolResult<T> run_single_pool(
         result.yb_growth_step_share_3d = loop_result.yb_growth_step_share_3d;
         result.yb_growth_step_share_7d = loop_result.yb_growth_step_share_7d;
         result.yb_growth_top10_step_share = loop_result.yb_growth_top10_step_share;
-        result.max_abs_drift_1d = loop_result.max_abs_drift_1d;
-        result.max_abs_drift_3d = loop_result.max_abs_drift_3d;
-        result.drift_3d_time_share_over_2pct =
-            loop_result.drift_3d_time_share_over_2pct;
-        result.drift_stall_tau_max_days = loop_result.drift_stall_tau_max_days;
-        result.drift_stalled_share = loop_result.drift_stalled_share;
-
         result.balances[0] = pool.balances[0];
         result.balances[1] = pool.balances[1];
-        result.admin_balances[0] = pool.admin_balances[0];
-        result.admin_balances[1] = pool.admin_balances[1];
-        result.D = pool.D;
-        result.totalSupply = pool.totalSupply;
         result.price_scale = pool.cached_price_scale;
-        result.price_oracle = pool.cached_price_oracle;
         result.virtual_price = pool.get_virtual_price();
         result.xcp_profit = pool.xcp_profit;
         result.lp_xcp_profit = pool.lp_xcp_profit;
-        result.vp_boosted = pool.get_vp_boosted();
-        result.donation_shares = pool.donation_shares;
-        result.donation_unlocked = pool.donation_unlocked();
-        result.last_prices = pool.last_prices;
-        result.timestamp = pool.block_timestamp;
-        result.policy_hook_metrics = pool.policy_hook_metrics;
         result.success = true;
 
     } catch (const std::exception& e) {

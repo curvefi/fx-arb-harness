@@ -72,9 +72,6 @@ struct Metrics {
     size_t dynamic_keeper_commit_clock_fires{0};
     double dynamic_keeper_step_bps_sum{0};
     double dynamic_keeper_step_bps_max{0};
-    // Step-size bins in bps: <=1, <=5, <=10, <=25, <=50, <=100,
-    // <=200, and >200.
-    std::array<size_t, 8> dynamic_keeper_step_bps_histogram{};
 
     // Policy-owned keeper anatomy.  These counters are harness-owned so a
     // rejected speculative transaction can roll the pool back byte-for-byte
@@ -154,14 +151,6 @@ struct Metrics {
     double yb_2l_full_vp_log_growth{0.0};
     double yb_2l_xcp_log_growth{0.0};
     double yb_2l_burn_backfill_log_growth{0.0};
-    // Size-weighted average pool fee tracking
-    T fee_wsum{0};   // sum(fee_fraction * notional_coin0)
-    T fee_w{0};      // sum(notional_coin0)
-
-    // Computed metrics
-    T avg_pool_fee() const {
-        return fee_w > T(0) ? fee_wsum / fee_w : T(-1);
-    }
 };
 
 struct TimeWeightedSummary {
@@ -169,8 +158,6 @@ struct TimeWeightedSummary {
     double max_rel_price_diff{-1.0};
     double max_7d_rel_price_diff{-1.0};
     double final_rel_price_diff{-1.0};
-    double tail30d_rel_gap{-1.0};
-    double rms_rel_gap{-1.0};
     double max_episode_gap_energy{-1.0};
     double detach_energy{-1.0};
     double detach_energy_ungated{-1.0};
@@ -392,189 +379,6 @@ struct MultiScalePositiveGrowthConcentration {
     }
 };
 
-template <typename F>
-struct SignedDriftEma {
-    static constexpr F LN_HALF = F(-0.69314718055994530942L);
-
-    F half_life_s;
-    F threshold;
-    bool have{false};
-    F ema{F(0)};
-    uint64_t last_ts{0};
-    F max_abs{F(0)};
-    F time_over{F(0)};
-    F time_total{F(0)};
-
-    static constexpr size_t ALPHA_CACHE_N = 4;
-    uint64_t cached_dt[ALPHA_CACHE_N]{};
-    F cached_alpha[ALPHA_CACHE_N]{};
-    size_t alpha_evict_slot{0};
-
-    SignedDriftEma(F half_life_s_, F threshold_)
-        : half_life_s(half_life_s_), threshold(threshold_) {}
-
-    F alpha_for(uint64_t dt_u) {
-        for (size_t i = 0; i < ALPHA_CACHE_N; ++i) {
-            if (cached_dt[i] == dt_u) {
-                return cached_alpha[i];
-            }
-        }
-        const F alpha =
-            F(1) - std::exp(LN_HALF * static_cast<F>(dt_u) / half_life_s);
-        cached_dt[alpha_evict_slot] = dt_u;
-        cached_alpha[alpha_evict_slot] = alpha;
-        alpha_evict_slot = (alpha_evict_slot + 1) % ALPHA_CACHE_N;
-        return alpha;
-    }
-
-    void sample(uint64_t ts, F gap) {
-        if (!have) {
-            have = true;
-            ema = gap;
-            last_ts = ts;
-        } else if (ts > last_ts) {
-            const uint64_t dt_u = ts - last_ts;
-            last_ts = ts;
-            const F alpha = alpha_for(dt_u);
-            const F dt = static_cast<F>(dt_u);
-            ema += alpha * (gap - ema);
-            time_total += dt;
-            if (threshold > F(0) && std::fabs(ema) > threshold) {
-                time_over += dt;
-            }
-        }
-        const F a = std::fabs(ema);
-        if (a > max_abs) {
-            max_abs = a;
-        }
-    }
-
-    double max_abs_drift() const {
-        return have ? static_cast<double>(max_abs) : -1.0;
-    }
-
-    double time_share_over() const {
-        if (!have || !(time_total > F(0))) {
-            return -1.0;
-        }
-        return static_cast<double>(time_over / time_total);
-    }
-};
-
-template <typename F>
-struct DriftStallTracker {
-    static constexpr F LN_HALF = F(-0.69314718055994530942L);
-    static constexpr F DRIFT_HL_S = F(3.0 * 86400.0);
-    static constexpr F PROGRESS_HL_S = F(1.0 * 86400.0);
-    static constexpr F TAU_EMA_HL_S = F(1.0 * 86400.0);
-    static constexpr F EPISODE_THRESHOLD = F(0.02);
-    static constexpr F TAU_CAP_S = F(200.0 * 86400.0);
-    static constexpr F STALL_TAU_S = F(30.0 * 86400.0);
-    static constexpr F PROGRESS_EPS = F(1e-12);
-
-    bool have{false};
-    F drift{F(0)};
-    bool have_progress{false};
-    F progress{F(0)};
-    F tau_ema{F(0)};
-    bool in_episode{false};
-    uint64_t last_ts{0};
-    F last_ps{F(0)};
-    F max_tau{F(0)};
-    F stalled_time{F(0)};
-    F time_total{F(0)};
-
-    static constexpr size_t ALPHA_CACHE_N = 4;
-    uint64_t cached_dt[ALPHA_CACHE_N]{};
-    F a_drift[ALPHA_CACHE_N]{};
-    F a_prog[ALPHA_CACHE_N]{};
-    F a_tau[ALPHA_CACHE_N]{};
-    size_t alpha_evict_slot{0};
-
-    void alphas_for(uint64_t dt_u, F& ad, F& ap, F& at) {
-        for (size_t i = 0; i < ALPHA_CACHE_N; ++i) {
-            if (cached_dt[i] == dt_u) {
-                ad = a_drift[i];
-                ap = a_prog[i];
-                at = a_tau[i];
-                return;
-            }
-        }
-        const F dt = static_cast<F>(dt_u);
-        ad = F(1) - std::exp(LN_HALF * dt / DRIFT_HL_S);
-        ap = F(1) - std::exp(LN_HALF * dt / PROGRESS_HL_S);
-        at = F(1) - std::exp(LN_HALF * dt / TAU_EMA_HL_S);
-        cached_dt[alpha_evict_slot] = dt_u;
-        a_drift[alpha_evict_slot] = ad;
-        a_prog[alpha_evict_slot] = ap;
-        a_tau[alpha_evict_slot] = at;
-        alpha_evict_slot = (alpha_evict_slot + 1) % ALPHA_CACHE_N;
-    }
-
-    void sample(uint64_t ts, F ps, F fair) {
-        if (!(fair > F(0)) || !(ps > F(0))) {
-            return;
-        }
-        const F gap = (ps - fair) / fair;
-        if (!have) {
-            have = true;
-            drift = gap;
-            last_ts = ts;
-            last_ps = ps;
-            return;
-        }
-        if (ts > last_ts) {
-            const uint64_t dt_u = ts - last_ts;
-            last_ts = ts;
-            F ad, ap, at;
-            alphas_for(dt_u, ad, ap, at);
-            const F dt = static_cast<F>(dt_u);
-            drift += ad * (gap - drift);
-            const F sign_d = drift > F(0) ? F(1) : (drift < F(0) ? F(-1) : F(0));
-            const F closing_rate = -((ps - last_ps) / last_ps) / dt * sign_d;
-            if (!have_progress) {
-                progress = closing_rate;
-                have_progress = true;
-            } else {
-                progress += ap * (closing_rate - progress);
-            }
-            time_total += dt;
-            const bool now_in_episode = std::fabs(drift) > EPISODE_THRESHOLD;
-            if (now_in_episode) {
-                F tau = std::fabs(drift) /
-                    (progress > PROGRESS_EPS ? progress : PROGRESS_EPS);
-                if (tau > TAU_CAP_S) {
-                    tau = TAU_CAP_S;
-                }
-                if (!in_episode) {
-                    tau_ema = tau;
-                } else {
-                    tau_ema += at * (tau - tau_ema);
-                }
-                if (tau_ema > max_tau) {
-                    max_tau = tau_ema;
-                }
-                if (tau_ema > STALL_TAU_S) {
-                    stalled_time += dt;
-                }
-            }
-            in_episode = now_in_episode;
-        }
-        last_ps = ps;
-    }
-
-    double max_smoothed_tau_days() const {
-        return have ? static_cast<double>(max_tau / F(86400)) : -1.0;
-    }
-
-    double stalled_share() const {
-        if (!have || !(time_total > F(0))) {
-            return -1.0;
-        }
-        return static_cast<double>(stalled_time / time_total);
-    }
-};
-
 template <typename T>
 struct TimeWeightedMetrics {
     using F = MetricF<T>;
@@ -601,14 +405,6 @@ struct TimeWeightedMetrics {
     F max_7d_rel_abs{F(0)};
     bool have_7d_rel_abs{false};
 
-    static constexpr uint64_t TAIL_GAP_WINDOW_S = 30ULL * 24ULL * 60ULL * 60ULL;
-    struct TailGapSample {
-        uint64_t ts{0};
-        F gap{F(0)};
-    };
-    std::deque<TailGapSample> tail_gap_samples;
-
-    F sum_sq_gap_dt{F(0)};
     T last_rel_gap{0};
 
     static constexpr double EPISODE_GAP_THRESHOLD = 0.03;
@@ -669,10 +465,6 @@ struct TimeWeightedMetrics {
         summary.final_rel_price_diff = have_err
             ? static_cast<double>(last_rel_abs)
             : -1.0;
-        summary.tail30d_rel_gap = tail30d_rel_gap();
-        summary.rms_rel_gap = sum_dt > F(0)
-            ? std::sqrt(static_cast<double>(sum_sq_gap_dt / sum_dt))
-            : -1.0;
         summary.max_episode_gap_energy = have_err
             ? static_cast<double>(
                   std::max(max_episode_gap_energy_acc, cur_episode_gap_energy))
@@ -718,8 +510,6 @@ struct TimeWeightedMetrics {
     }
 
     void sample_price_error(uint64_t ts, T price_scale, T p_cex) {
-        sample_tail_gap(ts, price_scale, p_cex);
-
         if (!have_err) {
             first_ts_err = ts;
         }
@@ -746,7 +536,6 @@ struct TimeWeightedMetrics {
             const F dt = static_cast<F>(ts - last_ts_err);
             sum_abs_rel_dt += static_cast<F>(last_rel_abs) * dt;
             const F g = static_cast<F>(last_rel_gap);
-            sum_sq_gap_dt += g * g * dt;
             sum_dt += dt;
             const F thr = static_cast<F>(EPISODE_GAP_THRESHOLD);
             if (g > thr) {
@@ -873,45 +662,6 @@ struct TimeWeightedMetrics {
                 have_7d_rel_abs = true;
             }
         }
-    }
-
-    void sample_tail_gap(uint64_t ts, T price_scale, T p_cex) {
-        F gap = F(0);
-        if (price_scale > T(0) && p_cex > T(0)) {
-            gap = static_cast<F>(std::abs(p_cex / price_scale - T(1)));
-        }
-        if (!tail_gap_samples.empty() && ts <= tail_gap_samples.back().ts) {
-            tail_gap_samples.back().gap = gap;
-            return;
-        }
-        tail_gap_samples.push_back(TailGapSample{ts, gap});
-        const uint64_t cutoff = ts > TAIL_GAP_WINDOW_S ? ts - TAIL_GAP_WINDOW_S : 0;
-        while (tail_gap_samples.size() > 1 && tail_gap_samples[1].ts <= cutoff) {
-            tail_gap_samples.pop_front();
-        }
-    }
-
-    double tail30d_rel_gap() const {
-        if (tail_gap_samples.size() < 2) {
-            return -1.0;
-        }
-        const uint64_t end_ts = tail_gap_samples.back().ts;
-        const uint64_t window_start =
-            end_ts > TAIL_GAP_WINDOW_S ? end_ts - TAIL_GAP_WINDOW_S : 0;
-        F sum = F(0);
-        F total = F(0);
-        for (size_t i = 0; i + 1 < tail_gap_samples.size(); ++i) {
-            const uint64_t raw_start = tail_gap_samples[i].ts;
-            const uint64_t seg_start = raw_start > window_start ? raw_start : window_start;
-            const uint64_t seg_end = tail_gap_samples[i + 1].ts;
-            if (seg_end <= seg_start) {
-                continue;
-            }
-            const F dt = static_cast<F>(seg_end - seg_start);
-            sum += tail_gap_samples[i].gap * dt;
-            total += dt;
-        }
-        return total > F(0) ? static_cast<double>(sum / total) : -1.0;
     }
 
     void sample_imbalance(uint64_t ts, T x0p, T x1p) {
@@ -1096,9 +846,6 @@ struct EventLoopResult {
     uint64_t yb_releverage_gm_floored_windows{0};
     double yb_releverage_gm_floor_share{-1.0};
 
-    double lp_gm_90d_worst_window{-1.0};
-    double lp_gm_90d_median_window{-1.0};
-    double lp_gm_90d_floor_share{-1.0};
     double yb_gm_90d_worst_window{-1.0};
     double yb_gm_90d_median_window{-1.0};
     double yb_gm_90d_floor_share{-1.0};
@@ -1109,11 +856,6 @@ struct EventLoopResult {
     double yb_growth_step_share_7d{-1.0};
     double yb_growth_top10_step_share{-1.0};
 
-    double max_abs_drift_1d{-1.0};
-    double max_abs_drift_3d{-1.0};
-    double drift_3d_time_share_over_2pct{-1.0};
-    double drift_stall_tau_max_days{-1.0};
-    double drift_stalled_share{-1.0};
 };
 
 } // namespace harness

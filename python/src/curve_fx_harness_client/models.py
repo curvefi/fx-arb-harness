@@ -85,7 +85,7 @@ class OpenSessionFrame(ProtocolModel):
     user_swap_freq_s: int = 0
     user_swap_size_frac: FiniteFloat = 0.01
     user_swap_thresh: FiniteFloat = 0.05
-    disable_slippage_probes: bool = False
+    enable_slippage_probes: bool = False
     yb_mode: Literal["off", "active_2l", "reference_2l"] = "off"
     yb_releverage_fee: FiniteFloat = 0.012
     yb_cash_multiplier: FiniteFloat = 1.0
