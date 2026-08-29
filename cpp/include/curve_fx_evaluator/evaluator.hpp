@@ -69,8 +69,8 @@ struct SessionConfig {
     T user_swap_thresh{static_cast<T>(0.05)};
     bool enable_slippage_probes{true};
 
-    // YieldBasis mode: "off", "passive" (metrics-only shadow of the 2L
-    // transition), or "active_2l" (state-mutating 2L contract model).
+    // YieldBasis mode: "off", "active_2l" (established Observer2-equivalent
+    // lane), or "reference_2l" (contract-derived candidate lane).
     std::string yb_mode{"off"};
     T yb_releverage_fee{static_cast<T>(0.012)};
 

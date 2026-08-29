@@ -104,7 +104,6 @@ struct Metrics {
     T donation_coin0_total{0};
     std::array<T, 2> donation_amounts_total{T(0), T(0)};
 
-    // State-mutating YieldBasis 2L model.
     size_t yb_2l_attempts{0};
     size_t yb_2l_fires{0};
     std::array<size_t, 2> yb_2l_fires_by_direction{};
@@ -1085,10 +1084,8 @@ struct EventLoopResult {
     T donation_apy{0};
     double apy_net_gm{-1.0};
 
-    // YieldBasis metric family. Filled either by the state-mutating 2L actor
-    // (yb_mode = active_2l) or, for passive mode, by a private shadow
-    // simulation that runs the exact 2L transition on a copied pool while
-    // leaving the primary simulation state untouched.
+    // YieldBasis metric family. Filled by the state-mutating active_2l or
+    // reference_2l actor.
     bool yb_releverage_enabled{false};
     T yb_releverage_fee{T(0)};
     double yb_releverage_apy{-1.0};

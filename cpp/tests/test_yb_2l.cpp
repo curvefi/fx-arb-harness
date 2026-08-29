@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <tuple>
 #include <utility>
 #include "events/types.hpp"
@@ -19,6 +20,7 @@ namespace harness = arb::harness;
 
 using Pool = fx::TwoCryptoPool<double>;
 using Actor = harness::Yb2LActor<double>;
+using ReferenceMarket = harness::YbReference2LMarket<double>;
 
 namespace {
 
@@ -146,6 +148,65 @@ RunOutcome run_with_mode(
 } // namespace
 
 int main() {
+    // Contract-derived VirtualPool route surface: both directions commit their
+    // required native legs, while a forced final-output failure rolls back the
+    // complete pool and YB state.
+    for (size_t direction = 0; direction < 2; ++direction) {
+        Pool pool = make_pool();
+        const Pool pool_before = pool;
+        auto market = ReferenceMarket::fresh_2l(
+            pool, 0.0145, 0.012, TS, 3.0
+        );
+        const auto state_before = market.state();
+        const double basis = pool.balances[direction];
+        harness::YbReference2LRouteResult<double> route;
+        for (double fraction : {1e-7, 1e-6, 1e-5, 1e-4, 1e-3}) {
+            Pool candidate_pool = pool_before;
+            auto candidate_market = ReferenceMarket::fresh_2l(
+                candidate_pool, 0.0145, 0.012, TS, 3.0
+            );
+            route = candidate_market.apply_atomic(
+                candidate_pool, direction, basis * fraction, 0.0, TS + 3600
+            );
+            if (route.committed) {
+                pool = std::move(candidate_pool);
+                market = std::move(candidate_market);
+                break;
+            }
+        }
+        require(route.committed, "reference_2l must execute both route directions");
+        require(route.output > 0.0, "reference_2l route output must be positive");
+        require(
+            direction == 0 ? route.emitted_remove : route.emitted_add,
+            "reference_2l must execute the direction-specific native leg"
+        );
+        require(
+            !same_pool_state(pool, pool_before),
+            "reference_2l committed route must mutate the pool"
+        );
+
+        Pool failed_pool = pool_before;
+        auto failed_market = ReferenceMarket::fresh_2l(
+            failed_pool, 0.0145, 0.012, TS, 3.0
+        );
+        const auto failed = failed_market.apply_atomic(
+            failed_pool, direction, route.input,
+            std::nextafter(route.output, std::numeric_limits<double>::infinity()),
+            TS + 3600
+        );
+        require(!failed.committed, "reference_2l forced slippage must reject");
+        require(
+            same_pool_state(failed_pool, pool_before),
+            "reference_2l rejected route must roll back the complete pool"
+        );
+        require(
+            failed_market.state().collateral == state_before.collateral &&
+            failed_market.state().debt == state_before.debt &&
+            failed_market.state().stable_balance == state_before.stable_balance,
+            "reference_2l rejected route must roll back YB state"
+        );
+    }
+
     bool checked = false;
     for (double relative_price : {0.50, 0.65, 0.80, 1.20, 1.40, 1.70}) {
         Pool pool = make_pool();
@@ -212,12 +273,11 @@ int main() {
 
     require(checked, "test inputs must produce a cash3 atomic real-leg fill");
 
-    // ---- YieldBasis mode event-loop checks: off / passive / active_2l ----
+    // ---- YieldBasis mode event-loop checks: off / active_2l ----
     {
         const Pool probe = make_pool();
         const arb::EventSoA events = make_events(probe);
         auto off = run_with_mode(arb::harness::YbMode::Off, events);
-        auto passive = run_with_mode(arb::harness::YbMode::Passive, events);
         auto active = run_with_mode(arb::harness::YbMode::Active2l, events);
 
         // off = nothing: the yb metric family stays empty.
@@ -228,56 +288,7 @@ int main() {
         require(off.result.yb_releverage_fee == 0.0,
                 "off mode must leave yb fee zero");
 
-        // passive produces the yb metric family (fee, apy, growth, gm windows).
-        require(passive.result.yb_releverage_enabled,
-                "passive mode must produce yb metrics");
-        require(passive.result.yb_releverage_fee == 0.012,
-                "passive must report the configured yb fee");
-        require(passive.result.yb_releverage_apy != -1.0,
-                "passive must produce a yb apy");
-        require(passive.result.yb_releverage_final_growth > 0.0,
-                "passive must produce positive yb growth");
-        require(passive.result.yb_releverage_gm_windows > 0,
-                "passive must produce yb gm windows");
-        require(passive.result.yb_releverage_apy_gm != -1.0,
-                "passive must produce a yb gm apy");
-        require(passive.result.yb_releverage_trades > 0,
-                "passive shadow must execute 2L fires");
-
-        // Exact shadow: the passive yb family equals a real active_2l run.
-        require(
-            passive.result.yb_releverage_trades == active.result.yb_releverage_trades,
-            "passive shadow fires must equal active 2L fires");
-        require(
-            passive.result.yb_releverage_apy == active.result.yb_releverage_apy,
-            "passive shadow apy must equal active 2L apy");
-        require(
-            passive.result.yb_releverage_apy_gm == active.result.yb_releverage_apy_gm,
-            "passive shadow gm apy must equal active 2L gm apy");
-        require(
-            passive.result.yb_releverage_final_growth ==
-                active.result.yb_releverage_final_growth,
-            "passive shadow growth must equal active 2L growth");
-
-        // Zero state mutation: passive leaves the primary pool and its core
-        // metrics identical to a plain off run.
-        require(
-            same_pool_state(off.pool, passive.pool),
-            "passive mode must not mutate the primary pool");
-        require(
-            off.result.metrics.trades == passive.result.metrics.trades,
-            "passive mode must not affect primary trades");
-        require(
-            off.result.metrics.n_rebalances == passive.result.metrics.n_rebalances,
-            "passive mode must not affect primary rebalances");
-        require(
-            off.result.metrics.lp_fee_coin0 == passive.result.metrics.lp_fee_coin0,
-            "passive mode must not affect primary lp fees");
-        require(
-            off.result.metrics.arb_pnl_coin0 == passive.result.metrics.arb_pnl_coin0,
-            "passive mode must not affect primary arb pnl");
-
-        // active_2l is unchanged: the state-mutating path moves the pool.
+        // active_2l remains the coherent state-mutating path.
         require(
             !same_pool_state(off.pool, active.pool),
             "active_2l must mutate the pool relative to the off world");
@@ -287,6 +298,33 @@ int main() {
                 "active_2l must report the configured yb fee");
     }
 
-    std::puts("YieldBasis 2L cash3 atomic real-leg + mode checks: OK");
+    // Both enabled modes evaluate every event and produce endpoint APY.
+    {
+        const Pool probe = make_pool();
+        arb::EventSoA events;
+        events.ts = {
+            TS, TS + 3599, TS + 3600, TS + 3600, TS + 7200, TS + 7201
+        };
+        events.p_cex.assign(events.ts.size(), probe.get_p() * 1.05);
+        events.volume.assign(events.ts.size(), 1'000'000.0);
+        events.candle_idx.assign(events.ts.size(), 0);
+
+        const auto active = run_with_mode(
+            arb::harness::YbMode::Active2l, events
+        );
+        const auto reference = run_with_mode(
+            arb::harness::YbMode::Reference2l, events
+        );
+        require(active.result.metrics.yb_2l_attempts == events.size(),
+                "active_2l must evaluate every causal event");
+        require(reference.result.metrics.yb_2l_attempts == events.size(),
+                "reference_2l must evaluate every causal event");
+        require(active.result.yb_releverage_apy != -1.0,
+                "final endpoint valuation must produce active_2l APY");
+        require(reference.result.yb_releverage_apy != -1.0,
+                "final endpoint valuation must produce reference_2l APY");
+    }
+
+    std::puts("YieldBasis 2L routes + mode/reporting checks: OK");
     return 0;
 }

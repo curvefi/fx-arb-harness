@@ -363,14 +363,14 @@ void execute_scenario_job(
         run_cfg.enable_slippage_probes = session_cfg.enable_slippage_probes;
         if (session_cfg.yb_mode == "active_2l") {
             run_cfg.yb_mode = arb::harness::YbMode::Active2l;
-        } else if (session_cfg.yb_mode == "passive") {
-            run_cfg.yb_mode = arb::harness::YbMode::Passive;
+        } else if (session_cfg.yb_mode == "reference_2l") {
+            run_cfg.yb_mode = arb::harness::YbMode::Reference2l;
         } else if (session_cfg.yb_mode == "off") {
             run_cfg.yb_mode = arb::harness::YbMode::Off;
         } else {
             throw std::invalid_argument(
                 "unknown yb_mode '" + session_cfg.yb_mode +
-                "' (expected 'off', 'passive', or 'active_2l')"
+                "' (expected 'off', 'active_2l', or 'reference_2l')"
             );
         }
         run_cfg.yb_releverage_fee =

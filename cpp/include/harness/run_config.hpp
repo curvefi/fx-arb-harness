@@ -13,12 +13,8 @@ inline constexpr uint64_t POLICY_KEEPER_RETRY_S = 10;
 // YieldBasis operating mode.
 enum class YbMode : uint8_t {
     Off = 0,   // no YieldBasis: the yb metric family stays empty
-    Passive,   // metrics-only projection: a private second simulation runs the
-               // exact active_2l transition on a copied initial pool and only
-               // the yb metric family is adopted. The primary pool, donation
-               // schedule, and actor state are never mutated. Costs roughly a
-               // second full simulation, so it is opt-in.
     Active2l,  // state-mutating 2L contract model (the original yb path)
+    Reference2l,   // contract-derived VirtualPool/LevAMM reference candidate
 };
 
 template <typename T>
@@ -44,8 +40,8 @@ struct RunConfig {
     bool detailed_log{false};
     size_t detailed_interval{1};  // log every N-th event (1 = all)
 
-    // Optional YieldBasis 2L model. yb_mode selects off / passive /
-    // active_2l; fee and cash multiplier configure whichever mode is on.
+    // Optional YieldBasis 2L model. Existing modes retain their behavior;
+    // reference_2l adds full represented VirtualPool route arithmetic.
     YbMode yb_mode{YbMode::Off};
     T yb_releverage_fee{T(0.012)};
     T yb_cash_multiplier{T(1)};

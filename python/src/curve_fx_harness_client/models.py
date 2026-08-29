@@ -51,7 +51,7 @@ class HelloFrame(ProtocolModel):
     type: Literal["hello"] = "hello"
     evaluator_identity: EvaluatorIdentity
     capabilities: List[str] = Field(default_factory=lambda: ["summary", "full_trace", "atomic_sidecars"])
-    yb_modes: List[str] = Field(default_factory=lambda: ["off", "passive", "active_2l"])
+    yb_modes: List[str] = Field(default_factory=lambda: ["off", "active_2l", "reference_2l"])
     metric_schema: str = "twocrypto-summary-v1"
     metric_fields: List[str] = Field(default_factory=list)
     limits: Limits = Field(default_factory=Limits)
@@ -86,7 +86,7 @@ class OpenSessionFrame(ProtocolModel):
     user_swap_size_frac: FiniteFloat = 0.01
     user_swap_thresh: FiniteFloat = 0.05
     disable_slippage_probes: bool = False
-    yb_mode: Literal["off", "passive", "active_2l"] = "off"
+    yb_mode: Literal["off", "active_2l", "reference_2l"] = "off"
     yb_releverage_fee: FiniteFloat = 0.012
     yb_cash_multiplier: FiniteFloat = 1.0
 
@@ -149,6 +149,8 @@ class EvaluateBatchFrame(ProtocolModel):
     request_id: str
     session_id: str
     metric_projection: MetricProjection
+    metric_fields: Optional[List[str]] = None
+    metrics_format: Literal["object", "array"] = "object"
     observation: ObservationSpec = Field(default_factory=ObservationSpec)
     candidates: List[CandidateSpec]
 

@@ -31,7 +31,7 @@ most one session; a new evaluator process is required for another session.
     "native_tuning": false
   },
   "capabilities": ["summary", "full_trace", "atomic_sidecars"],
-  "yb_modes": ["off", "passive", "active_2l"],
+  "yb_modes": ["off", "active_2l", "reference_2l"],
   "metric_schema": "twocrypto-summary-v1",
   "metric_fields": ["vp", "apy", "trades", "yb_enabled", "yb_apy"],
   "limits": {"max_frame_bytes": 4194304, "max_inflight_batches": 1}
@@ -75,7 +75,11 @@ The remaining optional session controls are `dustswap_random`,
 `dustswap_dynamic_gap_bps`, `dustswap_dynamic_heartbeat_s`,
 `dustswap_commit_clock_freq_s`, `policy_keeper_enabled`, `allow_hybrid_keeper`,
 `user_swap_freq_s`, `user_swap_size_frac`, `user_swap_thresh`, and
-`disable_slippage_probes`. `yb_mode` is `off`, `passive`, or `active_2l`;
+`disable_slippage_probes`. `yb_mode` is `off`, `active_2l`, or `reference_2l`.
+The enabled modes use `yb_releverage_fee` and `yb_cash_multiplier`, and evaluate
+after every causal event. Summary valuation is hourly for GM accounting and once
+at the final endpoint for raw APY. `reference_2l` is a floating candidate lane
+with synthetic fresh-L2 state, not a historical LT replay.
 
 ```json
 {
@@ -95,8 +99,11 @@ clients can consume its event and candle counts uniformly.
 
 ### `evaluate_batch`
 
-`metric_projection` is required and is either `summary` or `full`. Candidates
-carry a unique `ordinal`, a unique `candidate_id`, finite binary64
+`metric_projection` is required and is either `summary` or `full`.
+`metrics_format` is `object` or `array`, and defaults to `object`.
+`metric_fields` optionally selects a non-empty, unique, order-significant subset
+of the canonical fields advertised by `hello`; array format requires it.
+Candidates carry a unique `ordinal`, a unique `candidate_id`, finite binary64
 `policy_params`, and optional `pool_overrides`. Results are sorted by ordinal.
 
 ```json
@@ -124,6 +131,10 @@ changes capture only, not the economic simulation.
   "elapsed_ms": 1.0
 }
 ```
+
+With `metrics_format = array`, the response echoes the exact requested
+`metric_fields` once at batch level and each candidate `metrics` array has the
+same length and order. Object and array forms carry identical values.
 
 With `metric_projection = full`, `scenario_results` contains the admitted
 scenario's raw metrics. With `full_trace`, successful results return

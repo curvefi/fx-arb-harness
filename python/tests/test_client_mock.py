@@ -25,7 +25,7 @@ class CurrentHelloFrame(BaseModel):
     type: Literal["hello"]
     evaluator_identity: dict[str, Any]
     capabilities: list[str]
-    yb_modes: list[str] = ["off", "passive", "active_2l"]
+    yb_modes: list[str] = ["off", "active_2l", "reference_2l"]
     metric_schema: str
     metric_fields: list[str]
     limits: LegacyLimits

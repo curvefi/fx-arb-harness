@@ -3,6 +3,7 @@
 import io
 import json
 import logging
+import orjson
 import selectors
 import subprocess
 import threading
@@ -206,11 +207,11 @@ class EvaluatorClient:
             ) from e
 
     def _transact(self, request_data: dict[str, Any]) -> dict[str, Any]:
-        line_out = json.dumps(request_data)
+        line_out = orjson.dumps(request_data).decode()
         self._send_frame(line_out)
         line_in = self._read_line()
         try:
-            resp_data = json.loads(line_in)
+            resp_data = orjson.loads(line_in)
         except Exception as e:
             raise ProtocolViolationError(f"Malformed JSON response: {line_in}") from e
 
@@ -272,9 +273,9 @@ class EvaluatorClient:
     ) -> SessionReadyFrame:
         """Open an immutable evaluation session from direct scenario inputs.
 
-        ``yb_mode`` selects the YieldBasis mode: "off" (default), "passive"
-        (metrics-only shadow of the 2L transition; the primary simulation is
-        untouched), or "active_2l" (state-mutating 2L model).
+        ``yb_mode`` selects "off" (default), "active_2l" (established
+        Observer2-equivalent lane), or "reference_2l" (contract-derived
+        candidate lane). Enabled modes evaluate after every causal event.
         """
         with self._lock:
             if self._proc is None:
@@ -341,8 +342,10 @@ class EvaluatorClient:
         candidates: List[Union[CandidateSpec, Dict[str, Any]]],
         observation: Optional[Union[ObservationSpec, Dict[str, Any]]] = None,
         metric_projection: Union[MetricProjection, str] = MetricProjection.SUMMARY,
+        metric_fields: Optional[Sequence[str]] = None,
+        metrics_format: str = "object",
         session_id: Optional[str] = None,
-    ) -> BatchResultFrame:
+    ) -> Union[BatchResultFrame, Dict[str, Any]]:
         """Evaluate a batch of candidate pool parameter vectors over the open session."""
         with self._lock:
             eff_session_id = session_id or self._current_session_id
@@ -372,20 +375,62 @@ class EvaluatorClient:
             else:
                 raise ValueError(f"Invalid observation type: {type(observation)}")
 
-
-            proj = MetricProjection(metric_projection) if isinstance(metric_projection, str) else metric_projection
+            proj = (
+                MetricProjection(metric_projection)
+                if isinstance(metric_projection, str)
+                else metric_projection
+            )
+            if metrics_format == "array" and not metric_fields:
+                raise ValueError(
+                    "metric_fields must be non-empty for array metrics"
+                )
 
             req_id = self._next_request_id("batch")
             frame = EvaluateBatchFrame(
                 request_id=req_id,
                 session_id=eff_session_id,
                 metric_projection=proj,
+                metric_fields=(
+                    None if metric_fields is None else list(metric_fields)
+                ),
+                metrics_format=metrics_format,
                 observation=obs_spec,
                 candidates=cand_specs,
             )
 
             resp_data = self._transact(frame.model_dump(exclude_none=True))
-            return BatchResultFrame.model_validate(resp_data)
+            if metrics_format == "object":
+                return BatchResultFrame.model_validate(resp_data)
+            if resp_data.get("type") != "batch_result":
+                raise ProtocolViolationError("Expected batch_result response")
+            if resp_data.get("session_id") != eff_session_id:
+                raise ProtocolViolationError(
+                    "Array batch response session_id does not match the request"
+                )
+            if resp_data.get("status") not in {
+                "complete", "partial", "failed", "cancelled"
+            }:
+                raise ProtocolViolationError("Invalid array batch response status")
+            response_fields = resp_data.get("metric_fields")
+            if not isinstance(response_fields, list):
+                raise ProtocolViolationError(
+                    "Array batch response must echo metric_fields"
+                )
+            if tuple(response_fields) != tuple(metric_fields):
+                raise ProtocolViolationError(
+                    "Array batch response metric_fields do not match the request"
+                )
+            results = resp_data.get("results")
+            if not isinstance(results, list):
+                raise ProtocolViolationError("Array batch results must be a list")
+            if any(
+                not isinstance(result, dict)
+                or not isinstance(result.get("metrics"), list)
+                or len(result["metrics"]) != len(response_fields)
+                for result in results
+            ):
+                raise ProtocolViolationError("Invalid metric array result")
+            return resp_data
 
     def close_session(self, session_id: Optional[str] = None) -> SessionClosedFrame:
         """Close an active session on the evaluator."""

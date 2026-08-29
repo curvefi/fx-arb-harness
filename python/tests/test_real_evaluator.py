@@ -140,6 +140,7 @@ def test_description_is_bound_and_complete() -> None:
         pool.costs.arb_fee_bps pool.costs.gas_coin0
         pool.costs.use_volume_cap pool.costs.volume_cap_mult
         pool.costs.volume_cap_is_coin_1
+        pool.run.yb_releverage_fee
     """.split())
     run_names = {p["name"] for p in parameters if p["name"].startswith("run.")}
     assert run_names == set("""
@@ -162,7 +163,7 @@ def test_description_is_bound_and_complete() -> None:
     } <= parameter.keys() for parameter in parameters)
     enums = {p["name"]: p["choices"] for p in parameters if p["type"] == "enum"}
     assert enums == {
-        "run.yb_mode": ["off", "passive", "active_2l"],
+        "run.yb_mode": ["off", "active_2l", "reference_2l"],
         "run.metric_projection": ["summary", "full"],
         "run.observation.kind": ["summary", "full_trace"],
     }
@@ -217,6 +218,42 @@ def test_real_persistent_batches_match_single_candidate_results(tmp_path: Path) 
         assert [result.ordinal for result in batch.results] == [3, 7]
         batched = next(result for result in batch.results if result.ordinal == 7)
         assert _economic_metrics(batched) == _economic_metrics(single)
+    finally:
+        client.shutdown()
+
+
+def test_real_metric_array_matches_object(tmp_path: Path) -> None:
+    assert EVALUATOR is not None
+    template, candles = _write_inputs(tmp_path)
+    client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
+    try:
+        hello = client.start()
+        policy_params = json.loads(os.environ.get("CURVE_FX_POLICY_PARAMS", "[]"))
+        assert len(policy_params) == hello.evaluator_identity.policy_parameter_count
+        _open(client, template, candles, "metric-arrays")
+        fields = ["vp", "apy", "trades"]
+        object_frame = client.evaluate_batch(
+            [CandidateSpec(
+                ordinal=0,
+                candidate_id="object",
+                policy_params=policy_params,
+            )],
+            metric_fields=fields,
+        )
+        array_frame = client.evaluate_batch(
+            [CandidateSpec(
+                ordinal=0,
+                candidate_id="array",
+                policy_params=policy_params,
+            )],
+            metric_fields=fields,
+            metrics_format="array",
+        )
+
+        assert array_frame["metric_fields"] == fields
+        assert array_frame["results"][0]["metrics"] == [
+            object_frame.results[0].metrics[name] for name in fields
+        ]
     finally:
         client.shutdown()
 
@@ -338,6 +375,24 @@ def test_real_evaluator_rejects_missing_metric_projection(tmp_path: Path) -> Non
 
         process.stdin.write(json.dumps({
             "protocol": "curve_fx_eval",
+            "type": "evaluate_batch",
+            "request_id": "batch-3",
+            "session_id": "missing-projection",
+            "metric_projection": "summary",
+            "metrics_format": "array",
+            "candidates": [{
+                "ordinal": 0,
+                "candidate_id": "array-without-fields",
+                "policy_params": policy_params,
+            }],
+        }) + "\n")
+        process.stdin.flush()
+        error = json.loads(process.stdout.readline())
+        assert error["type"] == "error"
+        assert error["error_code"] == "INVALID_METRIC_FIELDS"
+
+        process.stdin.write(json.dumps({
+            "protocol": "curve_fx_eval",
             "type": "shutdown",
             "request_id": "shutdown-1",
         }) + "\n")
@@ -401,7 +456,7 @@ def test_real_evaluator_yb_mode_round_trip(tmp_path: Path) -> None:
         try:
             hello = client.start()
             assert len(policy_params) == hello.evaluator_identity.policy_parameter_count
-            assert hello.yb_modes == ["off", "passive", "active_2l"]
+            assert hello.yb_modes == ["off", "active_2l", "reference_2l"]
             client.open_session(
                 session_id=f"yb-{mode}",
                 template_path=template,
@@ -417,12 +472,14 @@ def test_real_evaluator_yb_mode_round_trip(tmp_path: Path) -> None:
         finally:
             client.shutdown()
 
-    passive = _run("passive", fee=0.011, cash=2.5)
-    assert passive.status == "ok"
-    assert passive.metrics["yb_enabled"] == 1.0
-    assert passive.metrics["yb_fee"] == pytest.approx(0.011)
-    assert passive.metrics["yb_apy"] != -1.0
-    assert passive.metrics["yb_final_growth"] > 0.0
+    active = _run("active_2l", fee=0.011, cash=2.5)
+    assert active.status == "ok"
+    assert active.metrics["yb_enabled"] == 1.0
+    assert active.metrics["yb_fee"] == pytest.approx(0.011)
+
+    reference = _run("reference_2l")
+    assert reference.status == "ok"
+    assert reference.metrics["yb_enabled"] == 1.0
 
     off = _run("off")
     assert off.status == "ok"

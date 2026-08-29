@@ -302,8 +302,8 @@ json::object make_hello_frame() {
 
     json::array yb_modes;
     yb_modes.push_back("off");
-    yb_modes.push_back("passive");
     yb_modes.push_back("active_2l");
+    yb_modes.push_back("reference_2l");
     hello["yb_modes"] = yb_modes;
 
     const auto& metric_schema = canonical_metric_schema();
@@ -614,11 +614,11 @@ private:
                     return;
                 }
                 yb_mode = std::string(req.at("yb_mode").as_string());
-                if (yb_mode != "off" && yb_mode != "passive" &&
-                    yb_mode != "active_2l") {
+                if (yb_mode != "off" && yb_mode != "active_2l" &&
+                    yb_mode != "reference_2l") {
                     write_frame(std::cout, make_error_frame(
                         req_id, "protocol", "INVALID_ARGUMENT",
-                        "yb_mode must be one of 'off', 'passive', 'active_2l'"));
+                        "yb_mode must be one of 'off', 'active_2l', 'reference_2l'"));
                     return;
                 }
             }
@@ -663,7 +663,8 @@ private:
     void handle_evaluate_batch(const json::object& req, const std::string& req_id) {
         if (const auto field = unknown_field(req, {
                 "protocol", "type", "request_id", "session_id",
-                "metric_projection", "observation", "candidates"
+                "metric_projection", "metric_fields", "metrics_format",
+                "observation", "candidates"
             })) {
             write_frame(std::cout, make_error_frame(
                 req_id, "protocol", "UNKNOWN_FIELD",
@@ -704,6 +705,60 @@ private:
             return;
         }
         const bool full_metric_projection = (metric_proj_str == "full");
+        std::string metrics_format = "object";
+        if (const auto* value = req.if_contains("metrics_format")) {
+            if (!value->is_string()) {
+                write_frame(std::cout, make_error_frame(
+                    req_id, "protocol", "INVALID_METRICS_FORMAT",
+                    "metrics_format must be a string"));
+                return;
+            }
+            metrics_format = value->as_string().c_str();
+        }
+        if (metrics_format != "object" && metrics_format != "array") {
+            write_frame(std::cout, make_error_frame(
+                req_id, "protocol", "INVALID_METRICS_FORMAT",
+                "metrics_format must be 'object' or 'array'"));
+            return;
+        }
+        if (metrics_format == "array" &&
+            req.if_contains("metric_fields") == nullptr) {
+            write_frame(std::cout, make_error_frame(
+                req_id, "protocol", "INVALID_METRIC_FIELDS",
+                "array metrics require metric_fields"));
+            return;
+        }
+        std::vector<std::string> metric_fields = CANONICAL_METRIC_FIELDS;
+        if (const auto* value = req.if_contains("metric_fields")) {
+            if (!value->is_array() || value->as_array().empty()) {
+                write_frame(std::cout, make_error_frame(
+                    req_id, "protocol", "INVALID_METRIC_FIELDS",
+                    "metric_fields must be a non-empty array"));
+                return;
+            }
+            metric_fields.clear();
+            std::unordered_set<std::string> seen;
+            for (const auto& item : value->as_array()) {
+                if (!item.is_string()) {
+                    write_frame(std::cout, make_error_frame(
+                        req_id, "protocol", "INVALID_METRIC_FIELDS",
+                        "metric_fields entries must be strings"));
+                    return;
+                }
+                const std::string name(item.as_string().c_str());
+                if (std::find(
+                        CANONICAL_METRIC_FIELDS.begin(),
+                        CANONICAL_METRIC_FIELDS.end(),
+                        name
+                    ) == CANONICAL_METRIC_FIELDS.end() || !seen.insert(name).second) {
+                    write_frame(std::cout, make_error_frame(
+                        req_id, "protocol", "INVALID_METRIC_FIELDS",
+                        "metric_fields contains an unknown or duplicate field: " + name));
+                    return;
+                }
+                metric_fields.push_back(name);
+            }
+        }
         if (!req.if_contains("candidates") || !req.at("candidates").is_array()) {
             write_frame(std::cout, make_error_frame(req_id, "candidate", "INVALID_ARGUMENT", "candidates array is required"));
             return;
@@ -924,6 +979,11 @@ private:
         resp["session_id"] = session_->session_id;
         resp["status"] = "complete";
         resp["metric_projection"] = full_metric_projection ? "full" : "summary";
+        if (metrics_format == "array") {
+            json::array fields;
+            for (const auto& name : metric_fields) fields.push_back(json::value(name));
+            resp["metric_fields"] = std::move(fields);
+        }
 
         json::array results_arr;
         for (size_t c_idx = 0; c_idx < batch_result.candidate_results.size(); ++c_idx) {
@@ -938,16 +998,24 @@ private:
             }
 
             // Raw metrics dictionary in canonical field order.
-            json::object metrics_obj;
-            for (const auto& field_name : CANONICAL_METRIC_FIELDS) {
-                auto it = res.aggregate_metrics.find(field_name);
-                if (it != res.aggregate_metrics.end()) {
-                    metrics_obj[field_name] = it->second;
-                } else {
-                    metrics_obj[field_name] = -1.0;
+            if (metrics_format == "array") {
+                json::array values;
+                for (const auto& field_name : metric_fields) {
+                    const auto it = res.aggregate_metrics.find(field_name);
+                    values.push_back(
+                        it != res.aggregate_metrics.end() ? it->second : -1.0
+                    );
                 }
+                r["metrics"] = std::move(values);
+            } else {
+                json::object metrics_obj;
+                for (const auto& field_name : metric_fields) {
+                    const auto it = res.aggregate_metrics.find(field_name);
+                    metrics_obj[field_name] =
+                        it != res.aggregate_metrics.end() ? it->second : -1.0;
+                }
+                r["metrics"] = std::move(metrics_obj);
             }
-            r["metrics"] = metrics_obj;
 
             // Scenario results: populated only when metric_projection is "full"
             json::array sc_results;

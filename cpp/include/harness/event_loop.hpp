@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <optional>
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
@@ -20,6 +19,7 @@
 #include "harness/idle_tick.hpp"
 #include "harness/yb_2l.hpp"
 #include "harness/yb_2l_apy.hpp"
+#include "harness/yb_reference_2l.hpp"
 #include "harness/pool_snapshot.hpp"
 #include "harness/run_config.hpp"
 #include "harness/user_swap.hpp"
@@ -50,20 +50,6 @@ EventLoopResult<T> run_event_loop(
     const size_t detailed_interval = cfg.detailed_interval;
     const T yb_releverage_fee = cfg.yb_releverage_fee;
     const YbMode yb_mode = cfg.yb_mode;
-
-    // Passive mode re-runs the exact active_2l transition on a private copy
-    // of the initial pool/configs after the primary loop completes. The
-    // primary pool and schedulers are mutated by the loop, so their pre-loop
-    // state is captured once here; the shadow result contributes only the yb
-    // metric family.
-    std::optional<Pool> passive_pool_initial;
-    DonationCfg<T> passive_dcfg_initial{};
-    UserSwapCfg<T> passive_ucfg_initial{};
-    if (yb_mode == YbMode::Passive) {
-        passive_pool_initial.emplace(pool);
-        passive_dcfg_initial = dcfg;
-        passive_ucfg_initial = ucfg;
-    }
 
     using F = MetricF<T>;
     EventLoopResult<T> result{};
@@ -127,9 +113,15 @@ EventLoopResult<T> run_event_loop(
     ActionLogger<T> action_logger(out_actions);
     DetailedLogger<T> detailed_logger(out_detailed_entries, detailed_interval);
     Yb2LActor<T> yb_2l_actor;
+    YbReference2LMarket<T> yb_reference_market;
     if constexpr (std::is_floating_point_v<T>) {
         if (yb_mode == YbMode::Active2l) {
             yb_2l_actor = Yb2LActor<T>::fresh_2l(
+                pool, dcfg.apy, yb_releverage_fee, result.t_start,
+                cfg.yb_cash_multiplier
+            );
+        } else if (yb_mode == YbMode::Reference2l) {
+            yb_reference_market = YbReference2LMarket<T>::fresh_2l(
                 pool, dcfg.apy, yb_releverage_fee, result.t_start,
                 cfg.yb_cash_multiplier
             );
@@ -584,7 +576,9 @@ EventLoopResult<T> run_event_loop(
     const bool detailed_on = detailed_logger.enabled();
     const bool user_swap_on = ucfg.enabled();
     const bool yb_2l_on = yb_2l_actor.enabled();
-    const bool donation_on = dcfg.enabled && !yb_2l_on;
+    const bool yb_reference_on = yb_reference_market.enabled();
+    const bool yb_on = yb_2l_on || yb_reference_on;
+    const bool donation_on = dcfg.enabled && !yb_on;
     const bool dynamic_keeper_on = cfg.dustswap_dynamic_freq_s > 0;
     const bool gap_keeper_on = cfg.dustswap_dynamic_gap_enabled;
     const bool policy_keeper_on = cfg.policy_keeper_enabled;
@@ -598,14 +592,18 @@ EventLoopResult<T> run_event_loop(
     uint64_t last_gap_check_ts = 0;
     bool have_gap_check = false;
     uint64_t last_price_scale_change_ts = pool.last_timestamp;
-
     const Yb2LCosts<T> yb_2l_costs{};
-    if (yb_2l_on) {
+    const YbReference2LCosts<T> yb_reference_costs{};
+    uint64_t last_yb_valuation_ts = 0;
+    if (yb_on) {
         m.yb_2l_start_collateral =
-            yb_2l_actor.state().collateral;
-        m.yb_2l_start_debt = yb_2l_actor.state().debt;
+            yb_2l_on ? yb_2l_actor.state().collateral
+                     : yb_reference_market.state().collateral;
+        m.yb_2l_start_debt = yb_2l_on
+            ? yb_2l_actor.state().debt : yb_reference_market.state().debt;
         m.yb_2l_start_stable_balance =
-            yb_2l_actor.state().stable_balance;
+            yb_2l_on ? yb_2l_actor.state().stable_balance
+                     : yb_reference_market.state().stable_balance;
     }
     const auto run_yb_2l_once = [&] (
         uint64_t ev_ts,
@@ -756,6 +754,123 @@ EventLoopResult<T> run_event_loop(
             invalidate_edge_inputs();
         }
     };
+    const auto run_yb_reference_once = [&] (
+        uint64_t ev_ts,
+        const T& cex_price,
+        bool& did_any_trade
+    ) {
+        if (!yb_reference_on) return;
+        if constexpr (std::is_floating_point_v<T>) {
+            ++m.yb_2l_attempts;
+            const T price_scale_before = pool.cached_price_scale;
+            auto route = yb_reference_market.execute_best(
+                pool, cex_price, ev_ts, yb_reference_costs, true
+            );
+            if (!route.committed) return;
+
+            ++m.yb_2l_fires;
+            ++m.yb_2l_fires_by_direction[route.direction];
+            m.yb_2l_input_by_direction[route.direction] += route.input;
+            m.yb_2l_output_by_direction[route.direction] += route.output;
+            m.yb_2l_profit_by_direction[route.direction] += route.profit_coin0;
+            if (m.yb_2l_first_fire_ts == 0) m.yb_2l_first_fire_ts = ev_ts;
+            m.yb_2l_last_fire_ts = ev_ts;
+
+            m.yb_2l_fill_adds += route.emitted_add ? 1 : 0;
+            m.yb_2l_fill_removes += route.emitted_remove ? 1 : 0;
+            const T before_donation = route.direction == 1
+                ? route.price_scale_after_add : price_scale_before;
+            if (route.emitted_add &&
+                route.price_scale_after_add != price_scale_before) {
+                ++m.yb_2l_fill_add_ps_moves;
+                ++m.n_rebalances;
+            }
+            if (route.emitted_donation &&
+                route.price_scale_after_donation != before_donation) {
+                ++m.yb_2l_donation_ps_moves;
+                ++m.n_rebalances;
+            }
+
+            if (route.emitted_donation) {
+                ++m.yb_2l_donations;
+                m.yb_2l_donation_coin0 += route.donation;
+                ++m.donations;
+                m.donation_amounts_total[0] += route.donation;
+                m.donation_coin0_total += route.donation;
+                if (route.virtual_price_before_donation > T(0) &&
+                    route.virtual_price_after_donation > T(0)) {
+                    m.yb_2l_full_vp_log_growth += std::log(
+                        static_cast<double>(
+                            route.virtual_price_after_donation /
+                            route.virtual_price_before_donation
+                        )
+                    );
+                }
+                if (route.xcp_profit_before_donation > T(0) &&
+                    route.xcp_profit_after_donation > T(0)) {
+                    m.yb_2l_xcp_log_growth += std::log(
+                        static_cast<double>(
+                            route.xcp_profit_after_donation /
+                            route.xcp_profit_before_donation
+                        )
+                    );
+                }
+                m.yb_2l_burn_backfill_log_growth =
+                    m.yb_2l_full_vp_log_growth - m.yb_2l_xcp_log_growth;
+                action_logger.log_yb_donation(
+                    ev_ts, route.donation,
+                    route.price_scale_after_donation, dcfg.apy
+                );
+            } else {
+                ++m.yb_2l_fires_without_donation;
+            }
+            did_any_trade = true;
+            invalidate_edge_inputs();
+        }
+    };
+    const auto sample_yb_report = [&] (
+        const auto& market,
+        uint64_t ts,
+        const T& cex_price,
+        bool detailed_row_logged
+    ) {
+        const bool hourly_due = yb_apy_gm.should_sample(ts);
+        if (!hourly_due && !detailed_row_logged) return;
+
+        yb_2l_apy_tracker.sample(pool, market, ts);
+        last_yb_valuation_ts = ts;
+        const bool initialized = yb_2l_apy_tracker.initialized();
+        const F growth_now = initialized
+            ? yb_2l_apy_tracker.growth()
+            : F(0);
+
+        if (hourly_due && initialized) {
+            yb_apy_gm.sample(ts, growth_now);
+            yb_apy_gm_90d.sample(ts, growth_now);
+            yb_apy_gm_30d.sample(ts, growth_now);
+            yb_growth_steps.sample(ts, growth_now);
+        }
+        if (!detailed_row_logged) return;
+
+        detailed_logger.annotate_last_yb(
+            initialized,
+            growth_now,
+            static_cast<F>(market.state().fee),
+            m.yb_2l_fires
+        );
+        const T lp_oracle = market.lp_oracle(pool);
+        const T lp_fair = pool.totalSupply > T(0)
+            ? (pool.balances[0] + cex_price * pool.balances[1]) /
+                pool.totalSupply
+            : T(0);
+        detailed_logger.annotate_last_yb_position(
+            market.state().stable_balance,
+            market.projected_debt(ts),
+            market.state().collateral,
+            lp_oracle,
+            lp_fair
+        );
+    };
     if (detailed_on) {
         for (size_t ev_idx = first_event_idx; ev_idx < n_events; ++ev_idx) {
             if (static_cast<size_t>(events.candle_idx[ev_idx]) >=
@@ -789,6 +904,8 @@ EventLoopResult<T> run_event_loop(
         bool did_any_trade = execute_arb(ev_idx, ev_ts, cex_price);
         if (yb_2l_on) {
             run_yb_2l_once(ev_ts, cex_price, did_any_trade);
+        } else if (yb_reference_on) {
+            run_yb_reference_once(ev_ts, cex_price, did_any_trade);
         }
         if (user_swap_on && ucfg.next_ts != 0 && ev_ts >= ucfg.next_ts) {
             apply_user_swap(ev_idx, ev_ts, cex_price);
@@ -877,70 +994,39 @@ EventLoopResult<T> run_event_loop(
                 did_any_trade = true;
             }
         }
-        if (detailed_on || yb_2l_on) {
-            const size_t candle_idx = static_cast<size_t>(events.candle_idx[ev_idx]);
-            bool detailed_row_logged = false;
-            if (detailed_on) {
-                detailed_row_logged = detailed_logger.log_event(
-                    pool,
-                    ev_ts,
-                    (*candles)[candle_idx],
-                    cex_price,
-                    have_chainlink ? static_cast<T>(events.p_chainlink[ev_idx]) : T(0),
-                    dcfg.apy,
-                    m.trades,
-                    m.n_rebalances,
-                    enable_slippage_probes && sp.have_real[0]
-                        ? sp.last_real_s01[0]
-                        : std::numeric_limits<T>::quiet_NaN(),
-                    enable_slippage_probes && sp.have_real[0]
-                        ? sp.last_real_s10[0]
-                        : std::numeric_limits<T>::quiet_NaN()
+        bool detailed_row_logged = false;
+        if (detailed_on) {
+            const size_t candle_idx =
+                static_cast<size_t>(events.candle_idx[ev_idx]);
+            detailed_row_logged = detailed_logger.log_event(
+                pool,
+                ev_ts,
+                (*candles)[candle_idx],
+                cex_price,
+                have_chainlink
+                    ? static_cast<T>(events.p_chainlink[ev_idx])
+                    : T(0),
+                dcfg.apy,
+                m.trades,
+                m.n_rebalances,
+                enable_slippage_probes && sp.have_real[0]
+                    ? sp.last_real_s01[0]
+                    : std::numeric_limits<T>::quiet_NaN(),
+                enable_slippage_probes && sp.have_real[0]
+                    ? sp.last_real_s10[0]
+                    : std::numeric_limits<T>::quiet_NaN()
+            );
+        }
+        if constexpr (std::is_floating_point_v<T>) {
+            if (yb_2l_on) {
+                sample_yb_report(
+                    yb_2l_actor, ev_ts, cex_price, detailed_row_logged
                 );
-            }
-            if constexpr (std::is_floating_point_v<T>) {
-                if (yb_2l_on) {
-                    yb_2l_apy_tracker.sample(
-                        pool, yb_2l_actor, ev_ts
-                    );
-                    const bool initialized =
-                        yb_2l_apy_tracker.initialized();
-                    const bool hourly_due =
-                        initialized && yb_apy_gm.should_sample(ev_ts);
-                    if (hourly_due || detailed_row_logged) {
-                        const F growth_now = initialized
-                            ? yb_2l_apy_tracker.growth()
-                            : F(0);
-                        if (hourly_due) {
-                            yb_apy_gm.sample(ev_ts, growth_now);
-                            yb_apy_gm_90d.sample(ev_ts, growth_now);
-                            yb_apy_gm_30d.sample(ev_ts, growth_now);
-                            yb_growth_steps.sample(ev_ts, growth_now);
-                        }
-                        if (detailed_row_logged) {
-                            detailed_logger.annotate_last_yb(
-                                initialized,
-                                growth_now,
-                                static_cast<F>(yb_2l_actor.state().fee),
-                                m.yb_2l_fires
-                            );
-                            const T lp_oracle =
-                                yb_2l_actor.lp_oracle(pool);
-                            const T lp_fair = pool.totalSupply > T(0)
-                                ? (pool.balances[0]
-                                    + cex_price * pool.balances[1])
-                                    / pool.totalSupply
-                                : T(0);
-                            detailed_logger.annotate_last_yb_position(
-                                yb_2l_actor.state().stable_balance,
-                                yb_2l_actor.projected_debt(ev_ts),
-                                yb_2l_actor.state().collateral,
-                                lp_oracle,
-                                lp_fair
-                            );
-                        }
-                    }
-                }
+            } else if (yb_reference_on) {
+                sample_yb_report(
+                    yb_reference_market, ev_ts, cex_price,
+                    detailed_row_logged
+                );
             }
         }
 
@@ -957,6 +1043,21 @@ EventLoopResult<T> run_event_loop(
             );
         }
         sample_apy_net_gm(ev_ts);
+    }
+
+    // Raw YB APY is an endpoint metric. If the last event was between hourly
+    // reports, mark it once without adding another GM window.
+    if constexpr (std::is_floating_point_v<T>) {
+        const auto sample_yb_endpoint = [&](const auto& market) {
+            if (last_yb_valuation_ts == result.t_end) return;
+            yb_2l_apy_tracker.sample(pool, market, result.t_end);
+            last_yb_valuation_ts = result.t_end;
+        };
+        if (yb_2l_on) {
+            sample_yb_endpoint(yb_2l_actor);
+        } else if (yb_reference_on) {
+            sample_yb_endpoint(yb_reference_market);
+        }
     }
 
     if (yb_2l_on) {
@@ -984,18 +1085,33 @@ EventLoopResult<T> run_event_loop(
             yb_2l_actor.shadow_violations();
         m.yb_2l_conservation_abstains =
             yb_2l_actor.shadow_abstains();
+    } else if (yb_reference_on) {
+        m.yb_2l_end_collateral = yb_reference_market.state().collateral;
+        m.yb_2l_end_debt_projected =
+            yb_reference_market.projected_debt(result.t_end);
+        m.yb_2l_end_stable_balance =
+            yb_reference_market.state().stable_balance;
+        const auto interest =
+            yb_reference_market.projected_interest_summary(result.t_end);
+        m.yb_2l_end_pending_interest = interest.pending_interest;
+        m.yb_2l_end_pending_donation = interest.pending_donation;
+        m.yb_2l_interest_accrued = interest.accrued;
+        m.yb_2l_interest_donated = interest.donated;
+        m.yb_2l_interest_conservation_residual =
+            interest.conservation_residual;
     }
     result.apy_net_gm = apy_net_gm.value();
-    result.yb_releverage_enabled = yb_2l_on;
+    result.yb_releverage_enabled = yb_on;
     result.yb_releverage_fee =
-        yb_2l_on ? yb_2l_actor.state().fee : T(0);
+        yb_2l_on ? yb_2l_actor.state().fee
+                 : (yb_reference_on ? yb_reference_market.state().fee : T(0));
     result.yb_releverage_apy =
-        yb_2l_on ? yb_2l_apy_tracker.apy() : -1.0;
+        yb_on ? yb_2l_apy_tracker.apy() : -1.0;
     result.yb_releverage_apy_gm = yb_apy_gm.value();
-    result.yb_releverage_final_growth = yb_2l_on
+    result.yb_releverage_final_growth = yb_on
         ? yb_2l_apy_tracker.final_growth() : -1.0;
     result.yb_releverage_trades =
-        yb_2l_on ? m.yb_2l_fires : 0;
+        yb_on ? m.yb_2l_fires : 0;
     result.yb_releverage_gm_windows = static_cast<uint64_t>(yb_apy_gm.n_windows);
     result.yb_releverage_gm_floored_windows =
         static_cast<uint64_t>(yb_apy_gm.n_floored_windows);
@@ -1022,59 +1138,6 @@ EventLoopResult<T> run_event_loop(
     result.drift_3d_time_share_over_2pct = drift_ema_3d.time_share_over();
     result.drift_stall_tau_max_days = drift_stall.max_smoothed_tau_days();
     result.drift_stalled_share = drift_stall.stalled_share();
-
-    if (yb_mode == YbMode::Passive) {
-        if constexpr (std::is_floating_point_v<T>) {
-            // Metrics-only shadow: re-run the exact active_2l transition over
-            // the same events on a private copy of the initial pool/configs.
-            // try_fire enforces state_.collateral == pool circulating supply,
-            // so the shadow must evolve its own coherent pool (a fresh primary
-            // copy would diverge after the first shadow LP mutation and hard-
-            // abstain). Only the yb metric family is adopted; the primary
-            // simulation state and its metrics are untouched.
-            RunConfig<T> shadow_cfg = cfg;
-            shadow_cfg.yb_mode = YbMode::Active2l;
-            Pool shadow_pool = *passive_pool_initial;
-            DonationCfg<T> shadow_dcfg = passive_dcfg_initial;
-            UserSwapCfg<T> shadow_ucfg = passive_ucfg_initial;
-            const EventLoopResult<T> shadow_result = run_event_loop(
-                shadow_pool, events, costs, shadow_dcfg, icfg,
-                shadow_ucfg, shadow_cfg, candles, event_start_floor_ts,
-                static_cast<std::vector<Action<T>>*>(nullptr),
-                static_cast<std::vector<DetailedEntry<T>>*>(nullptr)
-            );
-            result.yb_releverage_enabled = shadow_result.yb_releverage_enabled;
-            result.yb_releverage_fee = shadow_result.yb_releverage_fee;
-            result.yb_releverage_apy = shadow_result.yb_releverage_apy;
-            result.yb_releverage_apy_gm = shadow_result.yb_releverage_apy_gm;
-            result.yb_releverage_final_growth =
-                shadow_result.yb_releverage_final_growth;
-            result.yb_releverage_trades = shadow_result.yb_releverage_trades;
-            result.yb_releverage_gm_windows =
-                shadow_result.yb_releverage_gm_windows;
-            result.yb_releverage_gm_floored_windows =
-                shadow_result.yb_releverage_gm_floored_windows;
-            result.yb_releverage_gm_floor_share =
-                shadow_result.yb_releverage_gm_floor_share;
-            result.yb_gm_90d_worst_window =
-                shadow_result.yb_gm_90d_worst_window;
-            result.yb_gm_90d_median_window =
-                shadow_result.yb_gm_90d_median_window;
-            result.yb_gm_90d_floor_share =
-                shadow_result.yb_gm_90d_floor_share;
-            result.yb_gm_30d_cvar20 = shadow_result.yb_gm_30d_cvar20;
-            result.yb_gm_30d_floor_share =
-                shadow_result.yb_gm_30d_floor_share;
-            result.yb_growth_step_share_1d =
-                shadow_result.yb_growth_step_share_1d;
-            result.yb_growth_step_share_3d =
-                shadow_result.yb_growth_step_share_3d;
-            result.yb_growth_step_share_7d =
-                shadow_result.yb_growth_step_share_7d;
-            result.yb_growth_top10_step_share =
-                shadow_result.yb_growth_top10_step_share;
-        }
-    }
 
     return result;
 }
