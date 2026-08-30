@@ -322,19 +322,19 @@ struct RollingGeoApy90d : RollingGeoApyWindow<F> {
     RollingGeoApy90d() : RollingGeoApyWindow<F>(WINDOW_S, FLOOR_APY) {}
 };
 
-// Daily 90-day net-return consistency score for exhaustive discovery grids.
-// Each window contributes its annualized continuously compounded return. The
-// final APY is the one-sigma lower bound across windows, so smooth earnings
-// outrank equally profitable but regime-dependent paths. Unlike the legacy GM
-// of annualized APYs, negative windows are represented directly and need no
-// arbitrary positive floor.
+// Daily 90-day robust net-return score for exhaustive discovery grids. Each
+// window contributes its annualized continuously compounded return. The final
+// rate gives equal weight to the mean window and the mean of the worst 5% of
+// windows. Negative regimes remain finite and rankable; unlike the legacy GM
+// of annualized APYs, no arbitrary positive floor is required.
 template <typename F>
-struct NetApyConsistency90d {
+struct NetApyRobust90d {
     static constexpr uint64_t SAMPLE_S = 24ULL * 60ULL * 60ULL;
     static constexpr uint64_t WINDOW_S = 90ULL * SAMPLE_S;
     static constexpr F SEC_PER_YEAR = F(365.0 * 24.0 * 60.0 * 60.0);
     static constexpr size_t SAMPLE_CAPACITY =
         static_cast<size_t>(WINDOW_S / SAMPLE_S) + 2;
+    static constexpr size_t TAIL_DENOMINATOR = 20;
 
     struct Sample {
         uint64_t ts{0};
@@ -346,9 +346,17 @@ struct NetApyConsistency90d {
     size_t count{0};
     uint64_t last_sample_ts{0};
     bool have_sample{false};
-    F mean_log_rate{F(0)};
-    F m2_log_rate{F(0)};
-    size_t n_windows{0};
+    F sum_log_rate{F(0)};
+    std::vector<F> log_rates;
+
+    void reserve_duration(uint64_t duration_s) {
+        if (duration_s < WINDOW_S) {
+            return;
+        }
+        log_rates.reserve(
+            static_cast<size_t>((duration_s - WINDOW_S) / SAMPLE_S) + 1
+        );
+    }
 
     bool should_sample(uint64_t ts) const {
         return !have_sample || ts >= last_sample_ts + SAMPLE_S;
@@ -395,22 +403,33 @@ struct NetApyConsistency90d {
             return;
         }
 
-        ++n_windows;
-        const F delta = log_rate - mean_log_rate;
-        mean_log_rate += delta / static_cast<F>(n_windows);
-        m2_log_rate += delta * (log_rate - mean_log_rate);
+        sum_log_rate += log_rate;
+        log_rates.push_back(log_rate);
     }
 
-    double value() const {
-        if (n_windows == 0) {
+    double value() {
+        if (log_rates.empty()) {
             return -1.0;
         }
-        const F variance = std::max(
-            F(0), m2_log_rate / static_cast<F>(n_windows)
-        );
-        return static_cast<double>(
-            std::expm1(mean_log_rate - std::sqrt(variance))
-        );
+        const size_t tail_count =
+            (log_rates.size() + TAIL_DENOMINATOR - 1) / TAIL_DENOMINATOR;
+        if (tail_count < log_rates.size()) {
+            std::nth_element(
+                log_rates.begin(),
+                log_rates.begin() + static_cast<std::ptrdiff_t>(tail_count),
+                log_rates.end()
+            );
+        }
+        F tail_sum = F(0);
+        for (size_t i = 0; i < tail_count; ++i) {
+            tail_sum += log_rates[i];
+        }
+        const F mean_log_rate =
+            sum_log_rate / static_cast<F>(log_rates.size());
+        const F tail_log_rate = tail_sum / static_cast<F>(tail_count);
+        return static_cast<double>(std::expm1(
+            (mean_log_rate + tail_log_rate) / F(2)
+        ));
     }
 };
 
@@ -1027,7 +1046,7 @@ struct EventLoopResult {
     T tvl_start{0};
     T donation_apy{0};
     double apy_net_gm{-1.0};
-    double apy_net_consistency_90d{-1.0};
+    double apy_net_robust_90d{-1.0};
 
     // YieldBasis metric family. Filled by the state-mutating active_2l or
     // reference_2l actor.

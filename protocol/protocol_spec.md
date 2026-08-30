@@ -7,9 +7,10 @@ the literal `protocol` value is `curve_fx_eval` in every frame.
 
 ## Lifecycle
 
-`serve` writes `hello`, then accepts one immutable `open_session`, one or more
-`evaluate_batch` requests, `close_session`, and `shutdown`. A process admits at
-most one session; a new evaluator process is required for another session.
+`serve` writes `hello`, then accepts one immutable `open_session`, an optional
+`register_grid`, one or more `evaluate_batch` requests, `close_session`, and
+`shutdown`. A process admits at most one session and one registered grid; a new
+evaluator process is required for another session.
 
 ### `hello`
 

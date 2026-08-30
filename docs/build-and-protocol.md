@@ -97,10 +97,10 @@ uv run --frozen --no-sync python -c \
 
 The client starts the binary, checks `hello`, sends path-based frames, and exposes typed results. The orchestrator remains the only user-facing CLI and owns scores, gates, candidate ranking, and replay normalization.
 
-## 5. Optimizer records
+## 5. Run records
 
 For each binary used by a run, retain the identity frame and
-`curve_fx_evaluator_description_v1` record in the optimizer's run record and record:
+`curve_fx_evaluator_description_v1` record in the orchestrator's run record and record:
 
 - harness and installed pool revisions;
 - compiler ID/version, CMake build type, numeric mode, target;
@@ -109,4 +109,5 @@ For each binary used by a run, retain the identity frame and
 - template, scenario, and market-feed paths; and
 - protocol name, metric projection, and economic configuration.
 
-The optimizer owns TOML/run.json/results.npz, scoring, plotting, replay, and placement.
+The workflow repository owns TOML/run.json/results.npz, scoring, plotting,
+replay, and placement.

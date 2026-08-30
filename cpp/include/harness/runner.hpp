@@ -90,7 +90,7 @@ struct PoolResult {
     T donation_apy{0};
     T donation_frequency{0};
     double apy_net_gm{-1.0};
-    double apy_net_consistency_90d{-1.0};
+    double apy_net_robust_90d{-1.0};
     bool yb_releverage_enabled{false};
     T yb_releverage_fee{T(0)};
     double yb_releverage_apy{-1.0};
@@ -345,8 +345,7 @@ PoolResult<T> run_single_pool(
         result.donation_apy = loop_result.donation_apy;
         result.donation_frequency = pool_init.donation_frequency;
         result.apy_net_gm = loop_result.apy_net_gm;
-        result.apy_net_consistency_90d =
-            loop_result.apy_net_consistency_90d;
+        result.apy_net_robust_90d = loop_result.apy_net_robust_90d;
         result.yb_releverage_enabled = loop_result.yb_releverage_enabled;
         result.yb_releverage_fee = loop_result.yb_releverage_fee;
         result.yb_releverage_apy = loop_result.yb_releverage_apy;

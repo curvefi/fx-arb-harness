@@ -105,7 +105,7 @@ static constexpr size_t MAX_MATERIALIZED_BATCH_BYTES = 64 * 1024 * 1024;
 
 static const std::vector<std::string> CANONICAL_METRIC_FIELDS = {
     "vp", "xcp_profit", "lp_xcp_profit", "apy", "apy_net", "apy_net_gm",
-    "apy_net_consistency_90d",
+    "apy_net_robust_90d",
     "avg_rel_price_diff", "max_rel_price_diff", "max_7d_rel_price_diff", "final_rel_price_diff",
     "max_7d_skew", "min_price_scale", "max_price_scale", "tw_avg_pool_fee", "min_pool_fee",
     "max_pool_fee", "tw_real_slippage_1pct", "tw_real_slippage_5pct", "tw_real_slippage_10pct",
@@ -140,7 +140,7 @@ static const std::vector<std::string> CANONICAL_METRIC_FIELDS = {
 };
 
 static const std::unordered_set<std::string> GRID_CORE_METRIC_FIELDS = {
-    "vp", "lp_xcp_profit", "apy", "apy_net", "apy_net_consistency_90d",
+    "vp", "lp_xcp_profit", "apy", "apy_net", "apy_net_robust_90d",
     "avg_rel_price_diff", "max_rel_price_diff", "max_7d_rel_price_diff",
     "final_rel_price_diff", "trades", "n_rebalances",
     "arb_guarded_loss_coin0", "elapsed_ms", "fee_capture_rate",

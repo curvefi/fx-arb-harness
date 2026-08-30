@@ -167,7 +167,7 @@ void extract_metrics_from_pool_result(
     m["apy"] = apy;
     m["apy_net"] = apy_net;
     m["apy_net_gm"] = res.apy_net_gm;
-    m["apy_net_consistency_90d"] = res.apy_net_consistency_90d;
+    m["apy_net_robust_90d"] = res.apy_net_robust_90d;
 
     m["avg_rel_price_diff"] = tw.avg_rel_price_diff;
     m["max_rel_price_diff"] = tw.max_rel_price_diff;

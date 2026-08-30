@@ -94,7 +94,8 @@ EventLoopResult<T> run_event_loop_impl(
     result.donation_apy = dcfg.apy;
 
     RollingGeoApy90d<F> apy_net_gm;
-    NetApyConsistency90d<F> apy_net_consistency_90d;
+    NetApyRobust90d<F> apy_net_robust_90d;
+    apy_net_robust_90d.reserve_duration(result.t_end - result.t_start);
     std::optional<YbLoopState<T>> yb;
     if constexpr (EnableYb) {
         yb.emplace();
@@ -107,8 +108,8 @@ EventLoopResult<T> run_event_loop_impl(
     };
     auto sample_net_apy = [&](uint64_t ts) {
         const bool legacy_due = !GridCore && apy_net_gm.should_sample(ts);
-        const bool consistency_due = apy_net_consistency_90d.should_sample(ts);
-        if (!legacy_due && !consistency_due) {
+        const bool robust_due = apy_net_robust_90d.should_sample(ts);
+        if (!legacy_due && !robust_due) {
             return;
         }
         const F donation_growth = donation_growth_since_start(ts);
@@ -121,8 +122,8 @@ EventLoopResult<T> run_event_loop_impl(
         if (legacy_due) {
             apy_net_gm.sample(ts, net_lp_profit_growth);
         }
-        if (consistency_due) {
-            apy_net_consistency_90d.sample(ts, net_lp_profit_growth);
+        if (robust_due) {
+            apy_net_robust_90d.sample(ts, net_lp_profit_growth);
         }
     };
     sample_net_apy(result.t_start);
@@ -190,9 +191,7 @@ EventLoopResult<T> run_event_loop_impl(
         }
     };
 
-    const bool fee_cacheable =
-        pool.policy.kind == pools::twocrypto_fx::PolicyKind::None
-        || pool.policy.quote_cache_safe();
+    const bool fee_cacheable = pool.uses_native_fee_model();
     bool geometry_valid = false;
     bool fee_valid = false;
     T edge_p_now{};
@@ -614,13 +613,14 @@ EventLoopResult<T> run_event_loop_impl(
     bool have_gap_check = false;
     uint64_t last_price_scale_change_ts = pool.last_timestamp;
 
+    // Skips are gated by the policy's conservative fee floor and stop before
+    // every scheduled mutation; fee-quote cacheability is not a precondition.
     const bool exact_skip_on =
         cfg.event_cursor == EventCursor::ExactSkip &&
         !EnableYb && !detailed_on && !action_logger.enabled() &&
         !enable_slippage_probes && !user_swap_on && !cfg.dustswap_random &&
         !dynamic_keeper_on && !gap_keeper_on && !policy_keeper_on &&
         !commit_clock_keeper_on &&
-        pool.policy.quote_cache_safe() &&
         pool.mid_fee == pool.out_fee &&
         events.price_blocks.ready_for(n_events);
 
@@ -664,12 +664,12 @@ EventLoopResult<T> run_event_loop_impl(
             ));
         }
         if constexpr (GridCore) {
-            if (!apy_net_consistency_90d.have_sample) {
+            if (!apy_net_robust_90d.have_sample) {
                 return result.t_start;
             }
             include_due(due_after(
-                apy_net_consistency_90d.last_sample_ts,
-                NetApyConsistency90d<F>::SAMPLE_S
+                apy_net_robust_90d.last_sample_ts,
+                NetApyRobust90d<F>::SAMPLE_S
             ));
         } else {
             if (!apy_net_gm.have_sample) {
@@ -1201,7 +1201,7 @@ EventLoopResult<T> run_event_loop_impl(
     }
 
     result.apy_net_gm = apy_net_gm.value();
-    result.apy_net_consistency_90d = apy_net_consistency_90d.value();
+    result.apy_net_robust_90d = apy_net_robust_90d.value();
     if constexpr (EnableYb) {
         // Raw YB APY is an endpoint metric. If the last event was between
         // hourly reports, mark it once without adding another GM window.

@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <vector>
 
 #include "harness/metrics.hpp"
 #include "harness/runner.hpp"
@@ -46,6 +48,53 @@ int main() {
     require(near(growth.block_share(1, 10), 0.95), "block_share(1, 10) mismatch");
     require(near(growth.block_share(3, 10), 1.00), "block_share(3, 10) mismatch");
     require(near(growth.block_share(7, 5), 1.00), "block_share(7, 5) mismatch");
+
+    using RobustApy = arb::harness::NetApyRobust90d<double>;
+    RobustApy constant_apy;
+    constexpr double constant_log_rate = 0.08;
+    for (uint64_t i = 0; i <= 110; ++i) {
+        constant_apy.sample(
+            i * day,
+            std::exp(constant_log_rate * static_cast<double>(i) / 365.0)
+        );
+    }
+    require(
+        near(constant_apy.value(), std::expm1(constant_log_rate)),
+        "constant robust APY mismatch"
+    );
+
+    RobustApy mixed_apy;
+    mixed_apy.reserve_duration(200 * day);
+    std::vector<double> net_growth{1.0};
+    for (uint64_t i = 1; i <= 200; ++i) {
+        const double daily_log_growth =
+            i >= 105 && i < 145 ? -0.001 : 0.0004;
+        net_growth.push_back(net_growth.back() * std::exp(daily_log_growth));
+    }
+    for (uint64_t i = 0; i <= 200; ++i) {
+        mixed_apy.sample(i * day, net_growth[i]);
+    }
+
+    std::vector<double> window_rates;
+    for (size_t i = 90; i < net_growth.size(); ++i) {
+        window_rates.push_back(
+            std::log(net_growth[i] / net_growth[i - 90]) * 365.0 / 90.0
+        );
+    }
+    const double mean_rate = [&] {
+        double sum = 0.0;
+        for (double rate : window_rates) sum += rate;
+        return sum / static_cast<double>(window_rates.size());
+    }();
+    std::sort(window_rates.begin(), window_rates.end());
+    const size_t tail_count = (window_rates.size() + 19) / 20;
+    double tail_rate = 0.0;
+    for (size_t i = 0; i < tail_count; ++i) tail_rate += window_rates[i];
+    tail_rate /= static_cast<double>(tail_count);
+    require(
+        near(mixed_apy.value(), std::expm1((mean_rate + tail_rate) / 2.0)),
+        "mixed robust APY mismatch"
+    );
 
     std::cout << "test_metric_semantics: PASSED\n";
     return 0;
