@@ -61,7 +61,7 @@ def mock_hello_data():
             "native_tuning": False,
             "pgo_mode": "off",
         },
-        "capabilities": ["summary", "full_trace", "grid_ordinals"],
+        "capabilities": ["summary", "full_trace", "registered_grid_ranges"],
         "metric_schema": "twocrypto-summary-v1",
         "metric_fields": ["vp", "trades"],
         "limits": {
@@ -234,7 +234,7 @@ def test_evaluate_batch_requires_metric_projection() -> None:
         )
 
 
-def test_projected_grid_batch_sends_ordinals_without_candidates(
+def test_registered_grid_batch_sends_ranges_without_candidates(
     mock_hello_data, mock_session_ready_data, tmp_path
 ) -> None:
     client = EvaluatorClient(
@@ -245,7 +245,7 @@ def test_projected_grid_batch_sends_ordinals_without_candidates(
     batch_result = {
         "protocol": "curve_fx_eval",
         "type": "batch_result",
-        "request_id": "batch-000002",
+        "request_id": "batch-000003",
         "session_id": "test_session",
         "status": "complete",
         "metric_fields": ["vp"],
@@ -259,6 +259,14 @@ def test_projected_grid_batch_sends_ordinals_without_candidates(
     mock_proc.stdout.readline.side_effect = [
         json.dumps(mock_hello_data) + "\n",
         json.dumps(mock_session_ready_data) + "\n",
+        json.dumps({
+            "protocol": "curve_fx_eval",
+            "type": "grid_ready",
+            "request_id": "grid-000002",
+            "session_id": "test_session",
+            "grid_id": "grid",
+            "candidate_count": 4,
+        }) + "\n",
         json.dumps(batch_result) + "\n",
     ]
     mock_proc.stderr = io.StringIO("")
@@ -277,17 +285,21 @@ def test_projected_grid_batch_sends_ordinals_without_candidates(
             scenario_id="scen_1",
             market_path="/shared/candles.json",
         )
+        client.register_grid("grid", grid)
         client.evaluate_batch(
             [],
             metric_fields=("vp",),
             metrics_format="array",
             trusted_candidates=True,
-            grid=grid,
-            ordinals=(3,),
+            grid_id="grid",
+            ranges=((3, 1),),
         )
 
-    request = json.loads(mock_proc.stdin.write.call_args_list[1].args[0])
-    assert request["grid"] == grid and request["ordinals"] == [3]
+    registration = json.loads(mock_proc.stdin.write.call_args_list[1].args[0])
+    request = json.loads(mock_proc.stdin.write.call_args_list[2].args[0])
+    assert registration["grid_id"] == "grid"
+    assert registration["axes"] == grid["axes"]
+    assert request["grid_id"] == "grid" and request["ranges"] == [[3, 1]]
     assert "candidates" not in request
 
 

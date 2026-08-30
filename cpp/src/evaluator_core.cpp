@@ -522,6 +522,10 @@ BatchEvaluationResult evaluate_batch_candidates(
     std::vector<std::optional<arb::pools::PoolOverride<RealT>>> parsed_overrides(n_candidates);
     std::vector<std::string> override_errors(n_candidates);
     for (size_t cand_idx = 0; cand_idx < n_candidates; ++cand_idx) {
+        if (candidates[cand_idx].typed_pool_override.has_value()) {
+            parsed_overrides[cand_idx] = candidates[cand_idx].typed_pool_override;
+            continue;
+        }
         if (candidates[cand_idx].pool_overrides.empty()) continue;
         try {
             parsed_overrides[cand_idx] =

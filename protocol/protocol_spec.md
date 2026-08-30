@@ -31,7 +31,7 @@ most one session; a new evaluator process is required for another session.
     "native_tuning": false,
     "pgo_mode": "off"
   },
-  "capabilities": ["summary", "full_trace", "atomic_sidecars", "grid_ordinals"],
+  "capabilities": ["summary", "full_trace", "atomic_sidecars", "registered_grid_ranges"],
   "yb_modes": ["off", "active_2l", "reference_2l"],
   "metric_schema": "twocrypto-summary-v1",
   "metric_fields": ["vp", "apy", "trades", "yb_enabled", "yb_apy"],
@@ -123,8 +123,29 @@ Candidates carry a unique `ordinal`, a unique `candidate_id`, finite binary64
 }
 ```
 
-Exhaustive clients may instead send the `grid_ordinals` form; it cannot be
-mixed with `candidates`:
+Exhaustive clients register one immutable grid after opening the session:
+
+```json
+{
+  "protocol": "curve_fx_eval", "type": "register_grid",
+  "request_id": "grid-1", "session_id": "session-1", "grid_id": "grid",
+  "candidate_defaults": {"policy_params": [], "pool": {}},
+  "axes": {
+    "flat_fee": [
+      {"pool.mid_fee": 0.005, "pool.out_fee": 0.005},
+      {"pool.mid_fee": 0.01, "pool.out_fee": 0.01}
+    ],
+    "pool.A": [30000, 60000]
+  },
+  "axis_order": ["flat_fee", "pool.A"],
+  "shape": [2, 2]
+}
+```
+
+The evaluator validates dotted paths and compiles every default and axis value
+through the ordinary typed pool-override parser. Every update targets a leaf
+below `policy_params` or `pool`; replacing either whole object is invalid.
+Subsequent batches carry only ordered, disjoint `[start, count]` ranges:
 
 ```json
 {
@@ -133,19 +154,7 @@ mixed with `candidates`:
   "metric_projection": "summary", "metrics_format": "array",
   "metric_fields": ["apy_net", "max_7d_rel_price_diff"],
   "observation": {"kind": "summary"},
-  "grid": {
-    "candidate_defaults": {"policy_params": [], "pool": {}},
-    "axes": {
-      "flat_fee": [
-        {"pool.mid_fee": 0.005, "pool.out_fee": 0.005},
-        {"pool.mid_fee": 0.01, "pool.out_fee": 0.01}
-      ],
-      "pool.A": [30000, 60000]
-    },
-    "axis_order": ["flat_fee", "pool.A"],
-    "shape": [2, 2]
-  },
-  "ordinals": [0, 3]
+  "grid_id": "grid", "ranges": [[0, 1], [3, 1]]
 }
 ```
 
@@ -154,12 +163,10 @@ corresponding non-empty value arrays. Mixed-radix decoding uses C order (the
 last axis varies fastest). A scalar axis value updates its dotted axis name; an
 object value applies each of its dotted keys, allowing linked axes such as a
 flat fee. Empty `axes`, `axis_order`, and `shape` together describe the one
-defaults-only candidate. Ordinals are unique global grid positions and produce
+defaults-only candidate. Ranges expand to unique global grid positions and produce
 IDs `p00000000`, `p00000001`, and so on. Results preserve request order using
-those global ordinals; internal batch-local ordinals are not exposed. The
-input-frame, candidate-count, metric-cell, and
-conservative materialized-byte limits in `hello` are all enforced before the
-simulation.
+those global ordinals. The input-frame, candidate-count, and metric-cell limits
+in `hello` are enforced before the simulation.
 
 `observation.kind` is `summary` or `full_trace`. `trace_interval` is a positive
 integer and `trace_actions` controls the optional action sidecar. Observation

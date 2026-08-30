@@ -482,6 +482,15 @@ struct PoolOverride {
         if (cost_fields & VolumeCapMult) target_costs.volume_cap_mult = costs.volume_cap_mult;
         if (cost_fields & VolumeCapIsCoin1) target_costs.volume_cap_is_coin1 = costs.volume_cap_is_coin1;
     }
+
+    void overlay(const PoolOverride& patch) {
+        patch.apply(pool, costs);
+        pool_fields |= patch.pool_fields;
+        cost_fields |= patch.cost_fields;
+        if (patch.yb_releverage_fee.has_value()) {
+            yb_releverage_fee = patch.yb_releverage_fee;
+        }
+    }
 };
 
 template <typename T>

@@ -33,6 +33,7 @@
 
 #include "core/common.hpp"
 #include "core/json_utils.hpp"
+#include "curve_fx_evaluator/compiled_grid.hpp"
 #include "curve_fx_evaluator/compiled_policy_identity.hpp"
 #include "curve_fx_evaluator/evaluator.hpp"
 #include "curve_fx_evaluator/parameter_schema.hpp"
@@ -201,268 +202,6 @@ std::optional<std::string> unknown_field(
     std::initializer_list<std::string_view> allowed
 );
 
-bool parse_grid_index(std::string_view value, size_t& result) {
-    if (value.empty() || !std::all_of(value.begin(), value.end(), [](char c) {
-            return c >= '0' && c <= '9';
-        })) {
-        return false;
-    }
-    try {
-        const auto parsed = std::stoull(std::string(value));
-        if (parsed > std::numeric_limits<size_t>::max()) return false;
-        result = static_cast<size_t>(parsed);
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-bool apply_grid_update(
-    json::object& payload,
-    std::string_view path,
-    const json::value& value,
-    std::string& error
-) {
-    std::vector<std::string> parts;
-    size_t begin = 0;
-    while (begin <= path.size()) {
-        const size_t end = path.find('.', begin);
-        const size_t stop = end == std::string_view::npos ? path.size() : end;
-        if (stop == begin) {
-            error = "grid axis contains an invalid dotted path";
-            return false;
-        }
-        parts.emplace_back(path.substr(begin, stop - begin));
-        if (end == std::string_view::npos) break;
-        begin = end + 1;
-    }
-
-    json::value root(payload);
-    json::value* cursor = &root;
-    for (size_t index = 0; index + 1 < parts.size(); ++index) {
-        const auto& part = parts[index];
-        size_t next_index = 0;
-        const bool next_is_index = parse_grid_index(parts[index + 1], next_index);
-        if (cursor->is_object()) {
-            auto& object = cursor->as_object();
-            auto* child = object.if_contains(part);
-            if (child == nullptr) {
-                object[part] = next_is_index
-                    ? json::value(json::array{})
-                    : json::value(json::object{});
-                child = object.if_contains(part);
-            }
-            cursor = child;
-        } else if (cursor->is_array()) {
-            size_t position = 0;
-            if (!parse_grid_index(part, position) ||
-                position >= cursor->as_array().size()) {
-                error = "grid axis list index is out of range: " + part;
-                return false;
-            }
-            cursor = &cursor->as_array()[position];
-        } else {
-            error = "grid axis collides with a scalar at: " + part;
-            return false;
-        }
-    }
-
-    const auto& leaf = parts.back();
-    if (cursor->is_object()) {
-        cursor->as_object()[leaf] = value;
-    } else if (cursor->is_array()) {
-        size_t position = 0;
-        if (!parse_grid_index(leaf, position) ||
-            position >= cursor->as_array().size()) {
-            error = "grid axis list index is out of range: " + leaf;
-            return false;
-        }
-        cursor->as_array()[position] = value;
-    } else {
-        error = "grid axis collides with a scalar at: " + leaf;
-        return false;
-    }
-    payload = std::move(root.as_object());
-    return true;
-}
-
-std::string grid_candidate_id(uint64_t ordinal) {
-    std::ostringstream stream;
-    stream << 'p' << std::setw(8) << std::setfill('0') << ordinal;
-    return stream.str();
-}
-
-bool materialize_grid_candidates(
-    const json::object& grid,
-    const json::array& ordinals,
-    json::array& candidates,
-    std::string& error
-) {
-    if (const auto field = unknown_field(grid, {
-            "candidate_defaults", "axes", "axis_order", "shape"
-        })) {
-        error = "grid contains unknown field: " + *field;
-        return false;
-    }
-    const auto* defaults_value = grid.if_contains("candidate_defaults");
-    const auto* axes_value = grid.if_contains("axes");
-    const auto* order_value = grid.if_contains("axis_order");
-    const auto* shape_value = grid.if_contains("shape");
-    if (defaults_value == nullptr || !defaults_value->is_object() ||
-        axes_value == nullptr || !axes_value->is_object() ||
-        order_value == nullptr || !order_value->is_array() ||
-        shape_value == nullptr || !shape_value->is_array()) {
-        error = "grid requires candidate_defaults, axes, axis_order, and shape";
-        return false;
-    }
-    const auto& defaults = defaults_value->as_object();
-    const auto& axes = axes_value->as_object();
-    const auto& order = order_value->as_array();
-    const auto& shape_json = shape_value->as_array();
-    if (order.size() != axes.size() || shape_json.size() != order.size()) {
-        error = "grid axis_order, axes, and shape must describe the same axes";
-        return false;
-    }
-
-    std::vector<std::string> names;
-    std::vector<size_t> shape;
-    names.reserve(order.size());
-    shape.reserve(order.size());
-    std::unordered_set<std::string> seen_names;
-    uint64_t total = 1;
-    for (size_t index = 0; index < order.size(); ++index) {
-        if (!order[index].is_string()) {
-            error = "grid axis_order entries must be strings";
-            return false;
-        }
-        const std::string name(order[index].as_string().c_str());
-        if (!seen_names.insert(name).second) {
-            error = "grid axis_order entries must be unique";
-            return false;
-        }
-        const auto* values = axes.if_contains(name);
-        if (values == nullptr || !values->is_array() || values->as_array().empty()) {
-            error = "grid axis must contain a non-empty value array: " + name;
-            return false;
-        }
-        uint64_t declared = 0;
-        const auto& shape_item = shape_json[index];
-        if (shape_item.is_uint64()) {
-            declared = shape_item.as_uint64();
-        } else if (shape_item.is_int64() && shape_item.as_int64() > 0) {
-            declared = static_cast<uint64_t>(shape_item.as_int64());
-        }
-        if (declared == 0 || declared != values->as_array().size() ||
-            total > std::numeric_limits<uint64_t>::max() / declared) {
-            error = "grid shape does not match its axis values";
-            return false;
-        }
-        total *= declared;
-        names.push_back(name);
-        shape.push_back(static_cast<size_t>(declared));
-    }
-
-    if (ordinals.size() > MAX_CANDIDATES_PER_BATCH) {
-        error = "grid ordinal batch exceeds the candidate limit";
-        return false;
-    }
-    size_t expansion_basis = json::serialize(defaults).size();
-    for (const auto& name : names) {
-        size_t largest_value = 0;
-        for (const auto& value : axes.at(name).as_array()) {
-            largest_value = std::max(
-                largest_value, json::serialize(value).size()
-            );
-        }
-        const size_t contribution = name.size() + largest_value + 64;
-        if (contribution > MAX_MATERIALIZED_BATCH_BYTES ||
-            expansion_basis > MAX_MATERIALIZED_BATCH_BYTES - contribution) {
-            error = "grid candidate expansion exceeds the materialized-byte limit";
-            return false;
-        }
-        expansion_basis += contribution;
-    }
-    const size_t candidate_upper_bound = expansion_basis >
-            (MAX_MATERIALIZED_BATCH_BYTES - 1024) / 4
-        ? MAX_MATERIALIZED_BATCH_BYTES + 1
-        : 1024 + 4 * expansion_basis;
-    if (!ordinals.empty() && (
-            candidate_upper_bound > MAX_MATERIALIZED_BATCH_BYTES ||
-            ordinals.size() >
-                MAX_MATERIALIZED_BATCH_BYTES / candidate_upper_bound)) {
-        error = "grid batch exceeds the materialized-byte limit";
-        return false;
-    }
-
-    std::unordered_set<uint64_t> seen_ordinals;
-    candidates.reserve(ordinals.size());
-    for (size_t local = 0; local < ordinals.size(); ++local) {
-        const auto& item = ordinals[local];
-        uint64_t ordinal = 0;
-        if (item.is_uint64()) {
-            ordinal = item.as_uint64();
-        } else if (item.is_int64() && item.as_int64() >= 0) {
-            ordinal = static_cast<uint64_t>(item.as_int64());
-        } else {
-            error = "grid ordinals must be non-negative integers";
-            return false;
-        }
-        if (ordinal >= total || !seen_ordinals.insert(ordinal).second) {
-            error = "grid ordinals must be unique and in range";
-            return false;
-        }
-
-        std::vector<size_t> coordinates(shape.size());
-        uint64_t remainder = ordinal;
-        for (size_t reverse = shape.size(); reverse-- > 0;) {
-            coordinates[reverse] = static_cast<size_t>(remainder % shape[reverse]);
-            remainder /= shape[reverse];
-        }
-        json::object payload = defaults;
-        for (size_t axis = 0; axis < names.size(); ++axis) {
-            const auto& axis_value =
-                axes.at(names[axis]).as_array()[coordinates[axis]];
-            if (axis_value.is_object()) {
-                for (const auto& update : axis_value.as_object()) {
-                    if (!apply_grid_update(
-                            payload, update.key(), update.value(), error)) {
-                        return false;
-                    }
-                }
-            } else if (!apply_grid_update(
-                    payload, names[axis], axis_value, error)) {
-                return false;
-            }
-        }
-        for (const auto& field : payload) {
-            if (field.key() != "policy_params" && field.key() != "pool") {
-                error = "grid candidate contains unknown field: " +
-                    std::string(field.key());
-                return false;
-            }
-        }
-        const auto* policy = payload.if_contains("policy_params");
-        const auto* pool = payload.if_contains("pool");
-        if ((policy != nullptr && !policy->is_array()) ||
-            (pool != nullptr && !pool->is_object())) {
-            error = "grid candidate policy_params and pool have invalid types";
-            return false;
-        }
-
-        json::object candidate;
-        candidate["ordinal"] = static_cast<uint32_t>(local);
-        candidate["candidate_id"] = grid_candidate_id(ordinal);
-        candidate["policy_params"] = policy == nullptr
-            ? json::value(json::array{})
-            : *policy;
-        candidate["pool_overrides"] = pool == nullptr
-            ? json::value(json::object{})
-            : *pool;
-        candidates.push_back(std::move(candidate));
-    }
-    return true;
-}
-
 json::object make_evaluator_identity() {
     json::object id;
     id["harness_version"] = curve_fx::identity::HARNESS_VERSION;
@@ -584,7 +323,7 @@ json::object make_hello_frame() {
     caps.push_back("summary");
     caps.push_back("full_trace");
     caps.push_back("atomic_sidecars");
-    caps.push_back("grid_ordinals");
+    caps.push_back("registered_grid_ranges");
     hello["capabilities"] = caps;
 
     json::array yb_modes;
@@ -688,6 +427,8 @@ struct ActiveSession {
     std::string session_id;
     std::shared_ptr<curve_fx::evaluator::ScenarioStore<RealT>> store;
     curve_fx::evaluator::SessionConfig<RealT> config;
+    std::string grid_id;
+    std::optional<curve_fx::evaluator::CompiledGrid<RealT>> grid;
 };
 
 class EvaluatorServer {
@@ -746,6 +487,8 @@ public:
 
             if (type == "open_session") {
                 handle_open_session(req, req_id);
+            } else if (type == "register_grid") {
+                handle_register_grid(req, req_id);
             } else if (type == "evaluate_batch") {
                 handle_evaluate_batch(req, req_id);
             } else if (type == "close_session") {
@@ -1001,11 +744,82 @@ private:
         }
     }
 
+    void handle_register_grid(const json::object& req, const std::string& req_id) {
+        if (const auto field = unknown_field(req, {
+                "protocol", "type", "request_id", "session_id", "grid_id",
+                "candidate_defaults", "axes", "axis_order", "shape"
+            })) {
+            write_frame(std::cout, make_error_frame(
+                req_id, "protocol", "UNKNOWN_FIELD",
+                "register_grid contains unknown field: " + *field));
+            return;
+        }
+        if (!session_.has_value()) {
+            write_frame(std::cout, make_error_frame(
+                req_id, "session", "NO_ACTIVE_SESSION",
+                "No session is open. Call open_session first."));
+            return;
+        }
+        const std::string session_id = arb::get_string_opt(req, "session_id", "");
+        if (session_id != session_->session_id) {
+            write_frame(std::cout, make_error_frame(
+                req_id, "session", "SESSION_MISMATCH",
+                "register_grid session_id does not match the active session"));
+            return;
+        }
+        if (session_->grid.has_value()) {
+            write_frame(std::cout, make_error_frame(
+                req_id, "session", "GRID_ALREADY_REGISTERED",
+                "one grid may be registered per evaluator session"));
+            return;
+        }
+        const std::string grid_id = arb::get_string_opt(req, "grid_id", "");
+        if (!is_safe_identifier(grid_id)) {
+            write_frame(std::cout, make_error_frame(
+                req_id, "candidate", "INVALID_GRID_ID",
+                "grid_id must be a safe non-empty identifier"));
+            return;
+        }
+        json::object grid;
+        for (const char* field : {
+                "candidate_defaults", "axes", "axis_order", "shape"
+            }) {
+            const auto* value = req.if_contains(field);
+            if (value == nullptr) {
+                write_frame(std::cout, make_error_frame(
+                    req_id, "candidate", "INVALID_GRID",
+                    std::string("register_grid requires ") + field));
+                return;
+            }
+            grid[field] = *value;
+        }
+        std::string error;
+        auto compiled = curve_fx::evaluator::CompiledGrid<RealT>::compile(
+            grid, SELECTED_POLICY_PARAM_COUNT, error);
+        if (!compiled.has_value()) {
+            write_frame(std::cout, make_error_frame(
+                req_id, "candidate", "INVALID_GRID", error));
+            return;
+        }
+        const uint64_t candidate_count = compiled->size();
+        session_->grid_id = grid_id;
+        session_->grid = std::move(*compiled);
+
+        json::object response;
+        response["protocol"] = "curve_fx_eval";
+        response["type"] = "grid_ready";
+        response["request_id"] = req_id;
+        response["session_id"] = session_id;
+        response["grid_id"] = grid_id;
+        response["candidate_count"] = candidate_count;
+        write_frame(std::cout, response);
+    }
+
     void handle_evaluate_batch(const json::object& req, const std::string& req_id) {
         if (const auto field = unknown_field(req, {
                 "protocol", "type", "request_id", "session_id",
                 "metric_projection", "metric_fields", "metrics_format",
-                "observation", "candidates", "grid", "ordinals"
+                "observation", "candidates", "grid_id", "ranges"
             })) {
             write_frame(std::cout, make_error_frame(
                 req_id, "protocol", "UNKNOWN_FIELD",
@@ -1111,17 +925,18 @@ private:
             }
         }
         const bool has_candidates = req.if_contains("candidates") != nullptr;
-        const bool has_grid = req.if_contains("grid") != nullptr;
-        const bool has_ordinals = req.if_contains("ordinals") != nullptr;
-        if (has_candidates == (has_grid || has_ordinals) || has_grid != has_ordinals) {
+        const bool has_grid_id = req.if_contains("grid_id") != nullptr;
+        const bool has_ranges = req.if_contains("ranges") != nullptr;
+        if (has_candidates == (has_grid_id || has_ranges) ||
+            has_grid_id != has_ranges) {
             write_frame(std::cout, make_error_frame(
                 req_id, "candidate", "INVALID_ARGUMENT",
-                "provide either candidates or grid with ordinals"));
+                "provide either candidates or a registered grid_id with ranges"));
             return;
         }
 
-        json::array materialized_candidates;
         const json::array* candidate_array = nullptr;
+        std::vector<curve_fx::evaluator::EvaluationCandidate<RealT>> grid_candidates;
         if (has_candidates) {
             if (!req.at("candidates").is_array()) {
                 write_frame(std::cout, make_error_frame(
@@ -1138,34 +953,40 @@ private:
             }
             candidate_array = &req.at("candidates").as_array();
         } else {
-            if (!req.at("grid").is_object() || !req.at("ordinals").is_array()) {
+            if (!req.at("grid_id").is_string() || !req.at("ranges").is_array()) {
                 write_frame(std::cout, make_error_frame(
                     req_id, "candidate", "INVALID_ARGUMENT",
-                    "grid must be an object and ordinals must be an array"));
+                    "grid_id must be a string and ranges must be an array"));
                 return;
             }
-            std::string grid_error;
-            if (!materialize_grid_candidates(
-                    req.at("grid").as_object(),
-                    req.at("ordinals").as_array(),
-                    materialized_candidates,
-                    grid_error)) {
+            const std::string grid_id(req.at("grid_id").as_string().c_str());
+            if (!session_->grid.has_value() || grid_id != session_->grid_id) {
                 write_frame(std::cout, make_error_frame(
-                    req_id, "candidate", "INVALID_GRID", grid_error));
+                    req_id, "session", "GRID_MISMATCH",
+                    "grid_id does not match the registered grid"));
                 return;
             }
-            candidate_array = &materialized_candidates;
+            std::string error;
+            if (!session_->grid->materialize_ranges(
+                    req.at("ranges").as_array(), MAX_CANDIDATES_PER_BATCH,
+                    grid_candidates, error)) {
+                write_frame(std::cout, make_error_frame(
+                    req_id, "candidate", "INVALID_GRID_RANGES", error));
+                return;
+            }
         }
 
-        const auto& cand_arr = *candidate_array;
-        if (cand_arr.empty()) {
+        const size_t candidate_count = has_candidates
+            ? candidate_array->size()
+            : grid_candidates.size();
+        if (candidate_count == 0) {
             write_frame(std::cout, make_error_frame(
                 req_id, "candidate", "EMPTY_BATCH",
                 "candidate batch cannot be empty"));
             return;
         }
         if (metric_fields.size() >
-            MAX_METRIC_VALUES_PER_BATCH / cand_arr.size()) {
+            MAX_METRIC_VALUES_PER_BATCH / candidate_count) {
             write_frame(std::cout, make_error_frame(
                 req_id, "candidate", "BATCH_TOO_LARGE",
                 "candidate count times metric count exceeds the result limit"));
@@ -1254,113 +1075,114 @@ private:
 
         auto t0 = std::chrono::high_resolution_clock::now();
 
-        // Convert candidate specs
-        std::vector<curve_fx::evaluator::EvaluationCandidate<RealT>> candidates;
-        candidates.reserve(cand_arr.size());
-        std::unordered_set<std::string> candidate_ids;
-        std::unordered_set<uint32_t> candidate_ordinals;
+        std::vector<curve_fx::evaluator::EvaluationCandidate<RealT>> candidates =
+            std::move(grid_candidates);
+        if (has_candidates) {
+            const auto& cand_arr = *candidate_array;
+            candidates.reserve(cand_arr.size());
+            std::unordered_set<std::string> candidate_ids;
+            std::unordered_set<uint32_t> candidate_ordinals;
 
-        for (size_t i = 0; i < cand_arr.size(); ++i) {
-            if (!cand_arr[i].is_object()) {
-                write_frame(std::cout, make_error_frame(req_id, "candidate", "INVALID_CANDIDATE", "Candidate entry must be an object"));
-                return;
-            }
-            const auto& c_obj = cand_arr[i].as_object();
-            if (const auto field = unknown_field(c_obj, {
-                    "ordinal", "candidate_id", "policy_params", "pool_overrides"
-                })) {
-                write_frame(std::cout, make_error_frame(
-                    req_id, "candidate", "UNKNOWN_FIELD",
-                    "candidate contains unknown field: " + *field));
-                return;
-            }
-            curve_fx::evaluator::EvaluationCandidate<RealT> cand{};
-            uint32_t ordinal = 0;
-            if (!c_obj.if_contains("ordinal") ||
-                !arb::parse_bounded_uint_field(
-                    c_obj, "ordinal", uint32_t{0}, ordinal)) {
-                write_frame(std::cout, make_error_frame(
-                    req_id, "candidate", "INVALID_ARGUMENT",
-                    "candidate ordinal must be an unsigned 32-bit integer"));
-                return;
-            }
-            cand.ordinal = ordinal;
-            cand.candidate_id = arb::get_string_opt(c_obj, "candidate_id", "");
-
-            if (!is_safe_identifier(cand.candidate_id)) {
-                write_frame(std::cout, make_error_frame(req_id, "candidate", "INVALID_CANDIDATE_ID",
-                    "candidate_id contains unsafe path characters: " + cand.candidate_id));
-                return;
-            }
-            if (!candidate_ids.insert(cand.candidate_id).second ||
-                !candidate_ordinals.insert(cand.ordinal).second) {
-                write_frame(std::cout, make_error_frame(
-                    req_id,
-                    "candidate",
-                    "DUPLICATE_CANDIDATE",
-                    "candidate_id and ordinal must both be unique within a batch"
-                ));
-                return;
-            }
-
-            if (c_obj.if_contains("policy_params")) {
-                if (!c_obj.at("policy_params").is_array()) {
-                    write_frame(std::cout, make_error_frame(req_id, "candidate", "INVALID_POLICY_PARAMS",
-                        "policy_params must be an array"));
+            for (size_t i = 0; i < cand_arr.size(); ++i) {
+                if (!cand_arr[i].is_object()) {
+                    write_frame(std::cout, make_error_frame(req_id, "candidate", "INVALID_CANDIDATE", "Candidate entry must be an object"));
                     return;
                 }
-                for (const auto& p_val : c_obj.at("policy_params").as_array()) {
-                    if (!p_val.is_double() && !p_val.is_int64() &&
-                        !p_val.is_uint64()) {
+                const auto& c_obj = cand_arr[i].as_object();
+                if (const auto field = unknown_field(c_obj, {
+                        "ordinal", "candidate_id", "policy_params", "pool_overrides"
+                    })) {
+                    write_frame(std::cout, make_error_frame(
+                        req_id, "candidate", "UNKNOWN_FIELD",
+                        "candidate contains unknown field: " + *field));
+                    return;
+                }
+                curve_fx::evaluator::EvaluationCandidate<RealT> cand{};
+                uint32_t ordinal = 0;
+                if (!c_obj.if_contains("ordinal") ||
+                    !arb::parse_bounded_uint_field(
+                        c_obj, "ordinal", uint32_t{0}, ordinal)) {
+                    write_frame(std::cout, make_error_frame(
+                        req_id, "candidate", "INVALID_ARGUMENT",
+                        "candidate ordinal must be an unsigned 32-bit integer"));
+                    return;
+                }
+                cand.ordinal = ordinal;
+                cand.candidate_id = arb::get_string_opt(c_obj, "candidate_id", "");
+
+                if (!is_safe_identifier(cand.candidate_id)) {
+                    write_frame(std::cout, make_error_frame(req_id, "candidate", "INVALID_CANDIDATE_ID",
+                        "candidate_id contains unsafe path characters: " + cand.candidate_id));
+                    return;
+                }
+                if (!candidate_ids.insert(cand.candidate_id).second ||
+                    !candidate_ordinals.insert(cand.ordinal).second) {
+                    write_frame(std::cout, make_error_frame(
+                        req_id,
+                        "candidate",
+                        "DUPLICATE_CANDIDATE",
+                        "candidate_id and ordinal must both be unique within a batch"
+                    ));
+                    return;
+                }
+
+                if (c_obj.if_contains("policy_params")) {
+                    if (!c_obj.at("policy_params").is_array()) {
                         write_frame(std::cout, make_error_frame(req_id, "candidate", "INVALID_POLICY_PARAMS",
-                            "every policy parameter must be numeric"));
+                            "policy_params must be an array"));
                         return;
                     }
-                    const double parsed = arb::parse_input_double(p_val);
-                    cand.policy_params.push_back(static_cast<RealT>(parsed));
+                    for (const auto& p_val : c_obj.at("policy_params").as_array()) {
+                        if (!p_val.is_double() && !p_val.is_int64() &&
+                            !p_val.is_uint64()) {
+                            write_frame(std::cout, make_error_frame(req_id, "candidate", "INVALID_POLICY_PARAMS",
+                                "every policy parameter must be numeric"));
+                            return;
+                        }
+                        const double parsed = arb::parse_input_double(p_val);
+                        cand.policy_params.push_back(static_cast<RealT>(parsed));
+                    }
                 }
-            }
 
-            if (cand.policy_params.size() != SELECTED_POLICY_PARAM_COUNT) {
-                write_frame(std::cout, make_error_frame(
-                    req_id,
-                    "candidate",
-                    "POLICY_PARAM_COUNT_MISMATCH",
-                    "expected " + std::to_string(SELECTED_POLICY_PARAM_COUNT) +
-                        " policy parameters, got " +
-                        std::to_string(cand.policy_params.size())
-                ));
-                return;
-            }
-
-            if (c_obj.if_contains("pool_overrides")) {
-                if (!c_obj.at("pool_overrides").is_object()) {
-                    write_frame(std::cout, make_error_frame(req_id, "candidate", "INVALID_POOL_OVERRIDES",
-                        "pool_overrides must be an object"));
-                    return;
-                }
-                cand.pool_overrides = c_obj.at("pool_overrides").as_object();
-                const auto* nested_pool = cand.pool_overrides.if_contains("pool");
-                if (cand.pool_overrides.if_contains("policy") ||
-                    (nested_pool != nullptr && nested_pool->is_object() &&
-                     nested_pool->as_object().if_contains("policy"))) {
+                if (cand.policy_params.size() != SELECTED_POLICY_PARAM_COUNT) {
                     write_frame(std::cout, make_error_frame(
-                        req_id, "candidate", "INVALID_POOL_OVERRIDES",
-                        "candidate pool_overrides.pool.policy is prohibited; use policy_params"));
+                        req_id,
+                        "candidate",
+                        "POLICY_PARAM_COUNT_MISMATCH",
+                        "expected " + std::to_string(SELECTED_POLICY_PARAM_COUNT) +
+                            " policy parameters, got " +
+                            std::to_string(cand.policy_params.size())
+                    ));
                     return;
                 }
-                try {
-                    (void)normalize_pool_override_identity(cand.pool_overrides);
-                } catch (const std::exception& error) {
-                    write_frame(std::cout, make_error_frame(
-                        req_id, "candidate", "INVALID_POOL_OVERRIDES",
-                        error.what()));
-                    return;
+
+                if (c_obj.if_contains("pool_overrides")) {
+                    if (!c_obj.at("pool_overrides").is_object()) {
+                        write_frame(std::cout, make_error_frame(req_id, "candidate", "INVALID_POOL_OVERRIDES",
+                            "pool_overrides must be an object"));
+                        return;
+                    }
+                    cand.pool_overrides = c_obj.at("pool_overrides").as_object();
+                    const auto* nested_pool = cand.pool_overrides.if_contains("pool");
+                    if (cand.pool_overrides.if_contains("policy") ||
+                        (nested_pool != nullptr && nested_pool->is_object() &&
+                         nested_pool->as_object().if_contains("policy"))) {
+                        write_frame(std::cout, make_error_frame(
+                            req_id, "candidate", "INVALID_POOL_OVERRIDES",
+                            "candidate pool_overrides.pool.policy is prohibited; use policy_params"));
+                        return;
+                    }
+                    try {
+                        (void)normalize_pool_override_identity(cand.pool_overrides);
+                    } catch (const std::exception& error) {
+                        write_frame(std::cout, make_error_frame(
+                            req_id, "candidate", "INVALID_POOL_OVERRIDES",
+                            error.what()));
+                        return;
+                    }
                 }
+                candidates.push_back(std::move(cand));
             }
-
-
-            candidates.push_back(std::move(cand));
         }
 
         std::sort(
@@ -1399,13 +1221,7 @@ private:
         json::array results_arr;
         for (size_t c_idx = 0; c_idx < batch_result.candidate_results.size(); ++c_idx) {
             const auto& res = batch_result.candidate_results[c_idx];
-            uint64_t response_ordinal = res.ordinal;
-            if (has_grid) {
-                const auto& ordinal = req.at("ordinals").as_array()[c_idx];
-                response_ordinal = ordinal.is_uint64()
-                    ? ordinal.as_uint64()
-                    : static_cast<uint64_t>(ordinal.as_int64());
-            }
+            const uint64_t response_ordinal = res.ordinal;
             json::object r;
             r["ordinal"] = response_ordinal;
             r["candidate_id"] = res.candidate_id;

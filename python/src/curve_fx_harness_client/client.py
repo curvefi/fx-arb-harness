@@ -23,6 +23,7 @@ from .models import (
     CloseSessionFrame,
     ErrorFrame,
     EvaluateBatchFrame,
+    GridReadyFrame,
     HelloFrame,
     MetricProjection,
     ObservationKind,
@@ -341,6 +342,34 @@ class EvaluatorClient:
             logger.info("Session '%s' ready with %d scenarios", session_id, len(session_ready.scenarios))
             return session_ready
 
+    def register_grid(
+        self,
+        grid_id: str,
+        grid: Dict[str, Any],
+        *,
+        session_id: Optional[str] = None,
+    ) -> GridReadyFrame:
+        """Compile one immutable Cartesian grid inside the active evaluator."""
+        with self._lock:
+            eff_session_id = session_id or self._current_session_id
+            if not eff_session_id:
+                raise SessionError("No active session. Call open_session() first.")
+            expected = {"candidate_defaults", "axes", "axis_order", "shape"}
+            if not isinstance(grid, dict) or set(grid) != expected:
+                raise ValueError(
+                    "grid must contain candidate_defaults, axes, axis_order, and shape"
+                )
+            req_id = self._next_request_id("grid")
+            response = self._transact({
+                "protocol": "curve_fx_eval",
+                "type": "register_grid",
+                "request_id": req_id,
+                "session_id": eff_session_id,
+                "grid_id": grid_id,
+                **grid,
+            })
+            return GridReadyFrame.model_validate(response)
+
     def evaluate_batch(
         self,
         candidates: List[Union[CandidateSpec, Dict[str, Any]]],
@@ -350,8 +379,8 @@ class EvaluatorClient:
         metrics_format: str = "object",
         session_id: Optional[str] = None,
         trusted_candidates: bool = False,
-        grid: Optional[Dict[str, Any]] = None,
-        ordinals: Optional[Sequence[int]] = None,
+        grid_id: Optional[str] = None,
+        ranges: Optional[Sequence[Sequence[int]]] = None,
     ) -> Union[BatchResultFrame, Dict[str, Any]]:
         """Evaluate a batch of candidate pool parameter vectors over the open session."""
         with self._lock:
@@ -359,23 +388,27 @@ class EvaluatorClient:
             if not eff_session_id:
                 raise SessionError("No active session. Call open_session() first.")
 
-            grid_mode = grid is not None or ordinals is not None
+            grid_mode = grid_id is not None or ranges is not None
             if grid_mode:
                 if not trusted_candidates or metrics_format != "array" or not metric_fields:
                     raise ValueError(
-                        "grid ordinals require trusted projected array metrics"
+                        "grid ranges require trusted projected array metrics"
                     )
-                if not isinstance(grid, dict) or not ordinals or candidates:
+                if not isinstance(grid_id, str) or not grid_id or not ranges or candidates:
                     raise ValueError(
-                        "grid and non-empty ordinals replace candidate objects"
+                        "registered grid_id and non-empty ranges replace candidate objects"
                     )
                 if any(
-                    isinstance(ordinal, bool)
-                    or not isinstance(ordinal, int)
-                    or ordinal < 0
-                    for ordinal in ordinals
+                    isinstance(item, (str, bytes))
+                    or not isinstance(item, Sequence)
+                    or len(item) != 2
+                    or any(isinstance(value, bool) or not isinstance(value, int)
+                           for value in item)
+                    or item[0] < 0
+                    or item[1] < 1
+                    for item in ranges
                 ):
-                    raise ValueError("grid ordinals must be non-negative integers")
+                    raise ValueError("grid ranges must contain [start, positive count]")
                 candidate_payload = None
             elif trusted_candidates:
                 if metrics_format != "array" or not metric_fields:
@@ -433,8 +466,8 @@ class EvaluatorClient:
                     "observation": obs_spec.model_dump(exclude_none=True),
                 }
                 if grid_mode:
-                    request_data["grid"] = grid
-                    request_data["ordinals"] = list(ordinals or ())
+                    request_data["grid_id"] = grid_id
+                    request_data["ranges"] = [list(item) for item in ranges or ()]
                 else:
                     request_data["candidates"] = candidate_payload
             else:

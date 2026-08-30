@@ -217,26 +217,16 @@ def test_real_persistent_batches_match_single_candidate_results(tmp_path: Path) 
             ),
         ])
 
-        projected = client.evaluate_batch(
-            [],
-            metric_fields=("vp", "trades"),
-            metrics_format="array",
-            trusted_candidates=True,
-            grid={
-                "candidate_defaults": {
-                    "policy_params": policy_params,
-                    "pool": {},
-                },
-                "axes": {},
-                "axis_order": [],
-                "shape": [],
-            },
-            ordinals=(0,),
-        )
         linked_grid = {
             "candidate_defaults": {
                 "policy_params": policy_params,
-                "pool": {},
+                "pool": {
+                    "costs": {
+                        "arb_fee_bps": 10,
+                        "use_volume_cap": True,
+                        "volume_cap_mult": 1,
+                    }
+                },
             },
             "axes": {
                 "flat_fee": [
@@ -244,60 +234,84 @@ def test_real_persistent_batches_match_single_candidate_results(tmp_path: Path) 
                     {"pool.mid_fee": 0.002, "pool.out_fee": 0.002},
                 ],
                 "pool.A": [5.0, 6.0],
+                "pool.costs.arb_fee_bps": [3.0, 21.0],
+                "pool.costs.volume_cap_mult": [0.5, 1.5],
             },
-            "axis_order": ["flat_fee", "pool.A"],
-            "shape": [2, 2],
+            "axis_order": [
+                "flat_fee",
+                "pool.A",
+                "pool.costs.arb_fee_bps",
+                "pool.costs.volume_cap_mult",
+            ],
+            "shape": [2, 2, 2, 2],
         }
+        with pytest.raises(RemoteEvaluatorError, match="INVALID_GRID"):
+            client.register_grid("invalid", {
+                "candidate_defaults": {"policy_params": policy_params},
+                "axes": {},
+                "axis_order": ["pool.A"],
+                "shape": [],
+            })
+        client.register_grid("linked", linked_grid)
+        linked_first = client.evaluate_batch([
+            CandidateSpec(
+                ordinal=10,
+                candidate_id="linked-first",
+                policy_params=policy_params,
+                pool_overrides={
+                    "mid_fee": 0.001,
+                    "out_fee": 0.001,
+                    "A": 5.0,
+                    "costs": {
+                        "arb_fee_bps": 3.0,
+                        "use_volume_cap": True,
+                        "volume_cap_mult": 0.5,
+                    },
+                },
+            )
+        ]).results[0]
         linked_equivalent = client.evaluate_batch([
             CandidateSpec(
                 ordinal=11,
                 candidate_id="linked-equivalent",
                 policy_params=policy_params,
-                pool_overrides={"mid_fee": 0.002, "out_fee": 0.002, "A": 6.0},
+                pool_overrides={
+                    "mid_fee": 0.002,
+                    "out_fee": 0.002,
+                    "A": 6.0,
+                    "costs": {
+                        "arb_fee_bps": 21.0,
+                        "use_volume_cap": True,
+                        "volume_cap_mult": 1.5,
+                    },
+                },
             )
         ]).results[0]
-        traced = [
-            client.evaluate_batch(
-                [],
-                observation=ObservationSpec(
-                    kind="full_trace",
-                    trace_interval=1,
-                    artifact_dir="grid-trace",
-                ),
-                metric_fields=("vp", "trades"),
-                metrics_format="array",
-                trusted_candidates=True,
-                grid=linked_grid,
-                ordinals=(ordinal,),
-            )["results"][0]
-            for ordinal in (0, 3)
-        ]
+        traced = client.evaluate_batch(
+            [],
+            observation=ObservationSpec(
+                kind="full_trace",
+                trace_interval=1,
+                artifact_dir="grid-trace",
+            ),
+            metric_fields=("vp", "trades"),
+            metrics_format="array",
+            trusted_candidates=True,
+            grid_id="linked",
+            ranges=((0, 1), (15, 1)),
+        )["results"]
 
         assert [result.ordinal for result in batch.results] == [3, 7]
-        assert projected["results"][0]["metrics"] == [
-            single.metrics["vp"], single.metrics["trades"]
+        assert [result["ordinal"] for result in traced] == [0, 15]
+        assert traced[0]["metrics"] == [
+            linked_first.metrics["vp"], linked_first.metrics["trades"]
         ]
-        assert [result["ordinal"] for result in traced] == [0, 3]
         assert traced[1]["metrics"] == [
             linked_equivalent.metrics["vp"], linked_equivalent.metrics["trades"]
         ]
         trace_paths = [result["artifacts"]["trace_path"] for result in traced]
         assert len(set(trace_paths)) == 2
         assert all((tmp_path / path).is_file() for path in trace_paths)
-        with pytest.raises(RemoteEvaluatorError, match="INVALID_GRID"):
-            client.evaluate_batch(
-                [],
-                metric_fields=("vp",),
-                metrics_format="array",
-                trusted_candidates=True,
-                grid={
-                    "candidate_defaults": {"policy_params": policy_params},
-                    "axes": {},
-                    "axis_order": ["pool.A"],
-                    "shape": [],
-                },
-                ordinals=(0,),
-            )
         batched = next(result for result in batch.results if result.ordinal == 7)
         assert _economic_metrics(batched) == _economic_metrics(single)
     finally:

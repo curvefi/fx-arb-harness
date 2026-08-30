@@ -55,7 +55,7 @@ class HelloFrame(ProtocolModel):
     evaluator_identity: EvaluatorIdentity
     capabilities: List[str] = Field(
         default_factory=lambda: [
-            "summary", "full_trace", "atomic_sidecars", "grid_ordinals"
+            "summary", "full_trace", "atomic_sidecars", "registered_grid_ranges"
         ]
     )
     yb_modes: List[str] = Field(default_factory=lambda: ["off", "active_2l", "reference_2l"])
@@ -114,6 +114,15 @@ class SessionReadyFrame(ProtocolModel):
     request_id: str
     session_id: str
     scenarios: List[ScenarioInfo]
+
+
+class GridReadyFrame(ProtocolModel):
+    protocol: Literal["curve_fx_eval"] = "curve_fx_eval"
+    type: Literal["grid_ready"] = "grid_ready"
+    request_id: str
+    session_id: str
+    grid_id: str
+    candidate_count: int = Field(ge=1)
 
 
 class ObservationSpec(ProtocolModel):

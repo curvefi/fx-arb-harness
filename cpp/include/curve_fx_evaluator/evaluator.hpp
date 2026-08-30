@@ -25,6 +25,7 @@
 #include "harness/runner.hpp"
 #include "oracles/chainlink.hpp"
 #include "pools/pool_config_source.hpp"
+#include "pools/pool_config_parse.hpp"
 #include "pools/pool_init.hpp"
 #include "trading/costs.hpp"
 
@@ -98,6 +99,7 @@ struct EvaluationCandidate {
     std::string candidate_id;
     std::vector<T> policy_params;
     boost::json::object pool_overrides;
+    std::optional<arb::pools::PoolOverride<T>> typed_pool_override;
 };
 
 struct ScenarioEvaluationResult {

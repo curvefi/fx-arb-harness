@@ -67,11 +67,11 @@ The production executable is line-oriented:
 
 1. Launch `arb_evaluator_ld serve --workers N`; consume the startup `hello` frame.
 2. Send `open_session` with evaluator-visible `template_path`, `scenario_id`, `market_path`, and optional `chainlink_path`. `event_cursor` is `scalar` by default; `exact_skip` is a guarded optimization that automatically falls back when exact skipping is unsupported. `metric_profile` defaults to `full_summary`; `grid_core` is the exact no-YB summary profile and admits only its fixed production field set. The evaluator rejects unknown fields and loads immutable scenario data once; wait for `session_ready`.
-3. Send `evaluate_batch` with either canonical candidate objects or one compact
-   Cartesian `grid` plus a non-empty array of global `ordinals`. The latter is
-   advertised by the `grid_ordinals` capability and lets exhaustive-grid clients
-   avoid materializing candidates in Python. Both forms require a
-   `metric_projection` and observation specification and cannot be mixed.
+3. For an exhaustive grid, send `register_grid` once and wait for `grid_ready`;
+   later `evaluate_batch` frames carry only its `grid_id` and ordered ordinal
+   ranges. This is advertised by `registered_grid_ranges`. Ordinary candidate
+   objects remain the separate adaptive-search/replay path. Both evaluation
+   forms require a `metric_projection` and observation specification.
 4. Consume `batch_result`; results are ordered by ordinal. Because each session contains one scenario, `summary` returns its raw metrics and `full` adds its scenario row. `full_trace` additionally returns `trace_path` and optional `actions_path`.
 5. Send `close_session`, then `shutdown`.
 
