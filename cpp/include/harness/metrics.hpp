@@ -322,6 +322,98 @@ struct RollingGeoApy90d : RollingGeoApyWindow<F> {
     RollingGeoApy90d() : RollingGeoApyWindow<F>(WINDOW_S, FLOOR_APY) {}
 };
 
+// Daily 90-day net-return consistency score for exhaustive discovery grids.
+// Each window contributes its annualized continuously compounded return. The
+// final APY is the one-sigma lower bound across windows, so smooth earnings
+// outrank equally profitable but regime-dependent paths. Unlike the legacy GM
+// of annualized APYs, negative windows are represented directly and need no
+// arbitrary positive floor.
+template <typename F>
+struct NetApyConsistency90d {
+    static constexpr uint64_t SAMPLE_S = 24ULL * 60ULL * 60ULL;
+    static constexpr uint64_t WINDOW_S = 90ULL * SAMPLE_S;
+    static constexpr F SEC_PER_YEAR = F(365.0 * 24.0 * 60.0 * 60.0);
+    static constexpr size_t SAMPLE_CAPACITY =
+        static_cast<size_t>(WINDOW_S / SAMPLE_S) + 2;
+
+    struct Sample {
+        uint64_t ts{0};
+        F net_vp{F(0)};
+    };
+
+    std::array<Sample, SAMPLE_CAPACITY> samples{};
+    size_t head{0};
+    size_t count{0};
+    uint64_t last_sample_ts{0};
+    bool have_sample{false};
+    F mean_log_rate{F(0)};
+    F m2_log_rate{F(0)};
+    size_t n_windows{0};
+
+    bool should_sample(uint64_t ts) const {
+        return !have_sample || ts >= last_sample_ts + SAMPLE_S;
+    }
+
+    const Sample& sample_at(size_t offset) const {
+        return samples[(head + offset) % SAMPLE_CAPACITY];
+    }
+
+    void pop_front() {
+        head = (head + 1) % SAMPLE_CAPACITY;
+        --count;
+    }
+
+    void sample(uint64_t ts, F net_vp) {
+        if (!std::isfinite(net_vp) || !(net_vp > F(0)) || !should_sample(ts)) {
+            return;
+        }
+
+        if (count == SAMPLE_CAPACITY) {
+            pop_front();
+        }
+        samples[(head + count) % SAMPLE_CAPACITY] = Sample{ts, net_vp};
+        ++count;
+        last_sample_ts = ts;
+        have_sample = true;
+
+        const uint64_t cutoff = ts > WINDOW_S ? ts - WINDOW_S : 0;
+        while (count > 1 && sample_at(1).ts <= cutoff) {
+            pop_front();
+        }
+        const Sample& baseline = sample_at(0);
+        if (ts < baseline.ts + WINDOW_S || !(baseline.net_vp > F(0))) {
+            return;
+        }
+
+        const F dt = static_cast<F>(ts - baseline.ts);
+        const F growth = net_vp / baseline.net_vp;
+        if (!(dt > F(0)) || !std::isfinite(growth) || !(growth > F(0))) {
+            return;
+        }
+        const F log_rate = std::log(growth) * SEC_PER_YEAR / dt;
+        if (!std::isfinite(log_rate)) {
+            return;
+        }
+
+        ++n_windows;
+        const F delta = log_rate - mean_log_rate;
+        mean_log_rate += delta / static_cast<F>(n_windows);
+        m2_log_rate += delta * (log_rate - mean_log_rate);
+    }
+
+    double value() const {
+        if (n_windows == 0) {
+            return -1.0;
+        }
+        const F variance = std::max(
+            F(0), m2_log_rate / static_cast<F>(n_windows)
+        );
+        return static_cast<double>(
+            std::expm1(mean_log_rate - std::sqrt(variance))
+        );
+    }
+};
+
 template <typename F>
 struct MultiScalePositiveGrowthConcentration {
     static constexpr uint64_t SAMPLE_S = 24ULL * 60ULL * 60ULL;
@@ -407,6 +499,10 @@ struct TimeWeightedMetrics {
     std::array<F, PRICE_DIFF_BUCKETS> rel_bucket_dt{};
     std::array<uint64_t, PRICE_DIFF_BUCKETS> rel_bucket_id{};
     std::array<bool, PRICE_DIFF_BUCKETS> rel_bucket_live{};
+    F rel_window_sum_dt{F(0)};
+    F rel_window_dt{F(0)};
+    uint64_t rel_oldest_bucket{0};
+    bool have_rel_oldest_bucket{false};
     uint64_t last_7d_eval_bucket{0};
     F max_7d_rel_abs{F(0)};
     bool have_7d_rel_abs{false};
@@ -606,7 +702,15 @@ struct TimeWeightedMetrics {
                     detach_short_ep_energy += ex * ex * dt / F(86400);
                 }
             }
-            sample_7d_price_error(last_ts_err, ts, static_cast<F>(last_rel_abs));
+            if constexpr (GridCore) {
+                sample_7d_price_error_incremental(
+                    last_ts_err, ts, static_cast<F>(last_rel_abs)
+                );
+            } else {
+                sample_7d_price_error(
+                    last_ts_err, ts, static_cast<F>(last_rel_abs)
+                );
+            }
         }
 
         if (static_cast<F>(cur_rel_abs) > max_rel_abs) {
@@ -668,6 +772,76 @@ struct TimeWeightedMetrics {
 
         if (window_dt > F(0)) {
             const F avg = window_sum_dt / window_dt;
+            if (!have_7d_rel_abs || avg > max_7d_rel_abs) {
+                max_7d_rel_abs = avg;
+                have_7d_rel_abs = true;
+            }
+        }
+    }
+
+    void sample_7d_price_error_incremental(
+        uint64_t start_ts,
+        uint64_t end_ts,
+        F rel_abs
+    ) {
+        while (start_ts < end_ts) {
+            const uint64_t bucket_id = start_ts / PRICE_DIFF_BUCKET_S;
+            const uint64_t bucket_end = (bucket_id + 1) * PRICE_DIFF_BUCKET_S;
+            const uint64_t segment_end = end_ts < bucket_end ? end_ts : bucket_end;
+            const size_t idx = static_cast<size_t>(bucket_id % PRICE_DIFF_BUCKETS);
+
+            if (!rel_bucket_live[idx] || rel_bucket_id[idx] != bucket_id) {
+                if (rel_bucket_live[idx]) {
+                    rel_window_sum_dt -= rel_bucket_sum_dt[idx];
+                    rel_window_dt -= rel_bucket_dt[idx];
+                }
+                rel_bucket_live[idx] = true;
+                rel_bucket_id[idx] = bucket_id;
+                rel_bucket_sum_dt[idx] = F(0);
+                rel_bucket_dt[idx] = F(0);
+            }
+            if (!have_rel_oldest_bucket) {
+                rel_oldest_bucket = bucket_id;
+                have_rel_oldest_bucket = true;
+            }
+
+            const F dt = static_cast<F>(segment_end - start_ts);
+            const F weighted = rel_abs * dt;
+            rel_bucket_sum_dt[idx] += weighted;
+            rel_bucket_dt[idx] += dt;
+            rel_window_sum_dt += weighted;
+            rel_window_dt += dt;
+            start_ts = segment_end;
+        }
+
+        const uint64_t eval_bucket = end_ts / PRICE_DIFF_BUCKET_S;
+        if (have_7d_rel_abs && eval_bucket == last_7d_eval_bucket) {
+            return;
+        }
+        last_7d_eval_bucket = eval_bucket;
+        if (end_ts < first_ts_err + PRICE_DIFF_WINDOW_S) {
+            return;
+        }
+
+        const uint64_t cutoff = end_ts - PRICE_DIFF_WINDOW_S;
+        const uint64_t keep_from = cutoff / PRICE_DIFF_BUCKET_S;
+        while (have_rel_oldest_bucket && rel_oldest_bucket < keep_from) {
+            const size_t idx = static_cast<size_t>(
+                rel_oldest_bucket % PRICE_DIFF_BUCKETS
+            );
+            if (
+                rel_bucket_live[idx] &&
+                rel_bucket_id[idx] == rel_oldest_bucket
+            ) {
+                rel_window_sum_dt -= rel_bucket_sum_dt[idx];
+                rel_window_dt -= rel_bucket_dt[idx];
+                rel_bucket_live[idx] = false;
+            }
+            ++rel_oldest_bucket;
+        }
+
+        if (rel_window_dt > F(0)) {
+            const F avg = rel_window_sum_dt / rel_window_dt;
             if (!have_7d_rel_abs || avg > max_7d_rel_abs) {
                 max_7d_rel_abs = avg;
                 have_7d_rel_abs = true;
@@ -853,6 +1027,7 @@ struct EventLoopResult {
     T tvl_start{0};
     T donation_apy{0};
     double apy_net_gm{-1.0};
+    double apy_net_consistency_90d{-1.0};
 
     // YieldBasis metric family. Filled by the state-mutating active_2l or
     // reference_2l actor.

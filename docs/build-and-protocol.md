@@ -30,6 +30,14 @@ cmake --build /path/to/curve-fx-arb-harness/build/tuned \
 
 `CURVE_FX_ENABLE_IPO` requests compiler-supported interprocedural optimization and fails configuration when unsupported. `CURVE_FX_NATIVE_TUNING` adds host-specific tuning and is not portable across blades; keep it `OFF` for shared or heterogeneous deployment. The selected values are included in evaluator identity.
 
+GCC builds also support explicit two-pass PGO. Configure and build the same
+build directory with `-DCURVE_FX_PGO=generate` and an absolute
+`-DCURVE_FX_PGO_DIR`, exercise the instrumented evaluator on a representative
+corpus using one evaluator worker, then reconfigure that directory with
+`-DCURVE_FX_PGO=use` and rebuild.
+The final identity reports `pgo_mode=use`; instrumented `generate` binaries are
+training artifacts, not production evaluators.
+
 For the checked-in CHF/USD compiled policy, pass the policy identity inputs:
 
 ```sh
@@ -59,7 +67,11 @@ The production executable is line-oriented:
 
 1. Launch `arb_evaluator_ld serve --workers N`; consume the startup `hello` frame.
 2. Send `open_session` with evaluator-visible `template_path`, `scenario_id`, `market_path`, and optional `chainlink_path`. `event_cursor` is `scalar` by default; `exact_skip` is a guarded optimization that automatically falls back when exact skipping is unsupported. `metric_profile` defaults to `full_summary`; `grid_core` is the exact no-YB summary profile and admits only its fixed production field set. The evaluator rejects unknown fields and loads immutable scenario data once; wait for `session_ready`.
-3. Send `evaluate_batch` with canonical candidate ordinals, policy parameters, pool overrides, a required `metric_projection`, and an observation specification.
+3. Send `evaluate_batch` with either canonical candidate objects or one compact
+   Cartesian `grid` plus a non-empty array of global `ordinals`. The latter is
+   advertised by the `grid_ordinals` capability and lets exhaustive-grid clients
+   avoid materializing candidates in Python. Both forms require a
+   `metric_projection` and observation specification and cannot be mixed.
 4. Consume `batch_result`; results are ordered by ordinal. Because each session contains one scenario, `summary` returns its raw metrics and `full` adds its scenario row. `full_trace` additionally returns `trace_path` and optional `actions_path`.
 5. Send `close_session`, then `shutdown`.
 

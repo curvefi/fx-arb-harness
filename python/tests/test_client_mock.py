@@ -15,7 +15,9 @@ from curve_fx_harness_client.models import CandidateSpec, EvaluateBatchFrame, He
 class LegacyLimits(BaseModel):
     model_config = ConfigDict(extra="forbid")
     max_frame_bytes: int
-    max_candidates_per_batch: int | None = None
+    max_candidates_per_batch: int
+    max_metric_values_per_batch: int
+    max_materialized_batch_bytes: int
     max_inflight_batches: int
 
 
@@ -57,12 +59,16 @@ def mock_hello_data():
             "build_target": "arb_evaluator_ld",
             "ipo_enabled": False,
             "native_tuning": False,
+            "pgo_mode": "off",
         },
-        "capabilities": ["summary", "full_trace"],
+        "capabilities": ["summary", "full_trace", "grid_ordinals"],
         "metric_schema": "twocrypto-summary-v1",
         "metric_fields": ["vp", "trades"],
         "limits": {
             "max_frame_bytes": 4194304,
+            "max_candidates_per_batch": 4096,
+            "max_metric_values_per_batch": 131072,
+            "max_materialized_batch_bytes": 67108864,
             "max_inflight_batches": 1,
         },
     }
@@ -226,6 +232,63 @@ def test_evaluate_batch_requires_metric_projection() -> None:
             session_id="session-1",
             candidates=[CandidateSpec(ordinal=0, candidate_id="candidate-0")],
         )
+
+
+def test_projected_grid_batch_sends_ordinals_without_candidates(
+    mock_hello_data, mock_session_ready_data, tmp_path
+) -> None:
+    client = EvaluatorClient(
+        executable_path="arb_evaluator_ld",
+        work_dir=tmp_path,
+        verify_local_inputs=False,
+    )
+    batch_result = {
+        "protocol": "curve_fx_eval",
+        "type": "batch_result",
+        "request_id": "batch-000002",
+        "session_id": "test_session",
+        "status": "complete",
+        "metric_fields": ["vp"],
+        "results": [{
+            "candidate_id": "p00000003",
+            "status": "ok",
+            "metrics": [1.0],
+        }],
+    }
+    mock_proc = MagicMock()
+    mock_proc.stdout.readline.side_effect = [
+        json.dumps(mock_hello_data) + "\n",
+        json.dumps(mock_session_ready_data) + "\n",
+        json.dumps(batch_result) + "\n",
+    ]
+    mock_proc.stderr = io.StringIO("")
+    mock_proc.poll.return_value = None
+    grid = {
+        "candidate_defaults": {"policy_params": [], "pool": {}},
+        "axes": {"pool.A": [1, 2, 3, 4]},
+        "axis_order": ["pool.A"],
+        "shape": [4],
+    }
+
+    with patch("subprocess.Popen", return_value=mock_proc):
+        client.open_session(
+            session_id="test_session",
+            template_path="/shared/template.json",
+            scenario_id="scen_1",
+            market_path="/shared/candles.json",
+        )
+        client.evaluate_batch(
+            [],
+            metric_fields=("vp",),
+            metrics_format="array",
+            trusted_candidates=True,
+            grid=grid,
+            ordinals=(3,),
+        )
+
+    request = json.loads(mock_proc.stdin.write.call_args_list[1].args[0])
+    assert request["grid"] == grid and request["ordinals"] == [3]
+    assert "candidates" not in request
 
 
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf, "nan", "inf"])

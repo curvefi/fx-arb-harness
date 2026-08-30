@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
@@ -97,9 +98,13 @@ static_assert(
 namespace {
 
 static constexpr size_t MAX_FRAME_BYTES = 4 * 1024 * 1024; // 4 MiB
+static constexpr size_t MAX_CANDIDATES_PER_BATCH = 4 * 1024;
+static constexpr size_t MAX_METRIC_VALUES_PER_BATCH = 128 * 1024;
+static constexpr size_t MAX_MATERIALIZED_BATCH_BYTES = 64 * 1024 * 1024;
 
 static const std::vector<std::string> CANONICAL_METRIC_FIELDS = {
     "vp", "xcp_profit", "lp_xcp_profit", "apy", "apy_net", "apy_net_gm",
+    "apy_net_consistency_90d",
     "avg_rel_price_diff", "max_rel_price_diff", "max_7d_rel_price_diff", "final_rel_price_diff",
     "max_7d_skew", "min_price_scale", "max_price_scale", "tw_avg_pool_fee", "min_pool_fee",
     "max_pool_fee", "tw_real_slippage_1pct", "tw_real_slippage_5pct", "tw_real_slippage_10pct",
@@ -134,7 +139,7 @@ static const std::vector<std::string> CANONICAL_METRIC_FIELDS = {
 };
 
 static const std::unordered_set<std::string> GRID_CORE_METRIC_FIELDS = {
-    "vp", "lp_xcp_profit", "apy", "apy_net", "apy_net_gm",
+    "vp", "lp_xcp_profit", "apy", "apy_net", "apy_net_consistency_90d",
     "avg_rel_price_diff", "max_rel_price_diff", "max_7d_rel_price_diff",
     "final_rel_price_diff", "trades", "n_rebalances",
     "arb_guarded_loss_coin0", "elapsed_ms", "fee_capture_rate",
@@ -191,6 +196,273 @@ json::object normalize_pool_override_identity(const json::object& value) {
     return normalize_pool_override_identity_value(value, "").as_object();
 }
 
+std::optional<std::string> unknown_field(
+    const json::object& object,
+    std::initializer_list<std::string_view> allowed
+);
+
+bool parse_grid_index(std::string_view value, size_t& result) {
+    if (value.empty() || !std::all_of(value.begin(), value.end(), [](char c) {
+            return c >= '0' && c <= '9';
+        })) {
+        return false;
+    }
+    try {
+        const auto parsed = std::stoull(std::string(value));
+        if (parsed > std::numeric_limits<size_t>::max()) return false;
+        result = static_cast<size_t>(parsed);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool apply_grid_update(
+    json::object& payload,
+    std::string_view path,
+    const json::value& value,
+    std::string& error
+) {
+    std::vector<std::string> parts;
+    size_t begin = 0;
+    while (begin <= path.size()) {
+        const size_t end = path.find('.', begin);
+        const size_t stop = end == std::string_view::npos ? path.size() : end;
+        if (stop == begin) {
+            error = "grid axis contains an invalid dotted path";
+            return false;
+        }
+        parts.emplace_back(path.substr(begin, stop - begin));
+        if (end == std::string_view::npos) break;
+        begin = end + 1;
+    }
+
+    json::value root(payload);
+    json::value* cursor = &root;
+    for (size_t index = 0; index + 1 < parts.size(); ++index) {
+        const auto& part = parts[index];
+        size_t next_index = 0;
+        const bool next_is_index = parse_grid_index(parts[index + 1], next_index);
+        if (cursor->is_object()) {
+            auto& object = cursor->as_object();
+            auto* child = object.if_contains(part);
+            if (child == nullptr) {
+                object[part] = next_is_index
+                    ? json::value(json::array{})
+                    : json::value(json::object{});
+                child = object.if_contains(part);
+            }
+            cursor = child;
+        } else if (cursor->is_array()) {
+            size_t position = 0;
+            if (!parse_grid_index(part, position) ||
+                position >= cursor->as_array().size()) {
+                error = "grid axis list index is out of range: " + part;
+                return false;
+            }
+            cursor = &cursor->as_array()[position];
+        } else {
+            error = "grid axis collides with a scalar at: " + part;
+            return false;
+        }
+    }
+
+    const auto& leaf = parts.back();
+    if (cursor->is_object()) {
+        cursor->as_object()[leaf] = value;
+    } else if (cursor->is_array()) {
+        size_t position = 0;
+        if (!parse_grid_index(leaf, position) ||
+            position >= cursor->as_array().size()) {
+            error = "grid axis list index is out of range: " + leaf;
+            return false;
+        }
+        cursor->as_array()[position] = value;
+    } else {
+        error = "grid axis collides with a scalar at: " + leaf;
+        return false;
+    }
+    payload = std::move(root.as_object());
+    return true;
+}
+
+std::string grid_candidate_id(uint64_t ordinal) {
+    std::ostringstream stream;
+    stream << 'p' << std::setw(8) << std::setfill('0') << ordinal;
+    return stream.str();
+}
+
+bool materialize_grid_candidates(
+    const json::object& grid,
+    const json::array& ordinals,
+    json::array& candidates,
+    std::string& error
+) {
+    if (const auto field = unknown_field(grid, {
+            "candidate_defaults", "axes", "axis_order", "shape"
+        })) {
+        error = "grid contains unknown field: " + *field;
+        return false;
+    }
+    const auto* defaults_value = grid.if_contains("candidate_defaults");
+    const auto* axes_value = grid.if_contains("axes");
+    const auto* order_value = grid.if_contains("axis_order");
+    const auto* shape_value = grid.if_contains("shape");
+    if (defaults_value == nullptr || !defaults_value->is_object() ||
+        axes_value == nullptr || !axes_value->is_object() ||
+        order_value == nullptr || !order_value->is_array() ||
+        shape_value == nullptr || !shape_value->is_array()) {
+        error = "grid requires candidate_defaults, axes, axis_order, and shape";
+        return false;
+    }
+    const auto& defaults = defaults_value->as_object();
+    const auto& axes = axes_value->as_object();
+    const auto& order = order_value->as_array();
+    const auto& shape_json = shape_value->as_array();
+    if (order.size() != axes.size() || shape_json.size() != order.size()) {
+        error = "grid axis_order, axes, and shape must describe the same axes";
+        return false;
+    }
+
+    std::vector<std::string> names;
+    std::vector<size_t> shape;
+    names.reserve(order.size());
+    shape.reserve(order.size());
+    std::unordered_set<std::string> seen_names;
+    uint64_t total = 1;
+    for (size_t index = 0; index < order.size(); ++index) {
+        if (!order[index].is_string()) {
+            error = "grid axis_order entries must be strings";
+            return false;
+        }
+        const std::string name(order[index].as_string().c_str());
+        if (!seen_names.insert(name).second) {
+            error = "grid axis_order entries must be unique";
+            return false;
+        }
+        const auto* values = axes.if_contains(name);
+        if (values == nullptr || !values->is_array() || values->as_array().empty()) {
+            error = "grid axis must contain a non-empty value array: " + name;
+            return false;
+        }
+        uint64_t declared = 0;
+        const auto& shape_item = shape_json[index];
+        if (shape_item.is_uint64()) {
+            declared = shape_item.as_uint64();
+        } else if (shape_item.is_int64() && shape_item.as_int64() > 0) {
+            declared = static_cast<uint64_t>(shape_item.as_int64());
+        }
+        if (declared == 0 || declared != values->as_array().size() ||
+            total > std::numeric_limits<uint64_t>::max() / declared) {
+            error = "grid shape does not match its axis values";
+            return false;
+        }
+        total *= declared;
+        names.push_back(name);
+        shape.push_back(static_cast<size_t>(declared));
+    }
+
+    if (ordinals.size() > MAX_CANDIDATES_PER_BATCH) {
+        error = "grid ordinal batch exceeds the candidate limit";
+        return false;
+    }
+    size_t expansion_basis = json::serialize(defaults).size();
+    for (const auto& name : names) {
+        size_t largest_value = 0;
+        for (const auto& value : axes.at(name).as_array()) {
+            largest_value = std::max(
+                largest_value, json::serialize(value).size()
+            );
+        }
+        const size_t contribution = name.size() + largest_value + 64;
+        if (contribution > MAX_MATERIALIZED_BATCH_BYTES ||
+            expansion_basis > MAX_MATERIALIZED_BATCH_BYTES - contribution) {
+            error = "grid candidate expansion exceeds the materialized-byte limit";
+            return false;
+        }
+        expansion_basis += contribution;
+    }
+    const size_t candidate_upper_bound = expansion_basis >
+            (MAX_MATERIALIZED_BATCH_BYTES - 1024) / 4
+        ? MAX_MATERIALIZED_BATCH_BYTES + 1
+        : 1024 + 4 * expansion_basis;
+    if (!ordinals.empty() && (
+            candidate_upper_bound > MAX_MATERIALIZED_BATCH_BYTES ||
+            ordinals.size() >
+                MAX_MATERIALIZED_BATCH_BYTES / candidate_upper_bound)) {
+        error = "grid batch exceeds the materialized-byte limit";
+        return false;
+    }
+
+    std::unordered_set<uint64_t> seen_ordinals;
+    candidates.reserve(ordinals.size());
+    for (size_t local = 0; local < ordinals.size(); ++local) {
+        const auto& item = ordinals[local];
+        uint64_t ordinal = 0;
+        if (item.is_uint64()) {
+            ordinal = item.as_uint64();
+        } else if (item.is_int64() && item.as_int64() >= 0) {
+            ordinal = static_cast<uint64_t>(item.as_int64());
+        } else {
+            error = "grid ordinals must be non-negative integers";
+            return false;
+        }
+        if (ordinal >= total || !seen_ordinals.insert(ordinal).second) {
+            error = "grid ordinals must be unique and in range";
+            return false;
+        }
+
+        std::vector<size_t> coordinates(shape.size());
+        uint64_t remainder = ordinal;
+        for (size_t reverse = shape.size(); reverse-- > 0;) {
+            coordinates[reverse] = static_cast<size_t>(remainder % shape[reverse]);
+            remainder /= shape[reverse];
+        }
+        json::object payload = defaults;
+        for (size_t axis = 0; axis < names.size(); ++axis) {
+            const auto& axis_value =
+                axes.at(names[axis]).as_array()[coordinates[axis]];
+            if (axis_value.is_object()) {
+                for (const auto& update : axis_value.as_object()) {
+                    if (!apply_grid_update(
+                            payload, update.key(), update.value(), error)) {
+                        return false;
+                    }
+                }
+            } else if (!apply_grid_update(
+                    payload, names[axis], axis_value, error)) {
+                return false;
+            }
+        }
+        for (const auto& field : payload) {
+            if (field.key() != "policy_params" && field.key() != "pool") {
+                error = "grid candidate contains unknown field: " +
+                    std::string(field.key());
+                return false;
+            }
+        }
+        const auto* policy = payload.if_contains("policy_params");
+        const auto* pool = payload.if_contains("pool");
+        if ((policy != nullptr && !policy->is_array()) ||
+            (pool != nullptr && !pool->is_object())) {
+            error = "grid candidate policy_params and pool have invalid types";
+            return false;
+        }
+
+        json::object candidate;
+        candidate["ordinal"] = static_cast<uint32_t>(local);
+        candidate["candidate_id"] = grid_candidate_id(ordinal);
+        candidate["policy_params"] = policy == nullptr
+            ? json::value(json::array{})
+            : *policy;
+        candidate["pool_overrides"] = pool == nullptr
+            ? json::value(json::object{})
+            : *pool;
+        candidates.push_back(std::move(candidate));
+    }
+    return true;
+}
+
 json::object make_evaluator_identity() {
     json::object id;
     id["harness_version"] = curve_fx::identity::HARNESS_VERSION;
@@ -204,6 +476,7 @@ json::object make_evaluator_identity() {
     id["build_target"] = BUILD_TARGET_NAME;
     id["ipo_enabled"] = curve_fx::identity::ENABLE_IPO;
     id["native_tuning"] = curve_fx::identity::NATIVE_TUNING;
+    id["pgo_mode"] = curve_fx::identity::PGO_MODE;
     return id;
 }
 
@@ -291,6 +564,7 @@ json::object make_description() {
     build["wire_real_digits"] = std::numeric_limits<double>::digits;
     build["ipo_enabled"] = curve_fx::identity::ENABLE_IPO;
     build["native_tuning"] = curve_fx::identity::NATIVE_TUNING;
+    build["pgo_mode"] = curve_fx::identity::PGO_MODE;
     info["build"] = std::move(build);
 
     json::object schema = make_parameter_schema();
@@ -310,6 +584,7 @@ json::object make_hello_frame() {
     caps.push_back("summary");
     caps.push_back("full_trace");
     caps.push_back("atomic_sidecars");
+    caps.push_back("grid_ordinals");
     hello["capabilities"] = caps;
 
     json::array yb_modes;
@@ -324,6 +599,9 @@ json::object make_hello_frame() {
 
     json::object limits;
     limits["max_frame_bytes"] = MAX_FRAME_BYTES;
+    limits["max_candidates_per_batch"] = MAX_CANDIDATES_PER_BATCH;
+    limits["max_metric_values_per_batch"] = MAX_METRIC_VALUES_PER_BATCH;
+    limits["max_materialized_batch_bytes"] = MAX_MATERIALIZED_BATCH_BYTES;
     limits["max_inflight_batches"] = 1;
     hello["limits"] = limits;
 
@@ -727,7 +1005,7 @@ private:
         if (const auto field = unknown_field(req, {
                 "protocol", "type", "request_id", "session_id",
                 "metric_projection", "metric_fields", "metrics_format",
-                "observation", "candidates"
+                "observation", "candidates", "grid", "ordinals"
             })) {
             write_frame(std::cout, make_error_frame(
                 req_id, "protocol", "UNKNOWN_FIELD",
@@ -832,19 +1110,70 @@ private:
                 }
             }
         }
-        if (!req.if_contains("candidates") || !req.at("candidates").is_array()) {
-            write_frame(std::cout, make_error_frame(req_id, "candidate", "INVALID_ARGUMENT", "candidates array is required"));
+        const bool has_candidates = req.if_contains("candidates") != nullptr;
+        const bool has_grid = req.if_contains("grid") != nullptr;
+        const bool has_ordinals = req.if_contains("ordinals") != nullptr;
+        if (has_candidates == (has_grid || has_ordinals) || has_grid != has_ordinals) {
+            write_frame(std::cout, make_error_frame(
+                req_id, "candidate", "INVALID_ARGUMENT",
+                "provide either candidates or grid with ordinals"));
             return;
         }
 
-        const auto& cand_arr = req.at("candidates").as_array();
+        json::array materialized_candidates;
+        const json::array* candidate_array = nullptr;
+        if (has_candidates) {
+            if (!req.at("candidates").is_array()) {
+                write_frame(std::cout, make_error_frame(
+                    req_id, "candidate", "INVALID_ARGUMENT",
+                    "candidates must be an array"));
+                return;
+            }
+            if (req.at("candidates").as_array().size() >
+                MAX_CANDIDATES_PER_BATCH) {
+                write_frame(std::cout, make_error_frame(
+                    req_id, "candidate", "BATCH_TOO_LARGE",
+                    "candidate batch exceeds the candidate limit"));
+                return;
+            }
+            candidate_array = &req.at("candidates").as_array();
+        } else {
+            if (!req.at("grid").is_object() || !req.at("ordinals").is_array()) {
+                write_frame(std::cout, make_error_frame(
+                    req_id, "candidate", "INVALID_ARGUMENT",
+                    "grid must be an object and ordinals must be an array"));
+                return;
+            }
+            std::string grid_error;
+            if (!materialize_grid_candidates(
+                    req.at("grid").as_object(),
+                    req.at("ordinals").as_array(),
+                    materialized_candidates,
+                    grid_error)) {
+                write_frame(std::cout, make_error_frame(
+                    req_id, "candidate", "INVALID_GRID", grid_error));
+                return;
+            }
+            candidate_array = &materialized_candidates;
+        }
+
+        const auto& cand_arr = *candidate_array;
         if (cand_arr.empty()) {
-            write_frame(std::cout, make_error_frame(req_id, "candidate", "EMPTY_BATCH", "candidates array cannot be empty"));
+            write_frame(std::cout, make_error_frame(
+                req_id, "candidate", "EMPTY_BATCH",
+                "candidate batch cannot be empty"));
+            return;
+        }
+        if (metric_fields.size() >
+            MAX_METRIC_VALUES_PER_BATCH / cand_arr.size()) {
+            write_frame(std::cout, make_error_frame(
+                req_id, "candidate", "BATCH_TOO_LARGE",
+                "candidate count times metric count exceeds the result limit"));
             return;
         }
 
-        // The frame-size guard bounds both parsed input and the corresponding
-        // result allocation; callers choose batch size within that limit.
+        // Candidate, materialization, and result-cell admission guards bound
+        // allocations that compact ordinal requests can trigger.
 
         // Observation options (trace capture)
         curve_fx::evaluator::ObservationSpec obs_spec{};
@@ -1070,8 +1399,15 @@ private:
         json::array results_arr;
         for (size_t c_idx = 0; c_idx < batch_result.candidate_results.size(); ++c_idx) {
             const auto& res = batch_result.candidate_results[c_idx];
+            uint64_t response_ordinal = res.ordinal;
+            if (has_grid) {
+                const auto& ordinal = req.at("ordinals").as_array()[c_idx];
+                response_ordinal = ordinal.is_uint64()
+                    ? ordinal.as_uint64()
+                    : static_cast<uint64_t>(ordinal.as_int64());
+            }
             json::object r;
-            r["ordinal"] = res.ordinal;
+            r["ordinal"] = response_ordinal;
             r["candidate_id"] = res.candidate_id;
             r["status"] = res.success ? "ok" : "failed";
 
@@ -1144,7 +1480,7 @@ private:
                     }
 
                     const std::string stem = "candidate_" +
-                        std::to_string(res.ordinal) + "." + sc_res.scenario_id;
+                        std::to_string(response_ordinal) + "." + sc_res.scenario_id;
                     const fs::path trace_path = base_art_path / (stem + ".trace.json");
                     const bool trace_preexisting = fs::exists(trace_path);
                     all_writes_ok = write_atomic_file(trace_path, sc_res.trace_json);

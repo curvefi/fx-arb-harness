@@ -28,13 +28,18 @@ most one session; a new evaluator process is required for another session.
     "compiler": "clang",
     "build_target": "arb_evaluator_ld",
     "ipo_enabled": false,
-    "native_tuning": false
+    "native_tuning": false,
+    "pgo_mode": "off"
   },
-  "capabilities": ["summary", "full_trace", "atomic_sidecars"],
+  "capabilities": ["summary", "full_trace", "atomic_sidecars", "grid_ordinals"],
   "yb_modes": ["off", "active_2l", "reference_2l"],
   "metric_schema": "twocrypto-summary-v1",
   "metric_fields": ["vp", "apy", "trades", "yb_enabled", "yb_apy"],
-  "limits": {"max_frame_bytes": 4194304, "max_inflight_batches": 1}
+  "limits": {"max_frame_bytes": 4194304,
+             "max_candidates_per_batch": 4096,
+             "max_metric_values_per_batch": 131072,
+             "max_materialized_batch_bytes": 67108864,
+             "max_inflight_batches": 1}
 }
 ```
 
@@ -117,6 +122,44 @@ Candidates carry a unique `ordinal`, a unique `candidate_id`, finite binary64
                   "policy_params": [], "pool_overrides": {}}]
 }
 ```
+
+Exhaustive clients may instead send the `grid_ordinals` form; it cannot be
+mixed with `candidates`:
+
+```json
+{
+  "protocol": "curve_fx_eval", "type": "evaluate_batch",
+  "request_id": "batch-2", "session_id": "session-1",
+  "metric_projection": "summary", "metrics_format": "array",
+  "metric_fields": ["apy_net", "max_7d_rel_price_diff"],
+  "observation": {"kind": "summary"},
+  "grid": {
+    "candidate_defaults": {"policy_params": [], "pool": {}},
+    "axes": {
+      "flat_fee": [
+        {"pool.mid_fee": 0.005, "pool.out_fee": 0.005},
+        {"pool.mid_fee": 0.01, "pool.out_fee": 0.01}
+      ],
+      "pool.A": [30000, 60000]
+    },
+    "axis_order": ["flat_fee", "pool.A"],
+    "shape": [2, 2]
+  },
+  "ordinals": [0, 3]
+}
+```
+
+`axis_order` is explicit and order-significant; `shape` must exactly match the
+corresponding non-empty value arrays. Mixed-radix decoding uses C order (the
+last axis varies fastest). A scalar axis value updates its dotted axis name; an
+object value applies each of its dotted keys, allowing linked axes such as a
+flat fee. Empty `axes`, `axis_order`, and `shape` together describe the one
+defaults-only candidate. Ordinals are unique global grid positions and produce
+IDs `p00000000`, `p00000001`, and so on. Results preserve request order using
+those global ordinals; internal batch-local ordinals are not exposed. The
+input-frame, candidate-count, metric-cell, and
+conservative materialized-byte limits in `hello` are all enforced before the
+simulation.
 
 `observation.kind` is `summary` or `full_trace`. `trace_interval` is a positive
 integer and `trace_actions` controls the optional action sidecar. Observation

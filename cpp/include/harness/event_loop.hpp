@@ -94,6 +94,7 @@ EventLoopResult<T> run_event_loop_impl(
     result.donation_apy = dcfg.apy;
 
     RollingGeoApy90d<F> apy_net_gm;
+    NetApyConsistency90d<F> apy_net_consistency_90d;
     std::optional<YbLoopState<T>> yb;
     if constexpr (EnableYb) {
         yb.emplace();
@@ -104,8 +105,10 @@ EventLoopResult<T> run_event_loop_impl(
             : F(0);
         return donation_growth<F>(static_cast<F>(dcfg.apy), static_cast<F>(dcfg.freq_s), elapsed_s);
     };
-    auto sample_apy_net_gm = [&](uint64_t ts) {
-        if (!apy_net_gm.should_sample(ts)) {
+    auto sample_net_apy = [&](uint64_t ts) {
+        const bool legacy_due = !GridCore && apy_net_gm.should_sample(ts);
+        const bool consistency_due = apy_net_consistency_90d.should_sample(ts);
+        if (!legacy_due && !consistency_due) {
             return;
         }
         const F donation_growth = donation_growth_since_start(ts);
@@ -115,9 +118,14 @@ EventLoopResult<T> run_event_loop_impl(
         const T lp_profit_growth = pool.lp_xcp_profit;
         const F net_lp_profit_growth =
             static_cast<F>(lp_profit_growth) / donation_growth;
-        apy_net_gm.sample(ts, net_lp_profit_growth);
+        if (legacy_due) {
+            apy_net_gm.sample(ts, net_lp_profit_growth);
+        }
+        if (consistency_due) {
+            apy_net_consistency_90d.sample(ts, net_lp_profit_growth);
+        }
     };
-    sample_apy_net_gm(result.t_start);
+    sample_net_apy(result.t_start);
 
     std::array<T, SlippageProbes<T>::N_SIZES> probe_sizes_coin0{};
     if (enable_slippage_probes) {
@@ -655,9 +663,18 @@ EventLoopResult<T> run_event_loop_impl(
                 TimeWeightedMetrics<T>::PRICE_DIFF_BUCKET_S
             ));
         }
-        if (!apy_net_gm.have_sample) {
-            return result.t_start;
+        if constexpr (GridCore) {
+            if (!apy_net_consistency_90d.have_sample) {
+                return result.t_start;
+            }
+            include_due(due_after(
+                apy_net_consistency_90d.last_sample_ts,
+                NetApyConsistency90d<F>::SAMPLE_S
+            ));
         } else {
+            if (!apy_net_gm.have_sample) {
+                return result.t_start;
+            }
             include_due(due_after(
                 apy_net_gm.last_sample_ts,
                 RollingGeoApy90d<F>::SAMPLE_S
@@ -1041,7 +1058,7 @@ EventLoopResult<T> run_event_loop_impl(
             if (pool.cached_price_scale != price_scale_at_event_start) {
                 last_price_scale_change_ts = ev_ts;
             }
-            sample_apy_net_gm(ev_ts);
+            sample_net_apy(ev_ts);
             ev_idx = next_event_index(ev_idx + 1);
             continue;
         }
@@ -1179,11 +1196,12 @@ EventLoopResult<T> run_event_loop_impl(
             }
         }
 
-        sample_apy_net_gm(ev_ts);
+        sample_net_apy(ev_ts);
         ev_idx = next_event_index(ev_idx + 1);
     }
 
     result.apy_net_gm = apy_net_gm.value();
+    result.apy_net_consistency_90d = apy_net_consistency_90d.value();
     if constexpr (EnableYb) {
         // Raw YB APY is an endpoint metric. If the last event was between
         // hourly reports, mark it once without adding another GM window.

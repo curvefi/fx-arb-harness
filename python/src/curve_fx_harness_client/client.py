@@ -349,6 +349,9 @@ class EvaluatorClient:
         metric_fields: Optional[Sequence[str]] = None,
         metrics_format: str = "object",
         session_id: Optional[str] = None,
+        trusted_candidates: bool = False,
+        grid: Optional[Dict[str, Any]] = None,
+        ordinals: Optional[Sequence[int]] = None,
     ) -> Union[BatchResultFrame, Dict[str, Any]]:
         """Evaluate a batch of candidate pool parameter vectors over the open session."""
         with self._lock:
@@ -356,18 +359,46 @@ class EvaluatorClient:
             if not eff_session_id:
                 raise SessionError("No active session. Call open_session() first.")
 
-            cand_specs: List[CandidateSpec] = []
-            for i, c in enumerate(candidates):
-                if isinstance(c, CandidateSpec):
-                    cand_specs.append(c)
-                elif isinstance(c, dict):
-                    if "ordinal" not in c:
-                        c = {"ordinal": i, **c}
-                    if "candidate_id" not in c:
-                        c = {"candidate_id": f"cand-{i}", **c}
-                    cand_specs.append(CandidateSpec.model_validate(c))
-                else:
-                    raise ValueError(f"Invalid candidate type: {type(c)}")
+            grid_mode = grid is not None or ordinals is not None
+            if grid_mode:
+                if not trusted_candidates or metrics_format != "array" or not metric_fields:
+                    raise ValueError(
+                        "grid ordinals require trusted projected array metrics"
+                    )
+                if not isinstance(grid, dict) or not ordinals or candidates:
+                    raise ValueError(
+                        "grid and non-empty ordinals replace candidate objects"
+                    )
+                if any(
+                    isinstance(ordinal, bool)
+                    or not isinstance(ordinal, int)
+                    or ordinal < 0
+                    for ordinal in ordinals
+                ):
+                    raise ValueError("grid ordinals must be non-negative integers")
+                candidate_payload = None
+            elif trusted_candidates:
+                if metrics_format != "array" or not metric_fields:
+                    raise ValueError(
+                        "trusted candidates require projected array metrics"
+                    )
+                if any(not isinstance(candidate, dict) for candidate in candidates):
+                    raise ValueError("trusted candidates must be dictionaries")
+                candidate_payload = candidates
+            else:
+                cand_specs: List[CandidateSpec] = []
+                for i, c in enumerate(candidates):
+                    if isinstance(c, CandidateSpec):
+                        cand_specs.append(c)
+                    elif isinstance(c, dict):
+                        if "ordinal" not in c:
+                            c = {"ordinal": i, **c}
+                        if "candidate_id" not in c:
+                            c = {"candidate_id": f"cand-{i}", **c}
+                        cand_specs.append(CandidateSpec.model_validate(c))
+                    else:
+                        raise ValueError(f"Invalid candidate type: {type(c)}")
+                candidate_payload = cand_specs
 
             obs_spec: ObservationSpec
             if observation is None:
@@ -390,19 +421,36 @@ class EvaluatorClient:
                 )
 
             req_id = self._next_request_id("batch")
-            frame = EvaluateBatchFrame(
-                request_id=req_id,
-                session_id=eff_session_id,
-                metric_projection=proj,
-                metric_fields=(
-                    None if metric_fields is None else list(metric_fields)
-                ),
-                metrics_format=metrics_format,
-                observation=obs_spec,
-                candidates=cand_specs,
-            )
+            if trusted_candidates:
+                request_data = {
+                    "protocol": "curve_fx_eval",
+                    "type": "evaluate_batch",
+                    "request_id": req_id,
+                    "session_id": eff_session_id,
+                    "metric_projection": proj.value,
+                    "metric_fields": list(metric_fields or ()),
+                    "metrics_format": metrics_format,
+                    "observation": obs_spec.model_dump(exclude_none=True),
+                }
+                if grid_mode:
+                    request_data["grid"] = grid
+                    request_data["ordinals"] = list(ordinals or ())
+                else:
+                    request_data["candidates"] = candidate_payload
+            else:
+                request_data = EvaluateBatchFrame(
+                    request_id=req_id,
+                    session_id=eff_session_id,
+                    metric_projection=proj,
+                    metric_fields=(
+                        None if metric_fields is None else list(metric_fields)
+                    ),
+                    metrics_format=metrics_format,
+                    observation=obs_spec,
+                    candidates=candidate_payload,
+                ).model_dump(exclude_none=True)
 
-            resp_data = self._transact(frame.model_dump(exclude_none=True))
+            resp_data = self._transact(request_data)
             if metrics_format == "object":
                 return BatchResultFrame.model_validate(resp_data)
             if resp_data.get("type") != "batch_result":

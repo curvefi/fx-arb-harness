@@ -38,11 +38,14 @@ class EvaluatorIdentity(ProtocolModel):
     build_target: str
     ipo_enabled: bool
     native_tuning: bool
+    pgo_mode: Literal["off", "generate", "use"]
 
 
 class Limits(ProtocolModel):
     max_frame_bytes: int = 4194304
-    max_candidates_per_batch: Optional[int] = None  # None = not count-limited
+    max_candidates_per_batch: int = 4096
+    max_metric_values_per_batch: int = 131072
+    max_materialized_batch_bytes: int = 67108864
     max_inflight_batches: int = 1
 
 
@@ -50,7 +53,11 @@ class HelloFrame(ProtocolModel):
     protocol: Literal["curve_fx_eval"] = "curve_fx_eval"
     type: Literal["hello"] = "hello"
     evaluator_identity: EvaluatorIdentity
-    capabilities: List[str] = Field(default_factory=lambda: ["summary", "full_trace", "atomic_sidecars"])
+    capabilities: List[str] = Field(
+        default_factory=lambda: [
+            "summary", "full_trace", "atomic_sidecars", "grid_ordinals"
+        ]
+    )
     yb_modes: List[str] = Field(default_factory=lambda: ["off", "active_2l", "reference_2l"])
     metric_schema: str = "twocrypto-summary-v1"
     metric_fields: List[str] = Field(default_factory=list)
