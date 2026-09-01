@@ -66,6 +66,38 @@ T parse_config_wad(const boost::json::value& v) {
     }
 }
 
+enum class PoolEntryUnits {
+    ContractScaled,
+    CandidateHuman,
+};
+
+template <typename T>
+T parse_ratio_wad(
+    const boost::json::value& v,
+    PoolEntryUnits units,
+    std::string_view field
+) {
+    if constexpr (std::is_same_v<T, twocrypto_fx::uint256>) {
+        return parse_config_wad<T>(v);
+    } else {
+        const T value = units == PoolEntryUnits::CandidateHuman
+            ? parse_plain_real<T>(v)
+            : parse_config_wad<T>(v);
+        if (value < T(0) || value > T(1)) {
+            throw std::runtime_error(
+                std::string(field) + " must be a fraction in [0, 1]"
+            );
+        }
+        if (value != T(0) && value < T(1e-18)) {
+            throw std::runtime_error(
+                std::string(field) +
+                " is below one WAD unit; check candidate/template units"
+            );
+        }
+        return value;
+    }
+}
+
 template <typename T>
 T parse_config_plain(const boost::json::value& v) {
     if constexpr (std::is_same_v<T, twocrypto_fx::uint256>) {
@@ -82,6 +114,26 @@ T parse_config_fee(const boost::json::value& v) {
     } else {
         return parse_fee_1e10<T>(v);
     }
+}
+
+template <typename T>
+T parse_fee_value(const boost::json::value& v, std::string_view field) {
+    const T value = parse_config_fee<T>(v);
+    const T precision = twocrypto_fx::PoolTraits<T>::FEE_PRECISION();
+    if (value < T(0) || value > precision) {
+        throw std::runtime_error(
+            std::string(field) + " must be a fraction in [0, 1]"
+        );
+    }
+    if constexpr (std::is_floating_point_v<T>) {
+        if (value != T(0) && value < T(1e-10)) {
+            throw std::runtime_error(
+                std::string(field) +
+                " is below one fee-precision unit; check candidate/template units"
+            );
+        }
+    }
+    return value;
 }
 
 template <typename T>
@@ -260,7 +312,7 @@ twocrypto_fx::PolicyConfig<T> parse_policy_config(const boost::json::value& poli
         if constexpr (std::is_same_v<T, twocrypto_fx::uint256>) {
             cfg.fee = twocrypto_fx::uint256(policy_scalar_to_string(*fee));
         } else {
-            cfg.fee = parse_config_fee<T>(*fee);
+            cfg.fee = parse_fee_value<T>(*fee, "pool.policy.fee");
         }
     } else if (auto* fee_bps = po.if_contains("fee_bps")) {
         if (!is_number_or_string(*fee_bps)) {
@@ -284,7 +336,8 @@ template <typename T>
 void parse_pool_entry(
     const boost::json::object& entry,
     PoolInit<T>& out_pool,
-    arb::trading::Costs<T>& out_costs
+    arb::trading::Costs<T>& out_costs,
+    PoolEntryUnits units = PoolEntryUnits::ContractScaled
 ) {
     namespace json = boost::json;
 
@@ -330,9 +383,15 @@ void parse_pool_entry(
 
     if (auto* v = pool.if_contains("A")) out_pool.A = parse_config_plain<T>(*v);
     if (auto* v = pool.if_contains("gamma")) out_pool.gamma = parse_config_plain<T>(*v);
-    if (auto* v = pool.if_contains("mid_fee")) out_pool.mid_fee = parse_config_fee<T>(*v);
-    if (auto* v = pool.if_contains("out_fee")) out_pool.out_fee = parse_config_fee<T>(*v);
-    if (auto* v = pool.if_contains("fee_gamma")) out_pool.fee_gamma = parse_config_wad<T>(*v);
+    if (auto* v = pool.if_contains("mid_fee")) {
+        out_pool.mid_fee = parse_fee_value<T>(*v, "pool.mid_fee");
+    }
+    if (auto* v = pool.if_contains("out_fee")) {
+        out_pool.out_fee = parse_fee_value<T>(*v, "pool.out_fee");
+    }
+    if (auto* v = pool.if_contains("fee_gamma")) {
+        out_pool.fee_gamma = parse_ratio_wad<T>(*v, units, "pool.fee_gamma");
+    }
     if (
         pool.if_contains("lp_profit_fraction") ||
         pool.if_contains("allowed_extra_profit") ||
@@ -342,14 +401,21 @@ void parse_pool_entry(
     ) {
         throw std::runtime_error("legacy pool config fields are not supported; use reserved_profit_fraction, admin_fee, adjustment_step_min, adjustment_step_max, and policy");
     }
-    if (auto* v = pool.if_contains("adjustment_step_min")) out_pool.adjustment_step_min = parse_config_wad<T>(*v);
-    if (auto* v = pool.if_contains("adjustment_step_max")) out_pool.adjustment_step_max = parse_config_wad<T>(*v);
+    if (auto* v = pool.if_contains("adjustment_step_min")) {
+        out_pool.adjustment_step_min = parse_ratio_wad<T>(
+            *v, units, "pool.adjustment_step_min");
+    }
+    if (auto* v = pool.if_contains("adjustment_step_max")) {
+        out_pool.adjustment_step_max = parse_ratio_wad<T>(
+            *v, units, "pool.adjustment_step_max");
+    }
     if (auto* v = pool.if_contains("ma_time")) out_pool.ma_time = parse_config_plain<T>(*v);
     if (auto* v = pool.if_contains("reserved_profit_fraction")) {
-        out_pool.reserved_profit_fraction = std::clamp<T>(parse_config_fee<T>(*v), T(0), twocrypto_fx::PoolTraits<T>::FEE_PRECISION());
+        out_pool.reserved_profit_fraction = parse_fee_value<T>(
+            *v, "pool.reserved_profit_fraction");
     }
     if (auto* v = pool.if_contains("admin_fee")) {
-        out_pool.admin_fee = std::clamp<T>(parse_config_fee<T>(*v), T(0), twocrypto_fx::PoolTraits<T>::FEE_PRECISION());
+        out_pool.admin_fee = parse_fee_value<T>(*v, "pool.admin_fee");
     }
     if (auto* v = pool.if_contains("policy")) {
         out_pool.policy_config = parse_policy_config<T>(*v);
@@ -498,7 +564,12 @@ PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
     PoolOverride<T> out;
     boost::json::object pool_entry = entry;
     pool_entry.erase("run");
-    parse_pool_entry<T>(pool_entry, out.pool, out.costs);
+    parse_pool_entry<T>(
+        pool_entry,
+        out.pool,
+        out.costs,
+        PoolEntryUnits::CandidateHuman
+    );
 
     const bool wrapped_pool = pool_entry.contains("pool");
     const auto& pool = wrapped_pool ? pool_entry.at("pool").as_object() : pool_entry;

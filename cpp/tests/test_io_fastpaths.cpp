@@ -105,6 +105,14 @@ void test_pool_init_binary64_boundary() {
         std::abs(*pool_d.user_swap_size_frac - 0.037500000000000006) < 1e-15,
         "user_swap_size_frac parsed wrong"
     );
+    require(
+        std::abs(pool_d.fee_gamma - 0.030000000000000123) < 1e-15,
+        "template WAD fee_gamma parsed wrong"
+    );
+    require(
+        std::abs(pool_d.reserved_profit_fraction - 0.3400000123) < 1e-15,
+        "template fee-precision RPF parsed wrong"
+    );
 }
 
 void test_candidate_binary64_identity() {
@@ -176,7 +184,15 @@ int main() {
 void test_pool_override_materialized_once() {
     const auto entry = json::parse(R"JSON(
         {
-          "pool": {"A": "2.0", "initial_price": "3000000000000000000"},
+          "pool": {
+            "A": "2.0",
+            "initial_price": "3000000000000000000",
+            "fee_gamma": 0.03,
+            "adjustment_step_min": 0.0000000001,
+            "adjustment_step_max": 0.006,
+            "reserved_profit_fraction": 0.3,
+            "admin_fee": 0.1
+          },
           "costs": {"gas_coin0": "4.0"}
         }
     )JSON").as_object();
@@ -193,6 +209,11 @@ void test_pool_override_materialized_once() {
 
     require(first.A == 2.0 && second.A == 2.0, "pool override was not applied");
     require(first.initial_price == 3.0 && second.initial_price == 3.0, "scalar pool override was not applied");
+    require(first.fee_gamma == 0.03 && second.fee_gamma == 0.03, "candidate fee_gamma units changed");
+    require(first.adjustment_step_min == 1e-10, "candidate adjustment_step_min units changed");
+    require(first.adjustment_step_max == 0.006, "candidate adjustment_step_max units changed");
+    require(first.reserved_profit_fraction == 0.3, "candidate RPF units changed");
+    require(first.admin_fee == 0.1, "candidate admin_fee units changed");
     require(first.gamma == 7.0 && second.gamma == 9.0, "unspecified pool fields were overwritten");
     require(first_costs.gas_coin0 == 4.0 && second_costs.gas_coin0 == 4.0, "cost override was not applied");
     require(
@@ -212,5 +233,24 @@ void test_pool_override_materialized_once() {
     require(
         !second.user_swap_size_frac,
         "user_swap_size_frac override leaked to an unselected pool"
+    );
+
+    const auto rejects_collapsed = [](const char* payload) {
+        try {
+            const auto collapsed = json::parse(payload).as_object();
+            (void)arb::pools::parse_pool_override<double>(collapsed);
+            return false;
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+    };
+    require(
+        rejects_collapsed(R"JSON({"pool": {"fee_gamma": 3e-20}})JSON"),
+        "sub-WAD candidate ratio was accepted"
+    );
+    require(
+        rejects_collapsed(
+            R"JSON({"pool": {"reserved_profit_fraction": 3e-19}})JSON"),
+        "sub-precision candidate fee fraction was accepted"
     );
 }

@@ -176,6 +176,7 @@ class EvaluateBatchFrame(ProtocolModel):
 class ArtifactRef(ProtocolModel):
     trace_path: Optional[str] = None
     actions_path: Optional[str] = None
+    effective_inputs: Optional[Dict[str, FiniteFloat]] = None
 
 
 class ScenarioResult(ProtocolModel):

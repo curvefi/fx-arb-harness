@@ -1303,6 +1303,7 @@ private:
                     if (all_writes_ok) {
                         if (!trace_preexisting) written_paths.push_back(trace_path);
                         art_obj["trace_path"] = trace_path.string();
+                        art_obj["effective_inputs"] = sc_res.effective_inputs;
                     }
 
                     if (all_writes_ok && !sc_res.actions_json.empty()) {

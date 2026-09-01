@@ -190,8 +190,11 @@ With `metrics_format = array`, the response echoes the exact requested
 same length and order. Object and array forms carry identical values.
 
 With `metric_projection = full`, `scenario_results` contains the admitted
-scenario's raw metrics. With `full_trace`, successful results return
-`trace_path` and, when requested, `actions_path`.
+scenario's raw metrics. With `full_trace`, successful results return an
+`artifacts` object containing `trace_path`, optional `actions_path`, and
+`effective_inputs`. The latter is a finite numeric map of the resolved pool
+and run controls used to initialize the replay; candidate policy parameters
+remain in the candidate payload.
 
 ### Close, shutdown, and errors
 

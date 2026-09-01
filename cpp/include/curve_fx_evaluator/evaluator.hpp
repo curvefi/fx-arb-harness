@@ -110,6 +110,7 @@ struct ScenarioEvaluationResult {
     bool has_trace{false};
     std::string trace_json;
     std::string actions_json;
+    boost::json::object effective_inputs;
     uint64_t trace_record_count{0};
     uint64_t action_count{0};
 };

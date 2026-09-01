@@ -416,6 +416,37 @@ void execute_scenario_job(
         std::optional<TraceArena::Lease> trace_lease;
 
         if (obs_spec.kind == ObservationKind::FullTrace) {
+            auto& effective = sc_res.effective_inputs;
+            effective["pool.A"] = static_cast<double>(pool_init.A);
+            effective["pool.gamma"] = static_cast<double>(pool_init.gamma);
+            effective["pool.mid_fee"] = static_cast<double>(pool_init.mid_fee);
+            effective["pool.out_fee"] = static_cast<double>(pool_init.out_fee);
+            effective["pool.fee_gamma"] = static_cast<double>(pool_init.fee_gamma);
+            effective["pool.adjustment_step_min"] =
+                static_cast<double>(pool_init.adjustment_step_min);
+            effective["pool.adjustment_step_max"] =
+                static_cast<double>(pool_init.adjustment_step_max);
+            effective["pool.ma_time"] = static_cast<double>(pool_init.ma_time);
+            effective["pool.reserved_profit_fraction"] =
+                static_cast<double>(pool_init.reserved_profit_fraction);
+            effective["pool.admin_fee"] = static_cast<double>(pool_init.admin_fee);
+            effective["pool.donation_apy"] =
+                static_cast<double>(pool_init.donation_apy);
+            effective["pool.donation_frequency"] =
+                static_cast<double>(pool_init.donation_frequency);
+            effective["pool.donation_duration"] =
+                static_cast<double>(pool_init.donation_duration);
+            effective["pool.donation_coins_ratio"] =
+                static_cast<double>(pool_init.donation_coins_ratio);
+            effective["pool.costs.arb_fee_bps"] =
+                static_cast<double>(costs.arb_fee_bps);
+            effective["pool.costs.gas_coin0"] =
+                static_cast<double>(costs.gas_coin0);
+            effective["pool.run.yb_releverage_fee"] =
+                static_cast<double>(run_cfg.yb_releverage_fee);
+            effective["run.yb_cash_multiplier"] =
+                static_cast<double>(run_cfg.yb_cash_multiplier);
+
             trace_lease.emplace(TraceArena::global_instance().acquire());
             run_cfg.detailed_log = true;
             run_cfg.detailed_interval = std::max<size_t>(1, obs_spec.trace_interval);
