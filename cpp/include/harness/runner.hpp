@@ -91,7 +91,6 @@ struct PoolResult {
     T donation_frequency{0};
     double apy_net_gm{-1.0};
     double apy_net_robust_90d{-1.0};
-    bool yb_releverage_enabled{false};
     T yb_releverage_fee{T(0)};
     double yb_releverage_apy{-1.0};
     double yb_releverage_apy_gm{-1.0};
@@ -100,15 +99,6 @@ struct PoolResult {
     uint64_t yb_releverage_gm_windows{0};
     uint64_t yb_releverage_gm_floored_windows{0};
     double yb_releverage_gm_floor_share{-1.0};
-    double yb_gm_90d_worst_window{-1.0};
-    double yb_gm_90d_median_window{-1.0};
-    double yb_gm_90d_floor_share{-1.0};
-    double yb_gm_30d_cvar20{-1.0};
-    double yb_gm_30d_floor_share{-1.0};
-    double yb_growth_step_share_1d{-1.0};
-    double yb_growth_step_share_3d{-1.0};
-    double yb_growth_step_share_7d{-1.0};
-    double yb_growth_top10_step_share{-1.0};
 
     // Final pool state
     std::array<T, 2> balances{T(0), T(0)};
@@ -273,50 +263,6 @@ PoolResult<T> run_single_pool(
 
         IdleTickCfg<T> icfg{};
         icfg.freq_s = cfg.dustswap_freq_s;
-        icfg.randomize = cfg.dustswap_random;
-        if (icfg.randomize && icfg.freq_s < IdleTickCfg<T>::RANDOM_MIN_INTERVAL_S) {
-            throw std::invalid_argument(
-                "dustswap_random requires dustswap_freq_s >= 60"
-            );
-        }
-        if (
-            icfg.freq_s > 0 && cfg.dustswap_dynamic_freq_s > 0 &&
-            !cfg.allow_hybrid_keeper
-        ) {
-            throw std::invalid_argument(
-                "dustswap_freq_s and dustswap_dynamic_freq_s are mutually exclusive"
-            );
-        }
-        const unsigned dynamic_modes =
-            static_cast<unsigned>(cfg.dustswap_dynamic_freq_s > 0) +
-            static_cast<unsigned>(
-                cfg.dustswap_dynamic_gap_enabled ||
-                cfg.dustswap_commit_clock_freq_s > 0
-            ) +
-            static_cast<unsigned>(cfg.policy_keeper_enabled);
-        if (dynamic_modes > 1) {
-            throw std::invalid_argument(
-                "dynamic, gap/commit-clock, and policy keepers are mutually exclusive"
-            );
-        }
-        if (
-            icfg.freq_s > 0 &&
-            (cfg.dustswap_dynamic_gap_enabled ||
-             cfg.dustswap_commit_clock_freq_s > 0 ||
-             cfg.policy_keeper_enabled)
-        ) {
-            throw std::invalid_argument(
-                "scheduleless keepers require dustswap_freq_s=0"
-            );
-        }
-        if (
-            !cfg.dustswap_dynamic_gap_enabled &&
-            cfg.dustswap_dynamic_heartbeat_s > 0
-        ) {
-            throw std::invalid_argument(
-                "dynamic keeper heartbeat requires gap mode"
-            );
-        }
 
         UserSwapCfg<T> ucfg{};
         ucfg.freq_s = cfg.user_swap_freq_s;
@@ -346,7 +292,6 @@ PoolResult<T> run_single_pool(
         result.donation_frequency = pool_init.donation_frequency;
         result.apy_net_gm = loop_result.apy_net_gm;
         result.apy_net_robust_90d = loop_result.apy_net_robust_90d;
-        result.yb_releverage_enabled = loop_result.yb_releverage_enabled;
         result.yb_releverage_fee = loop_result.yb_releverage_fee;
         result.yb_releverage_apy = loop_result.yb_releverage_apy;
         result.yb_releverage_apy_gm = loop_result.yb_releverage_apy_gm;
@@ -357,15 +302,6 @@ PoolResult<T> run_single_pool(
             loop_result.yb_releverage_gm_floored_windows;
         result.yb_releverage_gm_floor_share =
             loop_result.yb_releverage_gm_floor_share;
-        result.yb_gm_90d_worst_window = loop_result.yb_gm_90d_worst_window;
-        result.yb_gm_90d_median_window = loop_result.yb_gm_90d_median_window;
-        result.yb_gm_90d_floor_share = loop_result.yb_gm_90d_floor_share;
-        result.yb_gm_30d_cvar20 = loop_result.yb_gm_30d_cvar20;
-        result.yb_gm_30d_floor_share = loop_result.yb_gm_30d_floor_share;
-        result.yb_growth_step_share_1d = loop_result.yb_growth_step_share_1d;
-        result.yb_growth_step_share_3d = loop_result.yb_growth_step_share_3d;
-        result.yb_growth_step_share_7d = loop_result.yb_growth_step_share_7d;
-        result.yb_growth_top10_step_share = loop_result.yb_growth_top10_step_share;
         result.balances[0] = pool.balances[0];
         result.balances[1] = pool.balances[1];
         result.price_scale = pool.cached_price_scale;

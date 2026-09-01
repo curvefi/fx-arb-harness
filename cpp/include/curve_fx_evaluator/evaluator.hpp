@@ -57,14 +57,6 @@ struct SessionConfig {
     T max_swap_frac{static_cast<T>(1.0)};
     uint64_t start_ts{0};
     uint64_t dustswap_freq_s{3600};
-    bool dustswap_random{false};
-    uint64_t dustswap_dynamic_freq_s{0};
-    bool dustswap_dynamic_gap_enabled{false};
-    T dustswap_dynamic_gap_bps{static_cast<T>(0)};
-    uint64_t dustswap_dynamic_heartbeat_s{0};
-    uint64_t dustswap_commit_clock_freq_s{0};
-    bool policy_keeper_enabled{false};
-    bool allow_hybrid_keeper{false};
     uint64_t user_swap_freq_s{0};
     T user_swap_size_frac{static_cast<T>(0.01)};
     T user_swap_thresh{static_cast<T>(0.05)};

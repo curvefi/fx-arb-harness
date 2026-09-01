@@ -39,16 +39,10 @@ struct YbLoopState {
     YbReference2LMarket<T> reference_market;
     Yb2LApyTracker<T> apy_tracker;
     RollingGeoApy90d<F> apy_gm;
-    RollingGeoApyWindow<F> apy_gm_90d;
-    RollingGeoApyWindow<F> apy_gm_30d;
-    MultiScalePositiveGrowthConcentration<F> growth_steps;
     Yb2LCosts<T> actor_costs{};
     YbReference2LCosts<T> reference_costs{};
     uint64_t last_valuation_ts{0};
 
-    YbLoopState()
-        : apy_gm_90d(90ULL * 24ULL * 60ULL * 60ULL, F(0.01)),
-          apy_gm_30d(30ULL * 24ULL * 60ULL * 60ULL, F(0.01)) {}
 };
 
 template <bool EnableYb, bool GridCore, typename T, typename Pool>
@@ -207,18 +201,12 @@ EventLoopResult<T> run_event_loop_impl(
         ) * pool.cached_price_scale;
         edge_floor_scaled_p = omf_floor * edge_p_now;
         geometry_valid = true;
-#if defined(ARB_EDGE_GATE_DIAGNOSTICS)
-        ++m.geometry_refreshes;
-#endif
     };
     auto refresh_edge_fee = [&]() {
         refresh_geometry();
         if (fee_cacheable && fee_valid) return;
         edge_fee = pool.fee(edge_xp);
         fee_valid = true;
-#if defined(ARB_EDGE_GATE_DIAGNOSTICS)
-        ++m.actual_fee_calls;
-#endif
     };
     auto invalidate_edge_inputs = [&]() {
         geometry_valid = false;
@@ -237,9 +225,9 @@ EventLoopResult<T> run_event_loop_impl(
             ts, pool.cached_price_scale, cex_price
         );
 
-        const T x0p = pool.balances[0];
-        const T x1p = pool.balances[1] * cex_price;
-        tw.template sample_imbalance<GridCore>(ts, x0p, x1p);
+        tw.sample_imbalance(
+            ts, pool.balances[0], pool.balances[1] * cex_price
+        );
 
         if constexpr (!GridCore) {
             refresh_edge_fee();
@@ -267,9 +255,6 @@ EventLoopResult<T> run_event_loop_impl(
             !(edge_floor_scaled_p > cex_fee_markup * cex_price)) {
             return false;
         }
-#if defined(ARB_EDGE_GATE_DIAGNOSTICS)
-        ++m.floor_gate_passes;
-#endif
         refresh_edge_fee();
         T volume_cap = std::numeric_limits<T>::infinity();
         if (costs.use_volume_cap) {
@@ -286,17 +271,8 @@ EventLoopResult<T> run_event_loop_impl(
             cex_fee_discount, cex_fee_markup,
             &edge_p_now, &edge_fee, &edge_xp
         );
-        if (dec.edge_seen) {
-            m.arb_edge_candidates += 1;
-        }
-        if (dec.rejected_invalid_size) {
-            m.arb_invalid_size_rejections += 1;
-        }
-        if (dec.rejected_nonpositive_profit) {
-            m.arb_nonpositive_profit_rejections += 1;
-            if (dec.profit < T(0)) {
-                m.arb_guarded_loss_coin0 += -dec.profit;
-            }
+        if (!dec.do_trade && dec.profit < T(0)) {
+            m.arb_guarded_loss_coin0 += -dec.profit;
         }
         if (!dec.do_trade) {
             return false;
@@ -376,213 +352,12 @@ EventLoopResult<T> run_event_loop_impl(
             transaction_snapshot.restore(pool);
             return false;
         }
-        ++m.fixed_keeper_ticks;
-        if (pool.cached_price_scale != ps_before) {
-            ++m.keeper_successful_submissions;
-        }
         invalidate_edge_inputs();
 
         if (enable_slippage_probes) {
             sample_slippage_probes(ts, cex_price);
         }
         if (log_actions) {
-            action_logger.log_tick(ts, cex_price, ps_before, oracle_before,
-                                   xcp_profit_before, vp_before, pool);
-        }
-        return true;
-    };
-
-    auto apply_dynamic_idle_tick =
-        [&](std::size_t, uint64_t ts, T cex_price) -> bool {
-        const T ps_before = pool.cached_price_scale;
-        const T oracle_before = pool.cached_price_oracle;
-        const T xcp_profit_before = pool.xcp_profit;
-        const T vp_before = action_logger.enabled() ? pool.get_vp_boosted() : T(0);
-
-        ++m.dynamic_keeper_attempts;
-        const bool scalar_snap_ok =
-            pool.policy.kind == pools::twocrypto_fx::PolicyKind::None;
-        bool committed = false;
-        if (scalar_snap_ok) {
-            PoolTransactionSnapshot<Pool> transaction_snapshot(pool);
-            try {
-                pool.tick();
-                committed = pool.cached_price_scale != ps_before;
-            } catch (...) {
-                committed = false;
-            }
-            if (!committed) {
-                transaction_snapshot.restore(pool);
-            }
-        } else {
-            committed = try_commit_gated_tick(pool);
-        }
-        if (!committed) {
-            return false;
-        }
-
-        const T ps_after = pool.cached_price_scale;
-        if (differs_rel(ps_after, ps_before)) {
-            ++m.n_rebalances;
-        }
-        ++m.dynamic_keeper_commits;
-        ++m.keeper_successful_submissions;
-        const double ps_before_d = static_cast<double>(ps_before);
-        const double step_bps = ps_before_d > 0.0
-            ? std::abs(static_cast<double>(ps_after) / ps_before_d - 1.0) * 10000.0
-            : 0.0;
-        m.dynamic_keeper_step_bps_sum += step_bps;
-        m.dynamic_keeper_step_bps_max = std::max(
-            m.dynamic_keeper_step_bps_max,
-            step_bps
-        );
-        invalidate_edge_inputs();
-
-        if (enable_slippage_probes) {
-            sample_slippage_probes(ts, cex_price);
-        }
-        if (action_logger.enabled()) {
-            action_logger.log_tick(ts, cex_price, ps_before, oracle_before,
-                                   xcp_profit_before, vp_before, pool);
-        }
-        return true;
-    };
-
-    auto apply_gap_keeper_tick =
-        [&](std::size_t, uint64_t ts, T cex_price,
-            bool heartbeat_due, bool policy_owned) -> bool {
-        const T ps_before = pool.cached_price_scale;
-        const T oracle_before = pool.cached_price_oracle;
-        const T xcp_profit_before = pool.xcp_profit;
-        const T vp_before = action_logger.enabled() ? pool.get_vp_boosted() : T(0);
-
-        ++m.dynamic_keeper_gap_checks;
-        bool policy_submission = false;
-        bool policy_attempt_threw = false;
-#if !defined(ARB_POLICY_KEEPER_NO_PREFILTER_REFERENCE)
-        if (policy_owned) {
-            const auto preflight = pool.policy_keeper_preflight();
-            ++m.policy_keeper_checks;
-            if (!preflight.clock_ready) {
-                ++m.policy_keeper_reject_clock;
-            } else if (!preflight.trigger_evaluated ||
-                       !preflight.decision.available ||
-                       !(preflight.decision.raw_target > T(0))) {
-                ++m.policy_keeper_reject_target_unavailable;
-            } else {
-                const auto& decision = preflight.decision;
-                if (
-                    decision.trigger_value_is_bps &&
-                    decision.raw_gap_bps >= decision.threshold_bps
-                ) {
-                    ++m.policy_keeper_raw_gap_candidates;
-                }
-                if (!decision.ready) {
-                    if (decision.shaped_target == ps_before) {
-                        ++m.policy_keeper_reject_deadband;
-                    } else if (decision.predicted_price_scale == ps_before) {
-                        ++m.policy_keeper_reject_step_min;
-                    } else {
-                        ++m.policy_keeper_reject_below_threshold;
-                    }
-                } else if (!preflight.block_ready) {
-                    ++m.policy_keeper_reject_block;
-                } else if (!preflight.outer_profit_ready) {
-                    ++m.policy_keeper_reject_outer_profit;
-                } else {
-                    policy_submission = true;
-                    ++m.policy_keeper_submissions;
-                }
-            }
-            if (!preflight.ready) {
-                return false;
-            }
-        }
-#endif
-        typename Pool::KeeperGapProbe probe{};
-        PoolTransactionSnapshot<Pool> transaction_snapshot(pool);
-        try {
-            probe = policy_owned
-                ? pool.tick_policy_keeper()
-                : pool.tick_keeper_gap(
-                    cfg.dustswap_dynamic_gap_bps,
-                    heartbeat_due
-                );
-        } catch (...) {
-            transaction_snapshot.restore(pool);
-            policy_attempt_threw = policy_owned;
-        }
-        if (policy_attempt_threw) {
-            ++m.policy_keeper_exceptions;
-            return false;
-        }
-        if (!probe.fired) {
-            transaction_snapshot.restore(pool);
-            if (policy_submission) {
-                ++m.policy_keeper_unexpected_step_rejects;
-            }
-            return false;
-        }
-
-        ++m.dynamic_keeper_gap_fires;
-        ++m.dynamic_keeper_attempts;
-        if (probe.gap_fired) {
-            ++m.dynamic_keeper_gap_threshold_fires;
-        }
-        if (probe.heartbeat_fired) {
-            ++m.dynamic_keeper_heartbeat_fires;
-        }
-
-        if (pool.cached_price_scale == ps_before) {
-            transaction_snapshot.restore(pool);
-            if (policy_submission) {
-                if (probe.prospective_lp_evaluated && !probe.lp_gate_passed) {
-                    ++m.policy_keeper_final_lp_rejects;
-                    if (probe.lp_below_precision) {
-                        ++m.policy_keeper_lp_below_precision;
-                    }
-                    if (probe.lp_below_floor) {
-                        ++m.policy_keeper_lp_below_floor;
-                    }
-                    if (probe.donation_burn_cap_exhausted) {
-                        ++m.policy_keeper_lp_burn_cap_exhausted;
-                    }
-                } else {
-                    ++m.policy_keeper_unexpected_step_rejects;
-                }
-            }
-            return false;
-        }
-
-        const T ps_after = pool.cached_price_scale;
-        if (differs_rel(ps_after, ps_before)) {
-            ++m.n_rebalances;
-        }
-        ++m.dynamic_keeper_commits;
-        ++m.keeper_successful_submissions;
-        if (policy_submission) {
-            ++m.policy_keeper_submitted_commits;
-            if (ps_after > ps_before) {
-                ++m.policy_keeper_direction_up;
-            } else if (ps_after < ps_before) {
-                ++m.policy_keeper_direction_down;
-            }
-        }
-        const double ps_before_d = static_cast<double>(ps_before);
-        const double step_bps = ps_before_d > 0.0
-            ? std::abs(static_cast<double>(ps_after) / ps_before_d - 1.0) * 10000.0
-            : 0.0;
-        m.dynamic_keeper_step_bps_sum += step_bps;
-        m.dynamic_keeper_step_bps_max = std::max(
-            m.dynamic_keeper_step_bps_max,
-            step_bps
-        );
-        invalidate_edge_inputs();
-
-        if (enable_slippage_probes) {
-            sample_slippage_probes(ts, cex_price);
-        }
-        if (action_logger.enabled()) {
             action_logger.log_tick(ts, cex_price, ps_before, oracle_before,
                                    xcp_profit_before, vp_before, pool);
         }
@@ -599,28 +374,15 @@ EventLoopResult<T> run_event_loop_impl(
     }
     const bool yb_on = yb_2l_on || yb_reference_on;
     const bool donation_on = dcfg.enabled && !yb_on;
-    const bool dynamic_keeper_on = cfg.dustswap_dynamic_freq_s > 0;
-    const bool gap_keeper_on = cfg.dustswap_dynamic_gap_enabled;
-    const bool policy_keeper_on = cfg.policy_keeper_enabled;
-    const bool gap_rate_limit_on =
-        gap_keeper_on && cfg.dustswap_commit_clock_freq_s > 0;
-    const bool commit_clock_keeper_on =
-        !gap_keeper_on && cfg.dustswap_commit_clock_freq_s > 0;
     const bool have_chainlink = !events.p_chainlink.empty();
-    uint64_t last_dynamic_attempt_ts = 0;
-    bool have_dynamic_attempt = false;
-    uint64_t last_gap_check_ts = 0;
-    bool have_gap_check = false;
-    uint64_t last_price_scale_change_ts = pool.last_timestamp;
 
     // Skips are gated by the policy's conservative fee floor and stop before
     // every scheduled mutation; fee-quote cacheability is not a precondition.
     const bool exact_skip_on =
+        GridCore &&
         cfg.event_cursor == EventCursor::ExactSkip &&
         !EnableYb && !detailed_on && !action_logger.enabled() &&
-        !enable_slippage_probes && !user_swap_on && !cfg.dustswap_random &&
-        !dynamic_keeper_on && !gap_keeper_on && !policy_keeper_on &&
-        !commit_clock_keeper_on &&
+        !enable_slippage_probes && !user_swap_on &&
         pool.mid_fee == pool.out_fee &&
         events.price_blocks.ready_for(n_events);
 
@@ -686,7 +448,7 @@ EventLoopResult<T> run_event_loop_impl(
         if (icfg.enabled()) {
             include_due(due_after(
                 pool.last_timestamp,
-                icfg.interval_after(pool.last_timestamp)
+                icfg.freq_s
             ));
         }
         return next;
@@ -746,18 +508,6 @@ EventLoopResult<T> run_event_loop_impl(
         return finish_jump(n_events);
     };
 
-    if constexpr (EnableYb) {
-        if (yb_on) {
-            m.yb_2l_start_collateral =
-                yb_2l_on ? yb->actor.state().collateral
-                         : yb->reference_market.state().collateral;
-            m.yb_2l_start_debt = yb_2l_on
-                ? yb->actor.state().debt : yb->reference_market.state().debt;
-            m.yb_2l_start_stable_balance =
-                yb_2l_on ? yb->actor.state().stable_balance
-                         : yb->reference_market.state().stable_balance;
-        }
-    }
     const auto run_yb_2l_once = [&] (
         uint64_t ev_ts,
         const T& cex_price,
@@ -767,141 +517,27 @@ EventLoopResult<T> run_event_loop_impl(
         const auto& yb_2l_costs = yb->actor_costs;
         if (!yb_2l_on) return;
         if constexpr (std::is_floating_point_v<T>) {
-            const auto record_donation_reject = [&] (
-                Yb2LDonationReject reject
-            ) {
-                switch (reject) {
-                case Yb2LDonationReject::Cap:
-                    ++m.yb_2l_donation_reject_cap;
-                    break;
-                case Yb2LDonationReject::MinMint:
-                    ++m.yb_2l_donation_reject_min_mint;
-                    break;
-                case Yb2LDonationReject::NothingMinted:
-                    ++m.yb_2l_donation_reject_nothing_minted;
-                    break;
-                case Yb2LDonationReject::TweakThrow:
-                    ++m.yb_2l_donation_reject_tweak_throw;
-                    break;
-                case Yb2LDonationReject::None:
-                case Yb2LDonationReject::Count:
-                    break;
-                }
-            };
-            ++m.yb_2l_attempts;
             auto actor_result = yb_2l_actor.try_fire(
                 pool, cex_price, ev_ts, yb_2l_costs
             );
-            if (!actor_result.fired) {
-                m.yb_2l_fill_leg_aborts +=
-                    actor_result.fill_leg_aborted ? 1 : 0;
-                m.yb_2l_postadd_aborts +=
-                    actor_result.postadd_aborted ? 1 : 0;
-                record_donation_reject(actor_result.donation_reject);
-                switch (actor_result.abstain) {
-                case Yb2LAbstainReason::NoBandEdge:
-                    ++m.yb_2l_abstain_no_band;
-                    break;
-                case Yb2LAbstainReason::MinFill:
-                    ++m.yb_2l_abstain_min_fill;
-                    break;
-                case Yb2LAbstainReason::InvalidState:
-                    ++m.yb_2l_abstain_invalid_state;
-                    break;
-                case Yb2LAbstainReason::NegativeDiscriminant:
-                    ++m.yb_2l_abstain_negative_discriminant;
-                    break;
-                case Yb2LAbstainReason::DebtFloor:
-                    ++m.yb_2l_abstain_debt_floor;
-                    break;
-                case Yb2LAbstainReason::StableCash:
-                    ++m.yb_2l_abstain_stable_cash;
-                    break;
-                case Yb2LAbstainReason::UnsafeDebt:
-                    ++m.yb_2l_abstain_unsafe_debt;
-                    break;
-                case Yb2LAbstainReason::BadFinalState:
-                    ++m.yb_2l_abstain_bad_final_state;
-                    break;
-                case Yb2LAbstainReason::None:
-                case Yb2LAbstainReason::Count:
-                    break;
-                }
-                return;
-            }
+            if (!actor_result.fired) return;
 
             ++m.yb_2l_fires;
-            ++m.yb_2l_fires_by_direction[actor_result.direction];
-            m.yb_2l_input_by_direction[actor_result.direction] +=
-                actor_result.input;
-            m.yb_2l_output_by_direction[actor_result.direction] +=
-                actor_result.output;
-            m.yb_2l_profit_by_direction[actor_result.direction] +=
-                actor_result.net_profit;
-            if (actor_result.levamm_price_after > T(0) &&
-                actor_result.target_price > T(0)) {
-                const double target_error = std::fabs(std::log(
-                    static_cast<double>(
-                        actor_result.levamm_price_after /
-                        actor_result.target_price
-                    )
-                ));
-                m.yb_2l_target_log_error_sum += target_error;
-                m.yb_2l_target_log_error_max = std::max(
-                    m.yb_2l_target_log_error_max, target_error
-                );
-            }
-            if (m.yb_2l_first_fire_ts == 0) {
-                m.yb_2l_first_fire_ts = ev_ts;
-            }
-            m.yb_2l_last_fire_ts = ev_ts;
             did_any_trade = true;
-            m.yb_2l_fill_adds += actor_result.fill_adds;
-            m.yb_2l_fill_removes += actor_result.fill_removes;
-            m.yb_2l_fill_add_ps_moves +=
-                actor_result.fill_add_price_scale_moves;
             m.n_rebalances += actor_result.fill_add_price_scale_moves;
             if (actor_result.fill_adds > 0 ||
                 actor_result.fill_removes > 0) {
                 invalidate_edge_inputs();
             }
 
-            if (!actor_result.donation_committed) {
-                ++m.yb_2l_fires_without_donation;
-                record_donation_reject(actor_result.donation_reject);
-                return;
-            }
+            if (!actor_result.donation_committed) return;
 
-            ++m.yb_2l_donations;
-            m.yb_2l_donation_coin0 += actor_result.donation;
             ++m.donations;
             m.donation_amounts_total[0] += actor_result.donation;
             m.donation_coin0_total += actor_result.donation;
             if (actor_result.donation_price_scale_moved) {
-                ++m.yb_2l_donation_ps_moves;
                 ++m.n_rebalances;
             }
-            if (actor_result.virtual_price_before_donation > T(0) &&
-                actor_result.virtual_price_after_donation > T(0)) {
-                m.yb_2l_full_vp_log_growth += std::log(
-                    static_cast<double>(
-                        actor_result.virtual_price_after_donation /
-                        actor_result.virtual_price_before_donation
-                    )
-                );
-            }
-            if (actor_result.xcp_profit_before_donation > T(0) &&
-                actor_result.xcp_profit_after_donation > T(0)) {
-                m.yb_2l_xcp_log_growth += std::log(
-                    static_cast<double>(
-                        actor_result.xcp_profit_after_donation /
-                        actor_result.xcp_profit_before_donation
-                    )
-                );
-            }
-            m.yb_2l_burn_backfill_log_growth =
-                m.yb_2l_full_vp_log_growth -
-                m.yb_2l_xcp_log_growth;
             action_logger.log_yb_donation(
                 ev_ts, actor_result.donation,
                 actor_result.price_scale_after_donation, dcfg.apy
@@ -918,7 +554,6 @@ EventLoopResult<T> run_event_loop_impl(
         const auto& yb_reference_costs = yb->reference_costs;
         if (!yb_reference_on) return;
         if constexpr (std::is_floating_point_v<T>) {
-            ++m.yb_2l_attempts;
             const T price_scale_before = pool.cached_price_scale;
             auto route = yb_reference_market.execute_best(
                 pool, cex_price, ev_ts, yb_reference_costs, true
@@ -926,60 +561,26 @@ EventLoopResult<T> run_event_loop_impl(
             if (!route.committed) return;
 
             ++m.yb_2l_fires;
-            ++m.yb_2l_fires_by_direction[route.direction];
-            m.yb_2l_input_by_direction[route.direction] += route.input;
-            m.yb_2l_output_by_direction[route.direction] += route.output;
-            m.yb_2l_profit_by_direction[route.direction] += route.profit_coin0;
-            if (m.yb_2l_first_fire_ts == 0) m.yb_2l_first_fire_ts = ev_ts;
-            m.yb_2l_last_fire_ts = ev_ts;
 
-            m.yb_2l_fill_adds += route.emitted_add ? 1 : 0;
-            m.yb_2l_fill_removes += route.emitted_remove ? 1 : 0;
             const T before_donation = route.direction == 1
                 ? route.price_scale_after_add : price_scale_before;
             if (route.emitted_add &&
                 route.price_scale_after_add != price_scale_before) {
-                ++m.yb_2l_fill_add_ps_moves;
                 ++m.n_rebalances;
             }
             if (route.emitted_donation &&
                 route.price_scale_after_donation != before_donation) {
-                ++m.yb_2l_donation_ps_moves;
                 ++m.n_rebalances;
             }
 
             if (route.emitted_donation) {
-                ++m.yb_2l_donations;
-                m.yb_2l_donation_coin0 += route.donation;
                 ++m.donations;
                 m.donation_amounts_total[0] += route.donation;
                 m.donation_coin0_total += route.donation;
-                if (route.virtual_price_before_donation > T(0) &&
-                    route.virtual_price_after_donation > T(0)) {
-                    m.yb_2l_full_vp_log_growth += std::log(
-                        static_cast<double>(
-                            route.virtual_price_after_donation /
-                            route.virtual_price_before_donation
-                        )
-                    );
-                }
-                if (route.xcp_profit_before_donation > T(0) &&
-                    route.xcp_profit_after_donation > T(0)) {
-                    m.yb_2l_xcp_log_growth += std::log(
-                        static_cast<double>(
-                            route.xcp_profit_after_donation /
-                            route.xcp_profit_before_donation
-                        )
-                    );
-                }
-                m.yb_2l_burn_backfill_log_growth =
-                    m.yb_2l_full_vp_log_growth - m.yb_2l_xcp_log_growth;
                 action_logger.log_yb_donation(
                     ev_ts, route.donation,
                     route.price_scale_after_donation, dcfg.apy
                 );
-            } else {
-                ++m.yb_2l_fires_without_donation;
             }
             did_any_trade = true;
             invalidate_edge_inputs();
@@ -1003,9 +604,6 @@ EventLoopResult<T> run_event_loop_impl(
 
         if (hourly_due && initialized) {
             yb->apy_gm.sample(ts, growth_now);
-            yb->apy_gm_90d.sample(ts, growth_now);
-            yb->apy_gm_30d.sample(ts, growth_now);
-            yb->growth_steps.sample(ts, growth_now);
         }
         if (!detailed_row_logged) return;
 
@@ -1037,13 +635,9 @@ EventLoopResult<T> run_event_loop_impl(
         }
     }
 
-#if defined(ARB_EDGE_GATE_DIAGNOSTICS)
-    m.events_total = n_events - first_event_idx;
-#endif
     size_t ev_idx = first_event_idx;
     while (ev_idx < n_events) {
         const uint64_t ev_ts = events.ts[ev_idx];
-        const T price_scale_at_event_start = pool.cached_price_scale;
 
         pool.set_block_timestamp(ev_ts);
         const T cex_price = static_cast<T>(events.p_cex[ev_idx]);
@@ -1055,9 +649,6 @@ EventLoopResult<T> run_event_loop_impl(
         }
 
         if (!(cex_price > T(0))) {
-            if (pool.cached_price_scale != price_scale_at_event_start) {
-                last_price_scale_change_ts = ev_ts;
-            }
             sample_net_apy(ev_ts);
             ev_idx = next_event_index(ev_idx + 1);
             continue;
@@ -1074,89 +665,10 @@ EventLoopResult<T> run_event_loop_impl(
         if (user_swap_on && ucfg.next_ts != 0 && ev_ts >= ucfg.next_ts) {
             apply_user_swap(ev_idx, ev_ts, cex_price);
         }
-        if (pool.cached_price_scale != price_scale_at_event_start) {
-            last_price_scale_change_ts = ev_ts;
-        }
         bool did_idle_tick = false;
         if (!did_any_trade && icfg.due(pool.last_timestamp, ev_ts)) {
             did_idle_tick = apply_idle_tick(ev_idx, ev_ts, cex_price);
             did_any_trade = did_idle_tick;
-        } else if (
-            !did_any_trade && dynamic_keeper_on &&
-            ev_ts >= pool.last_timestamp &&
-            ev_ts - pool.last_timestamp >= cfg.dustswap_dynamic_freq_s &&
-            (!have_dynamic_attempt ||
-             (ev_ts >= last_dynamic_attempt_ts &&
-              ev_ts - last_dynamic_attempt_ts >= DYNAMIC_KEEPER_RETRY_S))
-        ) {
-            have_dynamic_attempt = true;
-            last_dynamic_attempt_ts = ev_ts;
-            did_idle_tick = apply_dynamic_idle_tick(ev_idx, ev_ts, cex_price);
-            did_any_trade = did_idle_tick;
-        } else if (
-            !did_any_trade && policy_keeper_on &&
-            (!have_gap_check ||
-             (ev_ts >= last_gap_check_ts &&
-              ev_ts - last_gap_check_ts >= POLICY_KEEPER_RETRY_S))
-        ) {
-            have_gap_check = true;
-            last_gap_check_ts = ev_ts;
-            did_idle_tick = apply_gap_keeper_tick(
-                ev_idx,
-                ev_ts,
-                cex_price,
-                false,
-                true
-            );
-            if (did_idle_tick) {
-                last_price_scale_change_ts = ev_ts;
-                did_any_trade = true;
-            }
-        } else if (
-            !did_any_trade && gap_keeper_on &&
-            (!gap_rate_limit_on ||
-             (ev_ts >= last_price_scale_change_ts &&
-              ev_ts - last_price_scale_change_ts >=
-                  cfg.dustswap_commit_clock_freq_s)) &&
-            (!have_gap_check ||
-             (ev_ts >= last_gap_check_ts &&
-              ev_ts - last_gap_check_ts >= DYNAMIC_KEEPER_RETRY_S))
-        ) {
-            have_gap_check = true;
-            last_gap_check_ts = ev_ts;
-            const bool heartbeat_due =
-                cfg.dustswap_dynamic_heartbeat_s > 0 &&
-                ev_ts >= last_price_scale_change_ts &&
-                ev_ts - last_price_scale_change_ts >=
-                    cfg.dustswap_dynamic_heartbeat_s;
-            did_idle_tick = apply_gap_keeper_tick(
-                ev_idx,
-                ev_ts,
-                cex_price,
-                heartbeat_due,
-                false
-            );
-            if (did_idle_tick) {
-                last_price_scale_change_ts = ev_ts;
-                did_any_trade = true;
-            }
-        } else if (
-            !did_any_trade && commit_clock_keeper_on &&
-            ev_ts >= last_price_scale_change_ts &&
-            ev_ts - last_price_scale_change_ts >=
-                cfg.dustswap_commit_clock_freq_s &&
-            (!have_dynamic_attempt ||
-             (ev_ts >= last_dynamic_attempt_ts &&
-              ev_ts - last_dynamic_attempt_ts >= DYNAMIC_KEEPER_RETRY_S))
-        ) {
-            have_dynamic_attempt = true;
-            last_dynamic_attempt_ts = ev_ts;
-            ++m.dynamic_keeper_commit_clock_fires;
-            did_idle_tick = apply_dynamic_idle_tick(ev_idx, ev_ts, cex_price);
-            if (did_idle_tick) {
-                last_price_scale_change_ts = ev_ts;
-                did_any_trade = true;
-            }
         }
         bool detailed_row_logged = false;
         if (detailed_on) {
@@ -1218,40 +730,6 @@ EventLoopResult<T> run_event_loop_impl(
             }
         }
 
-        if (yb_2l_on) {
-            m.yb_2l_end_collateral = yb->actor.state().collateral;
-            m.yb_2l_end_debt_projected =
-                yb->actor.projected_debt(result.t_end);
-            m.yb_2l_end_stable_balance = yb->actor.state().stable_balance;
-            const auto interest =
-                yb->actor.projected_interest_summary(result.t_end);
-            m.yb_2l_end_pending_interest = interest.pending_interest;
-            m.yb_2l_end_pending_donation = interest.pending_donation;
-            m.yb_2l_interest_accrued = interest.accrued;
-            m.yb_2l_interest_donated = interest.donated;
-            m.yb_2l_interest_conservation_residual =
-                interest.conservation_residual;
-            m.yb_2l_conservation_gap_end = yb->actor.shadow_gap_last();
-            m.yb_2l_conservation_gap_max = yb->actor.shadow_gap_max();
-            m.yb_2l_conservation_checks = yb->actor.shadow_checks();
-            m.yb_2l_conservation_violations = yb->actor.shadow_violations();
-            m.yb_2l_conservation_abstains = yb->actor.shadow_abstains();
-        } else if (yb_reference_on) {
-            m.yb_2l_end_collateral = yb->reference_market.state().collateral;
-            m.yb_2l_end_debt_projected =
-                yb->reference_market.projected_debt(result.t_end);
-            m.yb_2l_end_stable_balance =
-                yb->reference_market.state().stable_balance;
-            const auto interest =
-                yb->reference_market.projected_interest_summary(result.t_end);
-            m.yb_2l_end_pending_interest = interest.pending_interest;
-            m.yb_2l_end_pending_donation = interest.pending_donation;
-            m.yb_2l_interest_accrued = interest.accrued;
-            m.yb_2l_interest_donated = interest.donated;
-            m.yb_2l_interest_conservation_residual =
-                interest.conservation_residual;
-        }
-        result.yb_releverage_enabled = yb_on;
         result.yb_releverage_fee = yb_2l_on
             ? yb->actor.state().fee
             : (yb_reference_on ? yb->reference_market.state().fee : T(0));
@@ -1266,20 +744,6 @@ EventLoopResult<T> run_event_loop_impl(
         result.yb_releverage_gm_floored_windows =
             static_cast<uint64_t>(yb->apy_gm.n_floored_windows);
         result.yb_releverage_gm_floor_share = yb->apy_gm.floor_share();
-
-        result.yb_gm_90d_worst_window = yb->apy_gm_90d.worst_window();
-        result.yb_gm_90d_median_window = yb->apy_gm_90d.median_window();
-        result.yb_gm_90d_floor_share = yb->apy_gm_90d.floor_share();
-        result.yb_gm_30d_cvar20 = yb->apy_gm_30d.cvar_low_window(0.20);
-        result.yb_gm_30d_floor_share = yb->apy_gm_30d.floor_share();
-        result.yb_growth_step_share_1d = yb->growth_steps.block_share(1, 10);
-        result.yb_growth_step_share_3d = yb->growth_steps.block_share(3, 10);
-        result.yb_growth_step_share_7d = yb->growth_steps.block_share(7, 5);
-        result.yb_growth_top10_step_share = std::max({
-            result.yb_growth_step_share_1d,
-            result.yb_growth_step_share_3d,
-            result.yb_growth_step_share_7d,
-        });
     }
     return result;
 }

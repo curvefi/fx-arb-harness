@@ -21,21 +21,32 @@ evaluator process is required for another session.
   "evaluator_identity": {
     "harness_version": "1.0.0",
     "pool_version": "1.0.0",
-    "policy_id": "native_passthrough",
-    "policy_abi": "twocrypto_policy_v1",
+    "policy_id": "none",
+    "policy_abi": "none",
     "policy_parameter_count": 0,
     "numeric_mode": "longdouble",
     "real_type": "long double",
     "compiler": "clang",
     "build_target": "arb_evaluator_ld",
     "ipo_enabled": false,
-    "native_tuning": false,
-    "pgo_mode": "off"
+    "native_tuning": false
   },
   "capabilities": ["summary", "full_trace", "atomic_sidecars", "registered_grid_ranges"],
   "yb_modes": ["off", "active_2l", "reference_2l"],
   "metric_schema": "twocrypto-summary-v1",
-  "metric_fields": ["vp", "apy", "trades", "yb_enabled", "yb_apy"],
+  "metric_fields": [
+    "vp", "lp_xcp_profit", "apy", "apy_net", "apy_net_gm",
+    "apy_net_robust_90d", "avg_rel_price_diff", "max_rel_price_diff",
+    "max_7d_rel_price_diff", "final_rel_price_diff", "detach_energy_ungated",
+    "avg_imbalance", "tw_avg_pool_fee", "min_pool_fee", "max_pool_fee",
+    "tw_real_slippage_1pct", "tw_real_slippage_5pct",
+    "tw_real_slippage_10pct", "trades", "n_rebalances",
+    "arb_guarded_loss_coin0", "yb_apy", "yb_apy_gm", "yb_final_growth",
+    "yb_fee", "yb_releverage_trades", "yb_gm_windows",
+    "yb_gm_floored_windows", "yb_gm_floor_share", "elapsed_ms",
+    "total_notional_coin0", "lp_fee_coin0", "arb_pnl_coin0",
+    "fee_capture_rate", "donations", "donation_coin0_total", "tvl_growth"
+  ],
   "limits": {"max_frame_bytes": 4194304,
              "max_candidates_per_batch": 4096,
              "max_metric_values_per_batch": 131072,
@@ -77,12 +88,11 @@ They are loaded once at admission.
 }
 ```
 
-The remaining optional session controls are `dustswap_random`,
-`dustswap_dynamic_freq_s`, `dustswap_dynamic_gap_enabled`,
-`dustswap_dynamic_gap_bps`, `dustswap_dynamic_heartbeat_s`,
-`dustswap_commit_clock_freq_s`, `policy_keeper_enabled`, `allow_hybrid_keeper`,
-`user_swap_freq_s`, `user_swap_size_frac`, `user_swap_thresh`, and
-`enable_slippage_probes`. Slippage probes are off unless explicitly enabled.
+The remaining optional session controls are `user_swap_freq_s`,
+`user_swap_size_frac`, `user_swap_thresh`, `event_cursor`, `metric_profile`,
+and `enable_slippage_probes`. Slippage probes are off unless explicitly enabled.
+`event_cursor=exact_skip` requires `metric_profile=grid_core`; scalar supports
+both metric profiles.
 `yb_mode` is `off`, `active_2l`, or `reference_2l`.
 The enabled modes use `yb_releverage_fee` and `yb_cash_multiplier`, and evaluate
 after every causal event. Summary valuation is hourly for GM accounting and once

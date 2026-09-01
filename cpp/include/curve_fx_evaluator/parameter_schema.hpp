@@ -16,7 +16,7 @@ struct StaticParameterDescriptor {
     std::string_view choices_json{};
 };
 
-inline constexpr std::array<StaticParameterDescriptor, 62> STATIC_PARAMETERS{{
+inline constexpr std::array<StaticParameterDescriptor, 54> STATIC_PARAMETERS{{
     {"pool.tag", "pool_overrides.tag", "string", "identifier", "utf8", "candidate", ""},
     {"pool.initial_liquidity", "pool_overrides.pool.initial_liquidity", "real_pair", "token_amount", "binary64_from_wad_1e18", "candidate", ""},
     {"pool.A", "pool_overrides.pool.A", "real", "pool_raw", "binary64", "candidate", ""},
@@ -57,14 +57,6 @@ inline constexpr std::array<StaticParameterDescriptor, 62> STATIC_PARAMETERS{{
     {"run.min_swap", "open_session.min_swap", "real", "ratio", "binary64", "session", "1e-6"},
     {"run.max_swap", "open_session.max_swap", "real", "ratio", "binary64", "session", "1.0"},
     {"run.dustswap_freq_s", "open_session.dustswap_freq_s", "integer", "seconds", "uint64", "session", "3600"},
-    {"run.dustswap_random", "open_session.dustswap_random", "boolean", "flag", "json_boolean", "session", "false"},
-    {"run.dustswap_dynamic_freq_s", "open_session.dustswap_dynamic_freq_s", "integer", "seconds", "uint64", "session", "0"},
-    {"run.dustswap_dynamic_gap_enabled", "open_session.dustswap_dynamic_gap_enabled", "boolean", "flag", "json_boolean", "session", "false"},
-    {"run.dustswap_dynamic_gap_bps", "open_session.dustswap_dynamic_gap_bps", "real", "basis_points", "binary64", "session", "0.0"},
-    {"run.dustswap_dynamic_heartbeat_s", "open_session.dustswap_dynamic_heartbeat_s", "integer", "seconds", "uint64", "session", "0"},
-    {"run.dustswap_commit_clock_freq_s", "open_session.dustswap_commit_clock_freq_s", "integer", "seconds", "uint64", "session", "0"},
-    {"run.policy_keeper_enabled", "open_session.policy_keeper_enabled", "boolean", "flag", "json_boolean", "session", "false"},
-    {"run.allow_hybrid_keeper", "open_session.allow_hybrid_keeper", "boolean", "flag", "json_boolean", "session", "false"},
     {"run.user_swap_freq_s", "open_session.user_swap_freq_s", "integer", "seconds", "uint64", "session", "0"},
     {"run.user_swap_size_frac", "open_session.user_swap_size_frac", "real", "ratio", "binary64", "session", "0.01"},
     {"run.user_swap_thresh", "open_session.user_swap_thresh", "real", "ratio", "binary64", "session", "0.05"},

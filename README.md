@@ -21,7 +21,7 @@ cmake --build build --parallel
 cmake --install build --prefix "$PWD/_install"
 ```
 
-Default compiled-passthrough build (no external policy header):
+Default native-policy build (no external policy header):
 
 ```sh
 cd /path/to/curve-fx-arb-harness
@@ -32,9 +32,8 @@ cmake --build build/native \
 ```
 
 This produces the binary64-arithmetic `arb_evaluator_f64` and the
-`long double`-arithmetic `arb_evaluator_ld`. Both use the compiled
-`native_passthrough` policy with `policy_params=[]`; its zero hooks delegate fee
-and price-scale decisions to native pool mechanics. The typed evaluator
+`long double`-arithmetic `arb_evaluator_ld`. Both use the pool's native
+`PolicyKind::None` path with `policy_params=[]`. The typed evaluator
 libraries are internal build targets, not stable C++ ABIs; the executable
 protocol is the supported integration boundary.
 
@@ -54,7 +53,7 @@ cmake --build build/compiled \
   --target arb_evaluator_f64 arb_evaluator_ld --parallel
 ```
 
-Record the policy ID, ABI, pool revision, harness revision, compiler/build mode, and binary path in the optimizer run record. Inspect both the protocol identity and the separate executable-bound build record before use:
+Before use, inspect the executable's protocol identity and describe output. The optimizer run record stores the configured evaluator path and the validated policy ID, ABI, and parameter-count contract; it does not replace this executable inspection:
 
 ```sh
 /path/to/curve-fx-arb-harness/build/compiled/arb_evaluator_ld --identity-json
@@ -100,7 +99,7 @@ The evaluator defaults to one worker per process so an orchestrator can allocate
 
 ## Protocol and artifact contract
 
-Every frame is one UTF-8 JSON object terminated by a newline. The lifecycle is `hello` -> `open_session`/`session_ready` -> optional `register_grid`/`grid_ready` -> one or more `evaluate_batch`/`batch_result` exchanges -> `close_session` and `shutdown`. All real-valued request inputs materialize once as finite IEEE-754 binary64 values, then widen to the evaluator arithmetic type when needed. One session admits exactly one scenario. `open_session` supplies `template_path`, `scenario_id`, `market_path`, and optional `chainlink_path`; `yb_mode` is the canonical YB selector. `event_cursor` selects the permanent `scalar` reference or the guarded `exact_skip` cursor, which falls back to scalar whenever its exactness preconditions are absent. `metric_profile` selects `full_summary` or the exact no-YB `grid_core` field set; the latter rejects unsupported fields instead of returning approximations. GridCore reports `apy_net_robust_90d`, the APY whose log-growth rate gives equal weight to the mean and worst-5% mean of daily-sampled trailing-90-day net log returns. Negative weak regimes remain finite and rankable. The full profile retains legacy `apy_net_gm`. `metric_projection` (`summary` or `full`) controls returned raw metric detail; `observation.kind` (`summary` or `full_trace`) controls trace capture.
+Every frame is one UTF-8 JSON object terminated by a newline. The lifecycle is `hello` -> `open_session`/`session_ready` -> optional `register_grid`/`grid_ready` -> one or more `evaluate_batch`/`batch_result` exchanges -> `close_session` and `shutdown`. All real-valued request inputs materialize once as finite IEEE-754 binary64 values, then widen to the evaluator arithmetic type when needed. One session admits exactly one scenario. `open_session` supplies `template_path`, `scenario_id`, `market_path`, and optional `chainlink_path`; `yb_mode` is the canonical YB selector. `event_cursor=scalar` is the permanent reference. `exact_skip` is available only with `metric_profile=grid_core` and falls back to scalar whenever its remaining exactness preconditions are absent. `metric_profile` selects `full_summary` or the exact no-YB `grid_core` field set; the latter rejects unsupported fields instead of returning approximations. GridCore reports `apy_net_robust_90d`, the APY whose log-growth rate gives equal weight to the mean and worst-5% mean of daily-sampled trailing-90-day net log returns. Negative weak regimes remain finite and rankable. The full profile retains legacy `apy_net_gm`. `metric_projection` (`summary` or `full`) controls returned raw metric detail; `observation.kind` (`summary` or `full_trace`) controls trace capture.
 
 Full observation writes an atomic trace sidecar and, when requested, an action sidecar. The response returns `trace_path`, optional `actions_path`, and `effective_inputs`, a finite numeric map of the resolved pool/run controls used to initialize the replay. The evaluator returns raw metrics; objective scoring, plotting, replay, and placement remain in the optimizer.
 
@@ -108,6 +107,6 @@ See [`protocol/protocol_spec.md`](protocol/protocol_spec.md) for frame schemas a
 
 ## Ownership, inputs, and private data
 
-The harness owns feed parsers, `EventSoA`, arbitrage/user flow, donations, the optional YieldBasis 2L model, keepers, metrics, summary/full traces, compiled-policy identity, and the evaluator executable. `yb_mode` selects `off`, established Observer2-equivalent `active_2l`, or contract-derived candidate `reference_2l`; `yb_releverage_fee` and `yb_cash_multiplier` configure enabled modes. Active and reference evaluate after every causal event. Summary-mode YB valuation runs hourly for GM accounting and once at the final endpoint for raw APY, while detailed replay additionally values logged rows. `reference_2l` executes represented VirtualPool/LevAMM/native route arithmetic but retains synthetic fresh-L2 state and source-free event timing; it is not proven contract parity, a full LT model, or a historical-onchain replay. Each reference decision scans 24 complete routes per direction and admits profit above 1 coin0, so the mode is intended for finalist diagnostics rather than large discovery grids. The pool owns the installed pool SDK; the optimizer owns TOML/run.json/results.npz, scoring, plotting, replay, and placement.
+The harness owns feed parsers, `EventSoA`, arbitrage/user flow, donations, the optional YieldBasis 2L model, fixed-cadence idle ticks, metrics, summary/full traces, compiled-policy identity, and the evaluator executable. `dustswap_freq_s` controls the fixed cadence, while `user_swap_freq_s` keeps synthetic user swaps independently configurable. `yb_mode` selects `off`, established Observer2-equivalent `active_2l`, or contract-derived candidate `reference_2l`; `yb_releverage_fee` and `yb_cash_multiplier` configure enabled modes. Active and reference evaluate after every causal event. Summary-mode YB valuation runs hourly for GM accounting and once at the final endpoint for raw APY, while detailed replay additionally values logged rows. `reference_2l` executes represented VirtualPool/LevAMM/native route arithmetic but retains synthetic fresh-L2 state and source-free event timing; it is not proven contract parity, a full LT model, or a historical-onchain replay. Each reference decision scans 24 complete routes per direction and admits profit above 1 coin0, so the mode is intended for finalist diagnostics rather than large discovery grids. The pool owns the installed pool SDK; the optimizer owns TOML/run.json/results.npz, scoring, plotting, replay, and placement.
 
 Inputs are ordinary paths supplied by the optimizer TOML. Acquisition of private or Git-LFS data is user-owned; do not assume redistribution or license rights. Do not copy historical binaries, generated runs, or obsolete checkout paths into a build.

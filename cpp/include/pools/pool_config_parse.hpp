@@ -257,7 +257,7 @@ twocrypto_fx::PolicyConfig<T> parse_policy_config(const boost::json::value& poli
     const auto& po = policy.as_object();
     reject_unknown_fields(
         po,
-        {"kind", "price_source", "price_source_ema_half_time", "params", "fee", "fee_bps"},
+        {"kind", "params"},
         "pool policy"
     );
     std::string kind = "none";
@@ -269,22 +269,6 @@ twocrypto_fx::PolicyConfig<T> parse_policy_config(const boost::json::value& poli
     }
     cfg.kind = twocrypto_fx::policy_kind_from_string(kind);
 
-    if (auto* source = po.if_contains("price_source")) {
-        if (!source->is_string()) {
-            throw std::runtime_error("pool policy price_source must be a string");
-        }
-        const std::string value(source->as_string().c_str());
-        if (!value.empty() && value != "cex" && value != "event_p_cex") {
-            throw std::runtime_error(
-                "external policy price_source is no longer supported"
-            );
-        }
-    }
-    if (po.if_contains("price_source_ema_half_time")) {
-        throw std::runtime_error(
-            "policy price_source_ema_half_time is no longer supported"
-        );
-    }
     if (auto* params = po.if_contains("params")) {
         if (!params->is_array()) {
             throw std::runtime_error("pool policy params must be an array of numbers");
@@ -304,28 +288,6 @@ twocrypto_fx::PolicyConfig<T> parse_policy_config(const boost::json::value& poli
             }
         }
         cfg.n_params = arr.size();
-    }
-    if (auto* fee = po.if_contains("fee")) {
-        if (!is_number_or_string(*fee)) {
-            throw std::runtime_error("pool policy fee must be a string or number");
-        }
-        if constexpr (std::is_same_v<T, twocrypto_fx::uint256>) {
-            cfg.fee = twocrypto_fx::uint256(policy_scalar_to_string(*fee));
-        } else {
-            cfg.fee = parse_fee_value<T>(*fee, "pool.policy.fee");
-        }
-    } else if (auto* fee_bps = po.if_contains("fee_bps")) {
-        if (!is_number_or_string(*fee_bps)) {
-            throw std::runtime_error("pool policy fee_bps must be a string or number");
-        }
-        if constexpr (std::is_same_v<T, twocrypto_fx::uint256>) {
-            cfg.fee = twocrypto_fx::uint256(policy_scalar_to_string(*fee_bps)) *
-                twocrypto_fx::PoolTraits<T>::FEE_PRECISION() / twocrypto_fx::uint256(10000);
-        } else {
-            // Unit conversion is part of input materialization, so perform it
-            // in binary64 before widening to the pool arithmetic type.
-            cfg.fee = static_cast<T>(parse_input_double(*fee_bps) / 10000.0);
-        }
     }
     return cfg;
 }

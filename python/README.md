@@ -11,7 +11,7 @@ uv pip install -e .
 ```python
 from curve_fx_harness_client import EvaluatorClient, CandidateSpec, MetricProjection
 
-with EvaluatorClient(executable_path="../build/arb_evaluator_ld") as client:
+with EvaluatorClient(executable_path="../build/native/arb_evaluator_ld") as client:
     client.open_session(
         session_id="btc-2024",
         template_path="templates/pool_btc.json",
@@ -24,7 +24,7 @@ with EvaluatorClient(executable_path="../build/arb_evaluator_ld") as client:
             CandidateSpec(
                 ordinal=0,
                 candidate_id="c0",
-                policy_params=[3600.0, 86400.0, 1.0, 10.0, 0.0],
+                policy_params=[],
             )
         ],
         metric_projection=MetricProjection.SUMMARY,

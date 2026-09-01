@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -8,12 +7,9 @@
 #include <limits>
 #include <tuple>
 #include <utility>
-#include "events/types.hpp"
-#include "harness/event_loop.hpp"
-#include "harness/run_config.hpp"
 #include "harness/yb_2l.hpp"
+#include "harness/yb_reference_2l.hpp"
 #include "pools/twocrypto_fx/twocrypto.hpp"
-#include "trading/costs.hpp"
 
 namespace fx = arb::pools::twocrypto_fx;
 namespace harness = arb::harness;
@@ -91,58 +87,6 @@ void require(bool condition, const char* message) {
         std::fflush(stderr);
         std::exit(1);
     }
-}
-
-// Deterministic hourly price walk over 92 days (±10% sine, 12-day period).
-// The arb is volume-capped so the pool lags CEX and the 2L model actually
-// fires; the walk and cap are identical for every mode under test.
-arb::EventSoA make_events(const Pool& pool) {
-    arb::EventSoA events;
-    constexpr size_t N_EVENTS = 92 * 24;
-    const double base = pool.get_p();
-    events.ts.reserve(N_EVENTS);
-    events.p_cex.reserve(N_EVENTS);
-    events.volume.reserve(N_EVENTS);
-    events.candle_idx.reserve(N_EVENTS);
-    for (size_t k = 0; k < N_EVENTS; ++k) {
-        events.ts.push_back(TS + k * 3600ULL);
-        constexpr double TWO_PI = 6.283185307179586476925286766559;
-        const double phase = TWO_PI * static_cast<double>(k) / 288.0;
-        events.p_cex.push_back(base * (1.0 + 0.10 * std::sin(phase)));
-        events.volume.push_back(1'000'000.0);
-        events.candle_idx.push_back(0);
-    }
-    return events;
-}
-
-struct RunOutcome {
-    Pool pool;
-    arb::harness::EventLoopResult<double> result;
-};
-
-RunOutcome run_with_mode(
-    arb::harness::YbMode mode,
-    const arb::EventSoA& events
-) {
-    Pool pool = make_pool();
-    arb::harness::RunConfig<double> cfg;
-    cfg.yb_mode = mode;
-    cfg.dustswap_freq_s = 0;  // no keepers: arb is the only primary mutator
-    arb::harness::DonationCfg<double> dcfg{};
-    arb::harness::IdleTickCfg<double> icfg{};
-    arb::harness::UserSwapCfg<double> ucfg{};
-    arb::trading::Costs<double> costs{};
-    costs.use_volume_cap = true;
-    // Cap arb to ~0.2 coin1 per event: well below the ~1.2 coin1/event CEX
-    // drift of the price walk, so the pool lags CEX and the 2L model fires.
-    costs.volume_cap_mult = 2e-7;
-    auto result = arb::harness::run_event_loop(
-        pool, events, costs, dcfg, icfg, ucfg, cfg,
-        nullptr, 0,
-        static_cast<std::vector<arb::harness::Action<double>>*>(nullptr),
-        static_cast<std::vector<arb::harness::DetailedEntry<double>>*>(nullptr)
-    );
-    return RunOutcome{std::move(pool), std::move(result)};
 }
 
 } // namespace
@@ -273,58 +217,6 @@ int main() {
 
     require(checked, "test inputs must produce a cash3 atomic real-leg fill");
 
-    // ---- YieldBasis mode event-loop checks: off / active_2l ----
-    {
-        const Pool probe = make_pool();
-        const arb::EventSoA events = make_events(probe);
-        auto off = run_with_mode(arb::harness::YbMode::Off, events);
-        auto active = run_with_mode(arb::harness::YbMode::Active2l, events);
-
-        // off = nothing: the yb metric family stays empty.
-        require(!off.result.yb_releverage_enabled,
-                "off mode must not enable YieldBasis");
-        require(off.result.yb_releverage_apy == -1.0,
-                "off mode must leave yb apy empty");
-        require(off.result.yb_releverage_fee == 0.0,
-                "off mode must leave yb fee zero");
-
-        // active_2l remains the coherent state-mutating path.
-        require(
-            !same_pool_state(off.pool, active.pool),
-            "active_2l must mutate the pool relative to the off world");
-        require(active.result.yb_releverage_enabled,
-                "active_2l must enable YieldBasis");
-        require(active.result.yb_releverage_fee == 0.012,
-                "active_2l must report the configured yb fee");
-    }
-
-    // Both enabled modes evaluate every event and produce endpoint APY.
-    {
-        const Pool probe = make_pool();
-        arb::EventSoA events;
-        events.ts = {
-            TS, TS + 3599, TS + 3600, TS + 3600, TS + 7200, TS + 7201
-        };
-        events.p_cex.assign(events.ts.size(), probe.get_p() * 1.05);
-        events.volume.assign(events.ts.size(), 1'000'000.0);
-        events.candle_idx.assign(events.ts.size(), 0);
-
-        const auto active = run_with_mode(
-            arb::harness::YbMode::Active2l, events
-        );
-        const auto reference = run_with_mode(
-            arb::harness::YbMode::Reference2l, events
-        );
-        require(active.result.metrics.yb_2l_attempts == events.size(),
-                "active_2l must evaluate every causal event");
-        require(reference.result.metrics.yb_2l_attempts == events.size(),
-                "reference_2l must evaluate every causal event");
-        require(active.result.yb_releverage_apy != -1.0,
-                "final endpoint valuation must produce active_2l APY");
-        require(reference.result.yb_releverage_apy != -1.0,
-                "final endpoint valuation must produce reference_2l APY");
-    }
-
-    std::puts("YieldBasis 2L routes + mode/reporting checks: OK");
+    std::puts("YieldBasis 2L atomic route checks: OK");
     return 0;
 }

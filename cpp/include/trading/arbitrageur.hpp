@@ -19,9 +19,6 @@ namespace fx = arb::pools::twocrypto_fx;
 template <typename T>
 struct Decision {
     bool do_trade{false};
-    bool edge_seen{false};
-    bool rejected_invalid_size{false};
-    bool rejected_nonpositive_profit{false};
     int i{0};
     int j{1};
     T dx{};
@@ -33,9 +30,6 @@ struct Decision {
 
 inline constexpr int NUMERIC_SEARCH_ITERS = 24;   // legacy golden-section iters
 inline constexpr int MAX_SIZING_EVALS = 24;       // hard eval budget per decision
-
-// Telemetry: pool-simulation evaluations spent sizing trades on this thread.
-inline thread_local unsigned long long sizing_eval_count = 0;
 
 template <typename T, typename PoolT>
 Decision<T> decide_trade(
@@ -99,17 +93,9 @@ Decision<T> decide_trade(
     // For native pools this admits toward-balance trades whose only profit
     // is the fee dip at the balance crossing -- on steep fee surfaces
     // (small fee_gamma) those are the dominant arb mode, so admitting them
-    // is a correctness requirement for fee research, not a luxury. Define
-    // ARB_NATIVE_SPOT_GATE to gate native pools on the spot fee instead
-    // (faster on wide-band grids, but systematically under-arbs
-    // small-fee_gamma configs; see tests/test_sizing.cpp).
-#if defined(ARB_NATIVE_SPOT_GATE)
-    const T gate_fee_01 = native_fee_mode ? away_floor : floor_fee_01;
-    const T gate_fee_10 = native_fee_mode ? away_floor : floor_fee_10;
-#else
+    // is a correctness requirement for fee research.
     const T gate_fee_01 = floor_fee_01;
     const T gate_fee_10 = floor_fee_10;
-#endif
 
     // Required price-move ratios (rho > 1 means a profitable direction
     // exists at that fee level).
@@ -117,7 +103,6 @@ Decision<T> decide_trade(
     const T rho_10_floor = std::max(T(1) - gate_fee_10, T(1e-12)) * p_now / p_cex_ask;
 
     if (rho_01_floor <= T(1) && rho_10_floor <= T(1)) return d;
-    d.edge_seen = true;
     int sel_i = -1, sel_j = -1;
     if (rho_01_floor >= rho_10_floor) { sel_i = 0; sel_j = 1; } else { sel_i = 1; sel_j = 0; }
     d.i = sel_i;
@@ -144,7 +129,6 @@ Decision<T> decide_trade(
         dx_hi = std::min(dx_hi, cap);
     }
     if (!(dx_hi > dx_lo)) {
-        d.rejected_invalid_size = true;
         return d;
     }
 
@@ -214,7 +198,6 @@ Decision<T> decide_trade(
         dx = std::min(std::max(dx, dx_lo), dx_hi);
         Candidate c = evaluate_candidate(dx);
         ++evals;
-        ++sizing_eval_count;
         if (c.profit > best.profit) best = c;
         return c;
     };
@@ -480,7 +463,6 @@ Decision<T> decide_trade(
 #endif
 
     if (!(best.profit > T(0))) {
-        d.rejected_nonpositive_profit = true;
         d.dx = best.dx;
         d.dy_after_fee = best.dy_after_fee;
         d.profit = best.profit;

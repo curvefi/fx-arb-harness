@@ -7,9 +7,6 @@
 namespace arb {
 namespace harness {
 
-inline constexpr uint64_t DYNAMIC_KEEPER_RETRY_S = 60;
-inline constexpr uint64_t POLICY_KEEPER_RETRY_S = 10;
-
 // YieldBasis operating mode.
 enum class YbMode : uint8_t {
     Off = 0,   // no YieldBasis: the yb metric family stays empty
@@ -33,14 +30,6 @@ struct RunConfig {
     T max_swap_frac{T(1.0)};
     uint64_t start_ts{0};
     uint64_t dustswap_freq_s{3600};
-    bool dustswap_random{false};
-    uint64_t dustswap_dynamic_freq_s{0};
-    bool dustswap_dynamic_gap_enabled{false};
-    T dustswap_dynamic_gap_bps{T(0)};
-    uint64_t dustswap_dynamic_heartbeat_s{0};
-    uint64_t dustswap_commit_clock_freq_s{0};
-    bool policy_keeper_enabled{false};
-    bool allow_hybrid_keeper{false};
     uint64_t user_swap_freq_s{0};
     T user_swap_size_frac{T(0.01)};
     T user_swap_thresh{T(0.05)};

@@ -38,7 +38,6 @@ class EvaluatorIdentity(ProtocolModel):
     build_target: str
     ipo_enabled: bool
     native_tuning: bool
-    pgo_mode: Literal["off", "generate", "use"]
 
 
 class Limits(ProtocolModel):
@@ -81,14 +80,6 @@ class OpenSessionFrame(ProtocolModel):
     min_swap: FiniteFloat = 1e-6
     max_swap: FiniteFloat = 1.0
     dustswap_freq_s: int = 3600
-    dustswap_random: bool = False
-    dustswap_dynamic_freq_s: int = 0
-    dustswap_dynamic_gap_enabled: bool = False
-    dustswap_dynamic_gap_bps: FiniteFloat = 0.0
-    dustswap_dynamic_heartbeat_s: int = 0
-    dustswap_commit_clock_freq_s: int = 0
-    policy_keeper_enabled: bool = False
-    allow_hybrid_keeper: bool = False
     user_swap_freq_s: int = 0
     user_swap_size_frac: FiniteFloat = 0.01
     user_swap_thresh: FiniteFloat = 0.05

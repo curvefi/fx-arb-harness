@@ -38,6 +38,7 @@
 #include "curve_fx_evaluator/evaluator.hpp"
 #include "curve_fx_evaluator/parameter_schema.hpp"
 #include "pools/pool_config_parse.hpp"
+#include "pools/twocrypto_fx/policy_descriptor.hpp"
 
 namespace json = boost::json;
 namespace fs = std::filesystem;
@@ -70,6 +71,7 @@ static_assert(
     "curve_fx_eval requires IEEE-754 binary64 wire inputs"
 );
 
+#ifdef TWOCRYPTO_POLICY_HEADER
 using SelectedPolicy = arb::pools::twocrypto_fx::ChallengeFeePolicy<RealT>;
 static constexpr std::size_t SELECTED_POLICY_PARAM_COUNT =
     SelectedPolicy::DESCRIPTOR.size();
@@ -95,6 +97,11 @@ static_assert(
         SELECTED_POLICY_ID == std::string_view(curve_fx::identity::POLICY_ID),
     "POLICY_ID must equal ChallengeFeePolicy::NAME"
 );
+#else
+static constexpr std::size_t SELECTED_POLICY_PARAM_COUNT = 0;
+static constexpr std::string_view SELECTED_POLICY_ID =
+    curve_fx::identity::POLICY_ID;
+#endif
 
 namespace {
 
@@ -104,39 +111,17 @@ static constexpr size_t MAX_METRIC_VALUES_PER_BATCH = 128 * 1024;
 static constexpr size_t MAX_MATERIALIZED_BATCH_BYTES = 64 * 1024 * 1024;
 
 static const std::vector<std::string> CANONICAL_METRIC_FIELDS = {
-    "vp", "xcp_profit", "lp_xcp_profit", "apy", "apy_net", "apy_net_gm",
-    "apy_net_robust_90d",
-    "avg_rel_price_diff", "max_rel_price_diff", "max_7d_rel_price_diff", "final_rel_price_diff",
-    "max_7d_skew", "min_price_scale", "max_price_scale", "tw_avg_pool_fee", "min_pool_fee",
-    "max_pool_fee", "tw_real_slippage_1pct", "tw_real_slippage_5pct", "tw_real_slippage_10pct",
-    "trades", "n_rebalances", "dynamic_keeper_attempts", "dynamic_keeper_commits",
-    "dynamic_keeper_gap_checks", "dynamic_keeper_gap_fires", "dynamic_keeper_gap_threshold_fires",
-    "dynamic_keeper_heartbeat_fires", "dynamic_keeper_commit_clock_fires",
-    "dynamic_keeper_attempts_per_day", "dynamic_keeper_commits_per_day",
-    "dynamic_keeper_gap_checks_per_day", "dynamic_keeper_gap_fires_per_day",
-    "dynamic_keeper_gap_threshold_fires_per_day", "dynamic_keeper_heartbeat_fires_per_day",
-    "dynamic_keeper_commit_clock_fires_per_day", "dynamic_keeper_step_bps_avg",
-    "dynamic_keeper_step_bps_max", "policy_keeper_checks", "policy_keeper_reject_clock",
-    "policy_keeper_reject_target_unavailable", "policy_keeper_reject_deadband",
-    "policy_keeper_reject_step_min", "policy_keeper_reject_below_threshold",
-    "policy_keeper_reject_block", "policy_keeper_reject_outer_profit",
-    "policy_keeper_raw_gap_candidates", "policy_keeper_submissions",
-    "policy_keeper_submitted_commits", "policy_keeper_final_lp_rejects",
-    "policy_keeper_unexpected_step_rejects", "policy_keeper_exceptions",
-    "policy_keeper_lp_below_precision", "policy_keeper_lp_below_floor",
-    "policy_keeper_lp_burn_cap_exhausted", "policy_keeper_direction_up",
-    "policy_keeper_direction_down", "policy_keeper_submissions_per_day",
-    "policy_keeper_final_lp_rejects_per_day", "policy_keeper_fire_to_commit_ratio",
-    "arb_edge_candidates", "arb_invalid_size_rejections", "arb_nonpositive_profit_rejections",
-    "arb_guarded_loss_coin0", "events_total", "geometry_refreshes", "floor_gate_passes",
-    "actual_fee_calls", "yb_enabled", "yb_apy", "yb_apy_gm", "yb_final_growth", "yb_fee",
+    "vp", "lp_xcp_profit", "apy", "apy_net", "apy_net_gm",
+    "apy_net_robust_90d", "avg_rel_price_diff", "max_rel_price_diff",
+    "max_7d_rel_price_diff", "final_rel_price_diff", "detach_energy_ungated",
+    "avg_imbalance",
+    "tw_avg_pool_fee", "min_pool_fee", "max_pool_fee",
+    "tw_real_slippage_1pct", "tw_real_slippage_5pct",
+    "tw_real_slippage_10pct", "trades", "n_rebalances",
+    "arb_guarded_loss_coin0", "yb_apy", "yb_apy_gm", "yb_final_growth", "yb_fee",
     "yb_releverage_trades", "yb_gm_windows", "yb_gm_floored_windows", "yb_gm_floor_share",
-    "elapsed_ms", "duration_s", "total_notional_coin0", "lp_fee_coin0", "arb_pnl_coin0",
-    "fee_capture_rate", "donations", "donation_coin0_total", "avg_imbalance",
-    "max_episode_gap_energy", "detach_energy", "detach_energy_ungated",
-    "detach_energy_ungated_3pct", "detach_energy_ungated_5pct", "detach_energy_short3h",
-    "tvl_growth",
-    "keeper_successful_submissions", "fixed_keeper_ticks"
+    "elapsed_ms", "total_notional_coin0", "lp_fee_coin0", "arb_pnl_coin0",
+    "fee_capture_rate", "donations", "donation_coin0_total", "tvl_growth"
 };
 
 static const std::unordered_set<std::string> GRID_CORE_METRIC_FIELDS = {
@@ -144,10 +129,8 @@ static const std::unordered_set<std::string> GRID_CORE_METRIC_FIELDS = {
     "avg_rel_price_diff", "max_rel_price_diff", "max_7d_rel_price_diff",
     "final_rel_price_diff", "trades", "n_rebalances",
     "arb_guarded_loss_coin0", "elapsed_ms", "fee_capture_rate",
-    "donations", "donation_coin0_total", "avg_imbalance", "tvl_growth",
-    "detach_energy", "detach_energy_ungated",
-    "detach_energy_ungated_3pct", "detach_energy_ungated_5pct",
-    "detach_energy_short3h",
+    "donations", "donation_coin0_total", "tvl_growth", "avg_imbalance",
+    "detach_energy_ungated",
 };
 
 const json::object& canonical_metric_schema() {
@@ -184,8 +167,8 @@ json::value normalize_pool_override_identity_value(
         }
         return normalized;
     }
-    const bool textual = field == "tag" || field == "kind" ||
-        field == "price_source" || field == "policy";
+    const bool textual =
+        field == "tag" || field == "kind" || field == "policy";
     if (!textual && arb::pools::is_number_or_string(value)) {
         return json::value(arb::canonical_float_string(
             arb::parse_input_double(value)));
@@ -215,7 +198,6 @@ json::object make_evaluator_identity() {
     id["build_target"] = BUILD_TARGET_NAME;
     id["ipo_enabled"] = curve_fx::identity::ENABLE_IPO;
     id["native_tuning"] = curve_fx::identity::NATIVE_TUNING;
-    id["pgo_mode"] = curve_fx::identity::PGO_MODE;
     return id;
 }
 
@@ -227,6 +209,7 @@ json::value source_dirty_value(std::string_view value) {
 
 json::object make_parameter_schema() {
     json::array parameters;
+#ifdef TWOCRYPTO_POLICY_HEADER
     for (const auto& descriptor : SelectedPolicy::DESCRIPTOR.parameters) {
         json::object value;
         value["name"] = "policy." + std::string(descriptor.name);
@@ -244,6 +227,7 @@ json::object make_parameter_schema() {
         value["quantum"] = static_cast<double>(descriptor.quantum);
         parameters.push_back(std::move(value));
     }
+#endif
     for (const auto& descriptor : curve_fx::evaluator::STATIC_PARAMETERS) {
         json::object value;
         value["name"] = std::string(descriptor.name);
@@ -279,16 +263,16 @@ json::object make_description() {
 
     json::object pool;
     pool["version"] = curve_fx::identity::POOL_VERSION;
-    pool["revision"] = curve_fx::identity::POOL_GIT_REVISION;
-    pool["dirty"] = source_dirty_value(curve_fx::identity::POOL_GIT_DIRTY);
     info["pool"] = std::move(pool);
 
     json::object policy;
     policy["id"] = std::string(SELECTED_POLICY_ID);
     policy["abi"] = curve_fx::identity::POLICY_ABI;
     policy["parameter_count"] = SELECTED_POLICY_PARAM_COUNT;
+#ifdef TWOCRYPTO_POLICY_HEADER
     policy["descriptor_abi_version"] =
         arb::pools::twocrypto_fx::POLICY_DESCRIPTOR_ABI_VERSION;
+#endif
     info["policy"] = std::move(policy);
 
     json::object build;
@@ -303,7 +287,6 @@ json::object make_description() {
     build["wire_real_digits"] = std::numeric_limits<double>::digits;
     build["ipo_enabled"] = curve_fx::identity::ENABLE_IPO;
     build["native_tuning"] = curve_fx::identity::NATIVE_TUNING;
-    build["pgo_mode"] = curve_fx::identity::PGO_MODE;
     info["build"] = std::move(build);
 
     json::object schema = make_parameter_schema();
@@ -522,11 +505,7 @@ private:
                 "template_path", "scenario_id", "market_path", "chainlink_path",
                 "pool_index", "n_candles", "start_time",
                 "end_time", "candle_filter", "min_swap", "max_swap",
-                "dustswap_freq_s", "dustswap_random",
-                "dustswap_dynamic_freq_s", "dustswap_dynamic_gap_enabled",
-                "dustswap_dynamic_gap_bps", "dustswap_dynamic_heartbeat_s",
-                "dustswap_commit_clock_freq_s", "policy_keeper_enabled",
-                "allow_hybrid_keeper", "user_swap_freq_s",
+                "dustswap_freq_s", "user_swap_freq_s",
                 "user_swap_size_frac", "user_swap_thresh",
                 "enable_slippage_probes", "yb_releverage_fee",
                 "yb_cash_multiplier", "yb_mode", "event_cursor",
@@ -579,9 +558,6 @@ private:
         uint64_t start_ts = 0;
         uint64_t end_ts = 0;
         uint64_t dustswap_freq_s = 0;
-        uint64_t dustswap_dynamic_freq_s = 0;
-        uint64_t dustswap_dynamic_heartbeat_s = 0;
-        uint64_t dustswap_commit_clock_freq_s = 0;
         uint64_t user_swap_freq_s = 0;
         const auto parse_integer = [&](const char* key, auto fallback, auto& out) {
             if (arb::parse_bounded_uint_field(req, key, fallback, out)) return true;
@@ -595,9 +571,6 @@ private:
             !parse_integer("start_time", uint64_t{0}, start_ts) ||
             !parse_integer("end_time", uint64_t{0}, end_ts) ||
             !parse_integer("dustswap_freq_s", uint64_t{3600}, dustswap_freq_s) ||
-            !parse_integer("dustswap_dynamic_freq_s", uint64_t{0}, dustswap_dynamic_freq_s) ||
-            !parse_integer("dustswap_dynamic_heartbeat_s", uint64_t{0}, dustswap_dynamic_heartbeat_s) ||
-            !parse_integer("dustswap_commit_clock_freq_s", uint64_t{0}, dustswap_commit_clock_freq_s) ||
             !parse_integer("user_swap_freq_s", uint64_t{0}, user_swap_freq_s)) {
             return;
         }
@@ -620,21 +593,6 @@ private:
             cfg.max_swap_frac = static_cast<RealT>(arb::get_double_opt(req, "max_swap", 1.0));
             cfg.start_ts = start_ts;
             cfg.dustswap_freq_s = dustswap_freq_s;
-            cfg.dustswap_random = req.if_contains("dustswap_random") && req.at("dustswap_random").as_bool();
-            cfg.dustswap_dynamic_freq_s = dustswap_dynamic_freq_s;
-            cfg.dustswap_dynamic_gap_enabled =
-                req.if_contains("dustswap_dynamic_gap_enabled") &&
-                req.at("dustswap_dynamic_gap_enabled").as_bool();
-            cfg.dustswap_dynamic_gap_bps = static_cast<RealT>(
-                arb::get_double_opt(req, "dustswap_dynamic_gap_bps", 0.0));
-            cfg.dustswap_dynamic_heartbeat_s = dustswap_dynamic_heartbeat_s;
-            cfg.dustswap_commit_clock_freq_s = dustswap_commit_clock_freq_s;
-            cfg.policy_keeper_enabled =
-                req.if_contains("policy_keeper_enabled") &&
-                req.at("policy_keeper_enabled").as_bool();
-            cfg.allow_hybrid_keeper =
-                req.if_contains("allow_hybrid_keeper") &&
-                req.at("allow_hybrid_keeper").as_bool();
             cfg.user_swap_freq_s = user_swap_freq_s;
             cfg.user_swap_size_frac = static_cast<RealT>(arb::get_double_opt(req, "user_swap_size_frac", 0.01));
             cfg.user_swap_thresh = static_cast<RealT>(arb::get_double_opt(req, "user_swap_thresh", 0.05));
@@ -680,6 +638,15 @@ private:
                 }
             }
             cfg.metric_profile = metric_profile;
+            if (
+                cfg.event_cursor == "exact_skip" &&
+                cfg.metric_profile != "grid_core"
+            ) {
+                write_frame(std::cout, make_error_frame(
+                    req_id, "session", "INVALID_EVENT_CURSOR",
+                    "exact_skip requires metric_profile='grid_core'"));
+                return;
+            }
             std::string yb_mode = "off";
             if (req.if_contains("yb_mode")) {
                 if (!req.at("yb_mode").is_string()) {

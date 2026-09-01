@@ -162,7 +162,6 @@ void extract_metrics_from_pool_result(
     const auto& rm = res.metrics;
 
     m["vp"] = vp_end;
-    m["xcp_profit"] = static_cast<double>(res.xcp_profit);
     m["lp_xcp_profit"] = lp_xcp_end;
     m["apy"] = apy;
     m["apy_net"] = apy_net;
@@ -173,9 +172,8 @@ void extract_metrics_from_pool_result(
     m["max_rel_price_diff"] = tw.max_rel_price_diff;
     m["max_7d_rel_price_diff"] = tw.max_7d_rel_price_diff;
     m["final_rel_price_diff"] = tw.final_rel_price_diff;
-    m["max_7d_skew"] = tw.max_7d_skew;
-    m["min_price_scale"] = tw.min_price_scale;
-    m["max_price_scale"] = tw.max_price_scale;
+    m["detach_energy_ungated"] = tw.detach_energy_ungated;
+    m["avg_imbalance"] = tw.avg_imbalance;
     m["tw_avg_pool_fee"] = tw.tw_avg_pool_fee;
     m["min_pool_fee"] = tw.min_pool_fee;
     m["max_pool_fee"] = tw.max_pool_fee;
@@ -186,68 +184,8 @@ void extract_metrics_from_pool_result(
 
     m["trades"] = static_cast<double>(rm.trades);
     m["n_rebalances"] = static_cast<double>(rm.n_rebalances);
-    m["dynamic_keeper_attempts"] = static_cast<double>(rm.dynamic_keeper_attempts);
-    m["dynamic_keeper_commits"] = static_cast<double>(rm.dynamic_keeper_commits);
-    m["dynamic_keeper_gap_checks"] = static_cast<double>(rm.dynamic_keeper_gap_checks);
-    m["dynamic_keeper_gap_fires"] = static_cast<double>(rm.dynamic_keeper_gap_fires);
-    m["dynamic_keeper_gap_threshold_fires"] = static_cast<double>(rm.dynamic_keeper_gap_threshold_fires);
-    m["dynamic_keeper_heartbeat_fires"] = static_cast<double>(rm.dynamic_keeper_heartbeat_fires);
-    m["dynamic_keeper_commit_clock_fires"] = static_cast<double>(rm.dynamic_keeper_commit_clock_fires);
-
-    const double days = (duration_s > 0.0) ? (duration_s / 86400.0) : 0.0;
-    m["dynamic_keeper_attempts_per_day"] = (days > 0.0) ? static_cast<double>(rm.dynamic_keeper_attempts) / days : 0.0;
-    m["dynamic_keeper_commits_per_day"] = (days > 0.0) ? static_cast<double>(rm.dynamic_keeper_commits) / days : 0.0;
-    m["dynamic_keeper_gap_checks_per_day"] = (days > 0.0) ? static_cast<double>(rm.dynamic_keeper_gap_checks) / days : 0.0;
-    m["dynamic_keeper_gap_fires_per_day"] = (days > 0.0) ? static_cast<double>(rm.dynamic_keeper_gap_fires) / days : 0.0;
-    m["dynamic_keeper_gap_threshold_fires_per_day"] = (days > 0.0) ? static_cast<double>(rm.dynamic_keeper_gap_threshold_fires) / days : 0.0;
-    m["dynamic_keeper_heartbeat_fires_per_day"] = (days > 0.0) ? static_cast<double>(rm.dynamic_keeper_heartbeat_fires) / days : 0.0;
-    m["dynamic_keeper_commit_clock_fires_per_day"] = (days > 0.0) ? static_cast<double>(rm.dynamic_keeper_commit_clock_fires) / days : 0.0;
-
-    m["dynamic_keeper_step_bps_avg"] = rm.dynamic_keeper_commits > 0
-        ? rm.dynamic_keeper_step_bps_sum / static_cast<double>(rm.dynamic_keeper_commits) : 0.0;
-    m["dynamic_keeper_step_bps_max"] = rm.dynamic_keeper_step_bps_max;
-
-    m["policy_keeper_checks"] = static_cast<double>(rm.policy_keeper_checks);
-    m["policy_keeper_reject_clock"] = static_cast<double>(rm.policy_keeper_reject_clock);
-    m["policy_keeper_reject_target_unavailable"] = static_cast<double>(rm.policy_keeper_reject_target_unavailable);
-    m["policy_keeper_reject_deadband"] = static_cast<double>(rm.policy_keeper_reject_deadband);
-    m["policy_keeper_reject_step_min"] = static_cast<double>(rm.policy_keeper_reject_step_min);
-    m["policy_keeper_reject_below_threshold"] = static_cast<double>(rm.policy_keeper_reject_below_threshold);
-    m["policy_keeper_reject_block"] = static_cast<double>(rm.policy_keeper_reject_block);
-    m["policy_keeper_reject_outer_profit"] = static_cast<double>(rm.policy_keeper_reject_outer_profit);
-    m["policy_keeper_raw_gap_candidates"] = static_cast<double>(rm.policy_keeper_raw_gap_candidates);
-    m["policy_keeper_submissions"] = static_cast<double>(rm.policy_keeper_submissions);
-    m["policy_keeper_submitted_commits"] = static_cast<double>(rm.policy_keeper_submitted_commits);
-    m["policy_keeper_final_lp_rejects"] = static_cast<double>(rm.policy_keeper_final_lp_rejects);
-    m["policy_keeper_unexpected_step_rejects"] = static_cast<double>(rm.policy_keeper_unexpected_step_rejects);
-    m["policy_keeper_exceptions"] = static_cast<double>(rm.policy_keeper_exceptions);
-    m["policy_keeper_lp_below_precision"] = static_cast<double>(rm.policy_keeper_lp_below_precision);
-    m["policy_keeper_lp_below_floor"] = static_cast<double>(rm.policy_keeper_lp_below_floor);
-    m["policy_keeper_lp_burn_cap_exhausted"] = static_cast<double>(rm.policy_keeper_lp_burn_cap_exhausted);
-    m["policy_keeper_direction_up"] = static_cast<double>(rm.policy_keeper_direction_up);
-    m["policy_keeper_direction_down"] = static_cast<double>(rm.policy_keeper_direction_down);
-    m["policy_keeper_submissions_per_day"] = (days > 0.0) ? static_cast<double>(rm.policy_keeper_submissions) / days : 0.0;
-    m["policy_keeper_final_lp_rejects_per_day"] = (days > 0.0) ? static_cast<double>(rm.policy_keeper_final_lp_rejects) / days : 0.0;
-    m["policy_keeper_fire_to_commit_ratio"] = rm.policy_keeper_submissions > 0
-        ? static_cast<double>(rm.policy_keeper_submitted_commits) / static_cast<double>(rm.policy_keeper_submissions) : 0.0;
-
-    m["arb_edge_candidates"] = static_cast<double>(rm.arb_edge_candidates);
-    m["arb_invalid_size_rejections"] = static_cast<double>(rm.arb_invalid_size_rejections);
-    m["arb_nonpositive_profit_rejections"] = static_cast<double>(rm.arb_nonpositive_profit_rejections);
     m["arb_guarded_loss_coin0"] = static_cast<double>(rm.arb_guarded_loss_coin0);
-#if defined(ARB_EDGE_GATE_DIAGNOSTICS)
-    m["events_total"] = static_cast<double>(rm.events_total);
-    m["geometry_refreshes"] = static_cast<double>(rm.geometry_refreshes);
-    m["floor_gate_passes"] = static_cast<double>(rm.floor_gate_passes);
-    m["actual_fee_calls"] = static_cast<double>(rm.actual_fee_calls);
-#else
-    m["events_total"] = -1.0;
-    m["geometry_refreshes"] = -1.0;
-    m["floor_gate_passes"] = -1.0;
-    m["actual_fee_calls"] = -1.0;
-#endif
 
-    m["yb_enabled"] = res.yb_releverage_enabled ? 1.0 : 0.0;
     m["yb_apy"] = res.yb_releverage_apy;
     m["yb_apy_gm"] = res.yb_releverage_apy_gm;
     m["yb_final_growth"] = res.yb_releverage_final_growth;
@@ -258,7 +196,6 @@ void extract_metrics_from_pool_result(
     m["yb_gm_floor_share"] = res.yb_releverage_gm_floor_share;
 
     m["elapsed_ms"] = res.elapsed_ms;
-    m["duration_s"] = duration_s;
     m["total_notional_coin0"] = static_cast<double>(rm.notional);
     m["lp_fee_coin0"] = static_cast<double>(rm.lp_fee_coin0);
     m["arb_pnl_coin0"] = static_cast<double>(rm.arb_pnl_coin0);
@@ -268,20 +205,10 @@ void extract_metrics_from_pool_result(
 
     m["donations"] = static_cast<double>(rm.donations);
     m["donation_coin0_total"] = static_cast<double>(rm.donation_coin0_total);
-    m["avg_imbalance"] = tw.avg_imbalance;
-    m["max_episode_gap_energy"] = tw.max_episode_gap_energy;
-    m["detach_energy"] = tw.detach_energy;
-    m["detach_energy_ungated"] = tw.detach_energy_ungated;
-    m["detach_energy_ungated_3pct"] = tw.detach_energy_ungated_3pct;
-    m["detach_energy_ungated_5pct"] = tw.detach_energy_ungated_5pct;
-    m["detach_energy_short3h"] = tw.detach_energy_short3h;
 
     const double tvl_start = static_cast<double>(res.tvl_start);
     const double tvl_end = static_cast<double>(res.balances[0] + res.balances[1] * res.price_scale);
     m["tvl_growth"] = arb::harness::tvl_growth(tvl_start, tvl_end);
-
-    m["keeper_successful_submissions"] = static_cast<double>(rm.keeper_successful_submissions);
-    m["fixed_keeper_ticks"] = static_cast<double>(rm.fixed_keeper_ticks);
 }
 
 void execute_scenario_job(
@@ -317,28 +244,17 @@ void execute_scenario_job(
             );
         }
 
-        if (curve_fx::identity::HAS_COMPILED_POLICY) {
-            if (pool_init.policy_kind != arb::pools::twocrypto_fx::PolicyKind::Compiled &&
-                pool_init.policy_kind != arb::pools::twocrypto_fx::PolicyKind::None) {
-                throw std::invalid_argument(
-                    "compiled-policy build prohibits a non-compiled policy kind"
-                );
-            }
-            pool_init.policy_kind = arb::pools::twocrypto_fx::PolicyKind::Compiled;
-            pool_init.policy_config.kind = arb::pools::twocrypto_fx::PolicyKind::Compiled;
-        } else {
-            if (pool_init.policy_kind != arb::pools::twocrypto_fx::PolicyKind::TwocryptoPolicy &&
-                pool_init.policy_kind != arb::pools::twocrypto_fx::PolicyKind::None) {
-                throw std::invalid_argument(
-                    "Native-default build enforces the native policy; requested non-native policy kind is prohibited"
-                );
-            }
-        }
-
-        const std::size_t expected_policy_params =
-            curve_fx::identity::HAS_COMPILED_POLICY
-                ? arb::pools::twocrypto_fx::ChallengeFeePolicy<RealT>::PARAM_COUNT
-                : 0;
+#ifdef TWOCRYPTO_POLICY_HEADER
+        pool_init.policy_kind = arb::pools::twocrypto_fx::PolicyKind::Compiled;
+        pool_init.policy_config.kind =
+            arb::pools::twocrypto_fx::PolicyKind::Compiled;
+        constexpr std::size_t expected_policy_params =
+            arb::pools::twocrypto_fx::ChallengeFeePolicy<RealT>::PARAM_COUNT;
+#else
+        pool_init.policy_kind = arb::pools::twocrypto_fx::PolicyKind::None;
+        pool_init.policy_config.kind = arb::pools::twocrypto_fx::PolicyKind::None;
+        constexpr std::size_t expected_policy_params = 0;
+#endif
         if (cand.policy_params.size() != expected_policy_params) {
             throw std::invalid_argument(
                 "policy parameter count mismatch: expected " +
@@ -361,14 +277,6 @@ void execute_scenario_job(
         run_cfg.max_swap_frac = session_cfg.max_swap_frac;
         run_cfg.start_ts = session_cfg.start_ts;
         run_cfg.dustswap_freq_s = session_cfg.dustswap_freq_s;
-        run_cfg.dustswap_random = session_cfg.dustswap_random;
-        run_cfg.dustswap_dynamic_freq_s = session_cfg.dustswap_dynamic_freq_s;
-        run_cfg.dustswap_dynamic_gap_enabled = session_cfg.dustswap_dynamic_gap_enabled;
-        run_cfg.dustswap_dynamic_gap_bps = session_cfg.dustswap_dynamic_gap_bps;
-        run_cfg.dustswap_dynamic_heartbeat_s = session_cfg.dustswap_dynamic_heartbeat_s;
-        run_cfg.dustswap_commit_clock_freq_s = session_cfg.dustswap_commit_clock_freq_s;
-        run_cfg.policy_keeper_enabled = session_cfg.policy_keeper_enabled;
-        run_cfg.allow_hybrid_keeper = session_cfg.allow_hybrid_keeper;
         run_cfg.user_swap_freq_s = session_cfg.user_swap_freq_s;
         run_cfg.user_swap_size_frac = session_cfg.user_swap_size_frac;
         run_cfg.user_swap_thresh = session_cfg.user_swap_thresh;

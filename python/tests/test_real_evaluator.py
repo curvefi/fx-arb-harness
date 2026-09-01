@@ -5,781 +5,344 @@ from pathlib import Path
 
 import pytest
 
-from curve_fx_harness_client import EvaluatorClient
-from curve_fx_harness_client.exceptions import RemoteEvaluatorError
-from curve_fx_harness_client.models import CandidateSpec, ObservationSpec
+from curve_fx_harness_client import CandidateSpec, EvaluatorClient
+from curve_fx_harness_client.models import ObservationSpec
 
 
 EVALUATOR = os.environ.get("CURVE_FX_EVALUATOR")
 pytestmark = pytest.mark.skipif(
     not EVALUATOR,
-    reason="CURVE_FX_EVALUATOR is required for the real protocol test",
+    reason="CURVE_FX_EVALUATOR is required for the protocol contract tests",
 )
 
 
-def _write_inputs(root: Path) -> tuple[Path, Path]:
+def _write_inputs(root: Path, *, flat: bool = False) -> tuple[Path, Path]:
     template = root / "template.json"
     template.write_text(
-        json.dumps(
-            {
-                "pools": [
-                    {
-                        "tag": "protocol_smoke",
-                        "pool": {
-                            "initial_liquidity": ["100000000000000000000000", "100000000000000000000000"],
-                            "A": "500000.0",
-                            "gamma": "100000000000000",
-                            "mid_fee": "1000000.0",
-                            "out_fee": "20000000.0",
-                            "fee_gamma": "100000000000000000",
-                            "adjustment_step_min": "100000000",
-                            "adjustment_step_max": "5000000000000000",
-                            "ma_time": "865",
-                            "reserved_profit_fraction": "5000000000.0",
-                            "admin_fee": "0",
-                            "policy": {"kind": "none"},
-                            "initial_price": "1000000000000000000",
-                            "start_timestamp": "1700000000",
-                            "donation_apy": "0",
-                            "donation_frequency": "3600",
-                            "donation_duration": "604800",
-                            "donation_coins_ratio": "0.5",
-                        },
-                        "costs": {
-                            "arb_fee_bps": 10,
-                            "gas_coin0": 0,
-                            "use_volume_cap": False,
-                            "volume_cap_mult": 1,
-                        },
-                    }
-                ]
-            },
-            sort_keys=True,
-        ),
+        json.dumps({
+            "pools": [{
+                "tag": "protocol_contract",
+                "pool": {
+                    "initial_liquidity": [
+                        "100000000000000000000000",
+                        "100000000000000000000000",
+                    ],
+                    "A": "500000.0",
+                    "gamma": "100000000000000",
+                    "mid_fee": "1000000.0",
+                    "out_fee": "20000000.0",
+                    "fee_gamma": "30000000000000123",
+                    "adjustment_step_min": "100000000",
+                    "adjustment_step_max": "5000000000000000",
+                    "ma_time": "865",
+                    "reserved_profit_fraction": "3400000123",
+                    "admin_fee": "0",
+                    "policy": {"kind": "none"},
+                    "initial_price": "1000000000000000000",
+                    "start_timestamp": "1700000000",
+                    "donation_apy": "0",
+                    "donation_frequency": "3600",
+                    "donation_duration": "604800",
+                    "donation_coins_ratio": "0.5",
+                },
+                "costs": {
+                    "arb_fee_bps": 10,
+                    "gas_coin0": 1_000_000_000 if flat else 0,
+                    "use_volume_cap": False,
+                    "volume_cap_mult": 1,
+                },
+            }]
+        }, sort_keys=True),
         encoding="utf-8",
     )
-
     candles = root / "candles.json"
     rows = []
     for index in range(24):
-        timestamp = 1_700_000_000 + index * 60
-        price = 1.0 + ((index % 5) - 2) * 0.0001
-        rows.append([timestamp, price, price + 0.0001, price - 0.0001, price, 1_000_000.0])
+        price = 1.0 if flat else 1.0 + ((index % 5) - 2) * 0.0001
+        rows.append([
+            1_700_000_000 + index * 60,
+            price,
+            price + 0.0001,
+            price - 0.0001,
+            price,
+            1_000_000.0,
+        ])
     candles.write_text(json.dumps(rows, separators=(",", ":")), encoding="utf-8")
-
     return template, candles
 
 
-def test_description_is_bound_and_complete() -> None:
+def _description() -> dict[str, object]:
     assert EVALUATOR is not None
-    completed = subprocess.run(
+    return json.loads(subprocess.run(
         [EVALUATOR, "--describe-json"],
         check=True,
         capture_output=True,
         text=True,
-    )
-    info = json.loads(completed.stdout)
-    identity = json.loads(subprocess.run(
-        [EVALUATOR, "--identity-json"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout)["evaluator_identity"]
-    assert info["schema_version"] == "curve_fx_evaluator_description_v1"
-    assert {"version", "revision", "dirty"} <= info["harness"].keys()
-    assert {"version", "revision", "dirty"} <= info["pool"].keys()
-    assert info["build"]["type"]
-    assert info["build"]["real_digits"] >= info["build"]["wire_real_digits"]
-    assert info["build"]["wire_real_type"] == "IEEE-754 binary64"
-    assert info["build"]["wire_real_digits"] == 53
-    assert info["build"]["target"] == identity["build_target"]
-    assert info["build"]["numeric_mode"] == identity["numeric_mode"]
-    assert info["build"]["real_type"] == identity["real_type"]
-    assert info["policy"]["id"] == identity["policy_id"]
-    assert info["policy"]["parameter_count"] == identity["policy_parameter_count"]
-    schema_canonical_json = info["parameter_schema_canonical_json"]
-    assert json.loads(schema_canonical_json) == info["parameter_schema"]
-
-    parameters = info["parameter_schema"]["parameters"]
-    policy_parameters = [p for p in parameters if p["name"].startswith("policy.")]
-    assert len(policy_parameters) == info["policy"]["parameter_count"]
-    if identity["policy_id"] == "native_passthrough":
-        assert policy_parameters == []
-    else:
-        assert [p["name"] for p in policy_parameters] == [
-            "policy.fast_half_life_s",
-            "policy.slow_half_life_s",
-            "policy.kappa",
-            "policy.min_cap_bps",
-            "policy.deadband_bps",
-        ]
-        assert [p["order"] for p in policy_parameters] == list(range(5))
-        assert {p["type"] for p in policy_parameters} == {"real"}
-        assert {p["wire_representation"] for p in policy_parameters} == {"finite_binary64"}
-        assert [
-            (p["default"], p["minimum"], p["maximum"], p["quantum"])
-            for p in policy_parameters
-        ] == [
-            (3600.0, 60.0, 86400.0, 10.0),
-            (86400.0, 60.0, 604800.0, 10.0),
-            (1.0, 0.0, 5.0, 0.05),
-            (10.0, 0.0, 250.0, 0.5),
-            (0.0, 0.0, 100.0, 0.5),
-        ]
-
-    pool_names = {p["name"] for p in parameters if p["name"].startswith("pool.")}
-    assert "pool.policy" not in pool_names
-    assert pool_names == set("""
-        pool.tag pool.initial_liquidity pool.A pool.gamma pool.mid_fee
-        pool.out_fee pool.fee_gamma pool.adjustment_step_min
-        pool.adjustment_step_max pool.ma_time pool.reserved_profit_fraction
-        pool.admin_fee pool.initial_price pool.start_timestamp
-        pool.historical_state pool.donation_apy pool.donation_frequency
-        pool.donation_duration pool.initial_donation_days
-        pool.donation_coins_ratio pool.user_swap_size_frac
-        pool.costs.arb_fee_bps pool.costs.gas_coin0
-        pool.costs.use_volume_cap pool.costs.volume_cap_mult
-        pool.costs.volume_cap_is_coin_1
-        pool.run.yb_releverage_fee
-    """.split())
-    run_names = {p["name"] for p in parameters if p["name"].startswith("run.")}
-    assert run_names == set("""
-        run.session_id run.template_path run.scenario_id run.market_path
-        run.chainlink_path run.pool_index run.n_candles run.start_time
-        run.end_time run.candle_filter run.min_swap run.max_swap
-        run.dustswap_freq_s run.dustswap_random run.dustswap_dynamic_freq_s
-        run.dustswap_dynamic_gap_enabled run.dustswap_dynamic_gap_bps
-        run.dustswap_dynamic_heartbeat_s run.dustswap_commit_clock_freq_s
-        run.policy_keeper_enabled run.allow_hybrid_keeper run.user_swap_freq_s
-        run.user_swap_size_frac run.user_swap_thresh
-        run.enable_slippage_probes run.event_cursor run.metric_profile run.yb_mode
-        run.yb_releverage_fee run.yb_cash_multiplier run.metric_projection
-        run.observation.kind run.observation.trace_interval
-        run.observation.trace_actions run.observation.artifact_dir
-    """.split())
-    assert all({
-        "name", "lowering_path", "type", "unit",
-        "wire_representation", "classification",
-    } <= parameter.keys() for parameter in parameters)
-    enums = {p["name"]: p["choices"] for p in parameters if p["type"] == "enum"}
-    assert enums == {
-        "run.event_cursor": ["scalar", "exact_skip"],
-        "run.metric_profile": ["full_summary", "grid_core"],
-        "run.yb_mode": ["off", "active_2l", "reference_2l"],
-        "run.metric_projection": ["summary", "full"],
-        "run.observation.kind": ["summary", "full_trace"],
-    }
+    ).stdout)
 
 
-def _open(client: EvaluatorClient, template: Path, candles: Path, session_id: str):
+def _policy_defaults(description: dict[str, object]) -> list[float]:
+    parameters = description["parameter_schema"]["parameters"]
+    return [
+        parameter["default"]
+        for parameter in parameters
+        if parameter["name"].startswith("policy.")
+    ]
+
+
+def _open(
+    client: EvaluatorClient,
+    template: Path,
+    candles: Path,
+    session_id: str,
+    **kwargs,
+):
     return client.open_session(
         session_id=session_id,
         template_path=template,
-        scenario_id="protocol-smoke",
+        scenario_id="protocol-contract",
         market_path=candles,
         start_time=1_700_000_000,
-        end_time=1_700_000_000 + 9 * 60,
+        end_time=1_700_000_000 + 23 * 60,
         candle_filter=100.0,
+        **kwargs,
     )
 
 
-def _economic_metrics(result) -> dict[str, object]:
-    return {key: value for key, value in result.metrics.items() if key != "elapsed_ms"}
-
-
-def test_real_persistent_batches_match_single_candidate_results(tmp_path: Path) -> None:
-    assert EVALUATOR is not None
-    template, candles = _write_inputs(tmp_path)
-    client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
-    try:
-        hello = client.start()
-        policy_params = json.loads(os.environ.get("CURVE_FX_POLICY_PARAMS", "[]"))
-        assert len(policy_params) == hello.evaluator_identity.policy_parameter_count
-        _open(client, template, candles, "batch-order")
-
-        single = client.evaluate_batch([
-            CandidateSpec(
-                ordinal=7,
-                candidate_id="single",
-                policy_params=policy_params,
-            )
-        ]).results[0]
-        batch = client.evaluate_batch([
-            CandidateSpec(
-                ordinal=7,
-                candidate_id="batched",
-                policy_params=policy_params,
-            ),
-            CandidateSpec(
-                ordinal=3,
-                candidate_id="other",
-                policy_params=policy_params,
-            ),
-        ])
-
-        linked_grid = {
-            "candidate_defaults": {
-                "policy_params": policy_params,
-                "pool": {
-                    "costs": {
-                        "arb_fee_bps": 10,
-                        "use_volume_cap": True,
-                        "volume_cap_mult": 1,
-                    }
-                },
-            },
-            "axes": {
-                "flat_fee": [
-                    {"pool.mid_fee": 0.001, "pool.out_fee": 0.001},
-                    {"pool.mid_fee": 0.002, "pool.out_fee": 0.002},
-                ],
-                "pool.A": [5.0, 6.0],
-                "pool.costs.arb_fee_bps": [3.0, 21.0],
-                "pool.costs.volume_cap_mult": [0.5, 1.5],
-            },
-            "axis_order": [
-                "flat_fee",
-                "pool.A",
-                "pool.costs.arb_fee_bps",
-                "pool.costs.volume_cap_mult",
-            ],
-            "shape": [2, 2, 2, 2],
-        }
-        with pytest.raises(RemoteEvaluatorError, match="INVALID_GRID"):
-            client.register_grid("invalid", {
-                "candidate_defaults": {"policy_params": policy_params},
-                "axes": {},
-                "axis_order": ["pool.A"],
-                "shape": [],
-            })
-        client.register_grid("linked", linked_grid)
-        linked_first = client.evaluate_batch([
-            CandidateSpec(
-                ordinal=10,
-                candidate_id="linked-first",
-                policy_params=policy_params,
-                pool_overrides={
-                    "mid_fee": 0.001,
-                    "out_fee": 0.001,
-                    "A": 5.0,
-                    "costs": {
-                        "arb_fee_bps": 3.0,
-                        "use_volume_cap": True,
-                        "volume_cap_mult": 0.5,
-                    },
-                },
-            )
-        ]).results[0]
-        linked_equivalent = client.evaluate_batch([
-            CandidateSpec(
-                ordinal=11,
-                candidate_id="linked-equivalent",
-                policy_params=policy_params,
-                pool_overrides={
-                    "mid_fee": 0.002,
-                    "out_fee": 0.002,
-                    "A": 6.0,
-                    "costs": {
-                        "arb_fee_bps": 21.0,
-                        "use_volume_cap": True,
-                        "volume_cap_mult": 1.5,
-                    },
-                },
-            )
-        ]).results[0]
-        traced = client.evaluate_batch(
-            [],
-            observation=ObservationSpec(
-                kind="full_trace",
-                trace_interval=1,
-                artifact_dir="grid-trace",
-            ),
-            metric_fields=("vp", "trades"),
-            metrics_format="array",
-            trusted_candidates=True,
-            grid_id="linked",
-            ranges=((0, 1), (15, 1)),
-        )["results"]
-
-        assert [result.ordinal for result in batch.results] == [3, 7]
-        assert [result["ordinal"] for result in traced] == [0, 15]
-        assert traced[0]["metrics"] == [
-            linked_first.metrics["vp"], linked_first.metrics["trades"]
-        ]
-        assert traced[1]["metrics"] == [
-            linked_equivalent.metrics["vp"], linked_equivalent.metrics["trades"]
-        ]
-        trace_paths = [result["artifacts"]["trace_path"] for result in traced]
-        assert len(set(trace_paths)) == 2
-        assert all((tmp_path / path).is_file() for path in trace_paths)
-        batched = next(result for result in batch.results if result.ordinal == 7)
-        assert _economic_metrics(batched) == _economic_metrics(single)
-    finally:
-        client.shutdown()
-
-
-def test_real_metric_array_matches_object(tmp_path: Path) -> None:
-    assert EVALUATOR is not None
-    template, candles = _write_inputs(tmp_path)
-    client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
-    try:
-        hello = client.start()
-        policy_params = json.loads(os.environ.get("CURVE_FX_POLICY_PARAMS", "[]"))
-        assert len(policy_params) == hello.evaluator_identity.policy_parameter_count
-        _open(client, template, candles, "metric-arrays")
-        fields = ["vp", "apy", "trades"]
-        object_frame = client.evaluate_batch(
-            [CandidateSpec(
-                ordinal=0,
-                candidate_id="object",
-                policy_params=policy_params,
-            )],
-            metric_fields=fields,
-        )
-        array_frame = client.evaluate_batch(
-            [CandidateSpec(
-                ordinal=0,
-                candidate_id="array",
-                policy_params=policy_params,
-            )],
-            metric_fields=fields,
-            metrics_format="array",
-        )
-
-        assert array_frame["metric_fields"] == fields
-        assert array_frame["results"][0]["metrics"] == [
-            object_frame.results[0].metrics[name] for name in fields
-        ]
-    finally:
-        client.shutdown()
-
-
-def test_real_evaluator_rejects_missing_market_file(tmp_path: Path) -> None:
-    assert EVALUATOR is not None
-    template, _ = _write_inputs(tmp_path)
-
-    client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
-    try:
-        with pytest.raises(FileNotFoundError, match="Market file not found"):
-            _open(client, template, tmp_path / "missing.json", "missing-market")
-    finally:
-        client.shutdown()
-
-
-def test_pool_index_selects_another_template_entry(tmp_path: Path) -> None:
-    assert EVALUATOR is not None
-    template, candles = _write_inputs(tmp_path)
-    template_data = json.loads(template.read_text(encoding="utf-8"))
-    duplicate = json.loads(json.dumps(template_data["pools"][0]))
-    duplicate["tag"] = "protocol_smoke_duplicate"
-    template_data["pools"].append(duplicate)
-    template.write_text(
-        json.dumps(template_data, sort_keys=True), encoding="utf-8"
-    )
-
-    ready = []
-    for pool_index in (0, 1):
-        client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
-        try:
-            ready.append(client.open_session(
-                session_id=f"pool-{pool_index}",
-                template_path=template,
-                scenario_id="protocol-smoke",
-                market_path=candles,
-                start_time=1_700_000_000,
-                end_time=1_700_000_000 + 9 * 60,
-                candle_filter=100.0,
-                pool_index=pool_index,
-            ))
-        finally:
-            client.shutdown()
-
-    assert [item.scenarios[0].id for item in ready] == ["protocol-smoke", "protocol-smoke"]
-
-
-def test_real_evaluator_rejects_missing_metric_projection(tmp_path: Path) -> None:
-    assert EVALUATOR is not None
-    template, candles = _write_inputs(tmp_path)
-    policy_params = json.loads(os.environ.get("CURVE_FX_POLICY_PARAMS", "[]"))
-    process = subprocess.Popen(
-        [EVALUATOR, "serve"],
-        cwd=tmp_path,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        bufsize=1,
-    )
-    assert process.stdin is not None
-    assert process.stdout is not None
-    try:
-        hello = json.loads(process.stdout.readline())
-        assert hello["type"] == "hello"
-        assert len(policy_params) == hello["evaluator_identity"]["policy_parameter_count"]
-
-        process.stdin.write(json.dumps({
-            "protocol": "curve_fx_eval",
-            "type": "open_session",
-            "request_id": "open-1",
-            "session_id": "missing-projection",
-            "template_path": str(template),
-            "scenario_id": "protocol-smoke",
-            "market_path": str(candles),
-            "start_time": 1_700_000_000,
-            "end_time": 1_700_000_000 + 9 * 60,
-            "candle_filter": 100.0,
-        }) + "\n")
-        process.stdin.flush()
-        ready = json.loads(process.stdout.readline())
-        assert ready["type"] == "session_ready"
-
-        process.stdin.write(json.dumps({
-            "protocol": "curve_fx_eval",
-            "type": "evaluate_batch",
-            "request_id": "batch-1",
-            "session_id": "missing-projection",
-            "candidates": [{
-                "ordinal": 0,
-                "candidate_id": "candidate-0",
-                "policy_params": policy_params,
-            }],
-        }) + "\n")
-        process.stdin.flush()
-        error = json.loads(process.stdout.readline())
-        assert error["type"] == "error"
-        assert error["error_code"] == "MISSING_REQUIRED_FIELD"
-        assert "metric_projection" in error["message"]
-
-        process.stdin.write(json.dumps({
-            "protocol": "curve_fx_eval",
-            "type": "evaluate_batch",
-            "request_id": "batch-2",
-            "session_id": "missing-projection",
-            "metric_projection": "summary",
-            "candidates": [{
-                "ordinal": 0,
-                "candidate_id": "candidate-nonfinite",
-                "policy_params": policy_params,
-                "pool_overrides": {"pool": {"A": "nan"}},
-            }],
-        }) + "\n")
-        process.stdin.flush()
-        error = json.loads(process.stdout.readline())
-        assert error["type"] == "error"
-        assert error["error_code"] == "INVALID_POOL_OVERRIDES"
-        assert "finite binary64" in error["message"]
-
-        process.stdin.write(json.dumps({
-            "protocol": "curve_fx_eval",
-            "type": "evaluate_batch",
-            "request_id": "batch-3",
-            "session_id": "missing-projection",
-            "metric_projection": "summary",
-            "metrics_format": "array",
-            "candidates": [{
-                "ordinal": 0,
-                "candidate_id": "array-without-fields",
-                "policy_params": policy_params,
-            }],
-        }) + "\n")
-        process.stdin.flush()
-        error = json.loads(process.stdout.readline())
-        assert error["type"] == "error"
-        assert error["error_code"] == "INVALID_METRIC_FIELDS"
-
-        process.stdin.write(json.dumps({
-            "protocol": "curve_fx_eval",
-            "type": "shutdown",
-            "request_id": "shutdown-1",
-        }) + "\n")
-        process.stdin.flush()
-        assert process.wait(timeout=5) == 0
-    finally:
-        if process.poll() is None:
-            process.terminate()
-            process.wait(timeout=5)
-
-
-def test_real_evaluator_runs_optional_yb_2l_model(tmp_path: Path) -> None:
-    assert EVALUATOR is not None
-    template, candles = _write_inputs(tmp_path)
-    client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
-    try:
-        hello = client.start()
-        policy_params = json.loads(os.environ.get("CURVE_FX_POLICY_PARAMS", "[]"))
-        assert len(policy_params) == hello.evaluator_identity.policy_parameter_count
-        client.open_session(
-            session_id="yb-2l",
-            template_path=template,
-            scenario_id="protocol-smoke",
-            market_path=candles,
-            yb_mode="active_2l",
-            yb_releverage_fee=0.013,
-            yb_cash_multiplier=3.0,
-        )
-        result = client.evaluate_batch(
-            [CandidateSpec(
-                ordinal=0,
-                candidate_id="yb-2l",
-                policy_params=policy_params,
-            )],
-            observation=ObservationSpec(
-                kind="full_trace",
-                trace_interval=1,
-                artifact_dir="yb-trace",
-            ),
-        ).results[0]
-        assert result.status == "ok"
-        assert result.metrics["yb_enabled"] == 1.0
-        assert result.metrics["yb_fee"] == pytest.approx(0.013)
-        assert result.artifacts is not None
-        trace = json.loads(
-            (tmp_path / result.artifacts.trace_path).read_text(encoding="utf-8")
-        )
-        assert trace
-        assert any(row["yb_debt"] > 0 and row["yb_collateral_lp"] > 0 for row in trace)
-    finally:
-        client.shutdown()
-
-
-def test_real_evaluator_yb_mode_round_trip(tmp_path: Path) -> None:
-    assert EVALUATOR is not None
-    template, candles = _write_inputs(tmp_path)
-    policy_params = json.loads(os.environ.get("CURVE_FX_POLICY_PARAMS", "[]"))
-
-    def _run(mode: str, *, fee: float = 0.012, cash: float = 1.0):
-        client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
-        try:
-            hello = client.start()
-            assert len(policy_params) == hello.evaluator_identity.policy_parameter_count
-            assert hello.yb_modes == ["off", "active_2l", "reference_2l"]
-            client.open_session(
-                session_id=f"yb-{mode}",
-                template_path=template,
-                scenario_id="protocol-smoke",
-                market_path=candles,
-                yb_mode=mode,
-                yb_releverage_fee=fee,
-                yb_cash_multiplier=cash,
-            )
-            return client.evaluate_batch(
-                [CandidateSpec(ordinal=0, candidate_id=f"yb-{mode}", policy_params=policy_params)]
-            ).results[0]
-        finally:
-            client.shutdown()
-
-    active = _run("active_2l", fee=0.011, cash=2.5)
-    assert active.status == "ok"
-    assert active.metrics["yb_enabled"] == 1.0
-    assert active.metrics["yb_fee"] == pytest.approx(0.011)
-
-    reference = _run("reference_2l")
-    assert reference.status == "ok"
-    assert reference.metrics["yb_enabled"] == 1.0
-
-    off = _run("off")
-    assert off.status == "ok"
-    assert off.metrics["yb_enabled"] == 0.0
-    assert off.metrics["yb_apy"] == -1.0
-    assert off.metrics["yb_fee"] == 0.0
-
-    client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
-    try:
-        client.start()
-        with pytest.raises(ValueError, match="yb_mode"):
-            client.open_session(
-                session_id="yb-bad",
-                template_path=template,
-                scenario_id="protocol-smoke",
-                market_path=candles,
-                yb_mode="strange",
-            )
-    finally:
-        client.shutdown()
-
-
-def test_real_persistent_short_lived_trace_and_paths(tmp_path: Path) -> None:
-    assert EVALUATOR is not None
-    template, candles = _write_inputs(tmp_path)
-
-    persistent = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
-    try:
-        hello = persistent.start()
-        policy_params = json.loads(os.environ.get("CURVE_FX_POLICY_PARAMS", "[]"))
-        assert len(policy_params) == hello.evaluator_identity.policy_parameter_count
-        candidate = CandidateSpec(
-            ordinal=0,
-            candidate_id="candidate-0",
+def _evaluate_once(
+    client: EvaluatorClient,
+    policy_params: list[float],
+    *,
+    candidate_id: str,
+    ordinal: int = 0,
+    **kwargs,
+):
+    return client.evaluate_batch([
+        CandidateSpec(
+            ordinal=ordinal,
+            candidate_id=candidate_id,
             policy_params=policy_params,
         )
-        ready = _open(persistent, template, candles, "persistent")
-        assert ready.scenarios[0].candles_count == 10
-        assert ready.scenarios[0].end_ts == 1_700_000_000 + 9 * 60
-        summary_frame = persistent.evaluate_batch([candidate], metric_projection="summary")
-        summary = summary_frame.results[0]
-        if hello.evaluator_identity.policy_id == "native_passthrough":
-            assert policy_params == []
-            assert summary.status == "ok"
-        with pytest.raises(RemoteEvaluatorError, match="pool_overrides.pool.policy"):
-            persistent.evaluate_batch([
-                CandidateSpec(
-                    ordinal=0,
-                    candidate_id="runtime-native-kind",
-                    policy_params=policy_params,
-                    pool_overrides={"pool": {"policy": {"kind": "twocrypto_policy"}}},
-                )
-            ])
-        numeric_override = persistent.evaluate_batch([
-            CandidateSpec(
-                ordinal=0,
-                candidate_id="override-number",
-                policy_params=policy_params,
-                pool_overrides={"pool": {"A": 500000.0}},
-            )
-        ]).results[0]
-        string_override = persistent.evaluate_batch([
-            CandidateSpec(
-                ordinal=0,
-                candidate_id="override-string",
-                policy_params=policy_params,
-                pool_overrides={"pool": {"A": "500000.0"}},
-            )
-        ]).results[0]
-        assert _economic_metrics(numeric_override) == _economic_metrics(string_override)
-        canonical = persistent.evaluate_batch([
-            CandidateSpec(
-                ordinal=9,
-                candidate_id="candidate-9",
-                policy_params=policy_params,
-            ),
-            CandidateSpec(
-                ordinal=3,
-                candidate_id="candidate-3",
-                policy_params=policy_params,
-            ),
-        ])
-        assert [result.ordinal for result in canonical.results] == [3, 9]
-        full_frame = persistent.evaluate_batch(
-            [candidate],
-            metric_projection="full",
-            observation=ObservationSpec(
-                kind="full_trace",
-                trace_interval=1,
-                trace_actions=True,
-                artifact_dir="trace",
-            ),
-        )
-        full = full_frame.results[0]
-        assert summary_frame.metric_projection.value == "summary"
-        assert full_frame.metric_projection.value == "full"
-        assert summary.scenario_results == []
-        assert len(full.scenario_results) == 1
-        assert summary.status == full.status == "ok"
-        assert summary.candidate_id == full.candidate_id == "candidate-0"
-        assert _economic_metrics(summary) == _economic_metrics(full)
-        assert summary.metrics["yb_enabled"] == 0.0
-        assert summary.metrics["yb_apy"] == -1.0
-        assert full.artifacts is not None
+    ], **kwargs).results[0]
 
-        trace_path = tmp_path / full.artifacts.trace_path
+
+def test_identity_policy_admission_and_batch(tmp_path: Path) -> None:
+    assert EVALUATOR is not None
+    description = _description()
+    build = description["build"]
+    expected_mode = os.environ.get("CURVE_FX_EXPECTED_NUMERIC_MODE")
+    expected_real_type = os.environ.get("CURVE_FX_EXPECTED_REAL_TYPE")
+    if expected_mode:
+        assert build["numeric_mode"] == expected_mode
+    if expected_real_type:
+        assert build["real_type"] == expected_real_type
+    assert build["target"] == Path(EVALUATOR).name
+    assert build["wire_real_type"] == "IEEE-754 binary64"
+    assert build["wire_real_digits"] == 53
+    assert build["real_digits"] >= build["wire_real_digits"]
+
+    policy_params = _policy_defaults(description)
+    policy = description["policy"]
+    expected_count = 0 if policy["id"] == "none" else 6
+    assert policy["parameter_count"] == expected_count == len(policy_params)
+    with pytest.raises(ValueError, match="finite"):
+        CandidateSpec(
+            ordinal=0,
+            candidate_id="non-finite",
+            pool_overrides={"pool": {"A": float("inf")}},
+        )
+
+    template, candles = _write_inputs(tmp_path)
+    client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
+    try:
+        hello = client.start()
+        identity = hello.evaluator_identity
+        assert identity.numeric_mode == build["numeric_mode"]
+        assert identity.real_type == build["real_type"]
+        assert identity.policy_id == policy["id"]
+        assert identity.policy_parameter_count == expected_count
+        _open(client, template, candles, "identity")
+        result = _evaluate_once(
+            client,
+            policy_params,
+            candidate_id="identity",
+        )
+        assert result.status == "ok"
+        assert result.metrics
+    finally:
+        client.shutdown()
+
+
+def test_profiles_and_registered_range_match_public_results(tmp_path: Path) -> None:
+    assert EVALUATOR is not None
+    policy_params = _policy_defaults(_description())
+    template, candles = _write_inputs(tmp_path)
+    fields = (
+        "vp",
+        "apy_net",
+        "apy_net_robust_90d",
+        "avg_rel_price_diff",
+        "detach_energy_ungated",
+        "trades",
+        "n_rebalances",
+    )
+    override = {
+        "pool": {
+            "A": "5.000000000000001",
+            "mid_fee": "0.001",
+            "out_fee": "0.001",
+            "fee_gamma": "0.030000000000000123",
+            "reserved_profit_fraction": "0.3400000123",
+        }
+    }
+
+    with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as scalar:
+        _open(scalar, template, candles, "scalar", metric_profile="full_summary")
+        direct = scalar.evaluate_batch([
+            CandidateSpec(
+                ordinal=4,
+                candidate_id="direct",
+                policy_params=policy_params,
+                pool_overrides=override,
+            )
+        ], metric_fields=fields, metrics_format="array")["results"][0]
+        scalar.register_grid("one-point", {
+            "candidate_defaults": {
+                "policy_params": policy_params,
+                "pool": override["pool"],
+            },
+            "axes": {},
+            "axis_order": [],
+            "shape": [],
+        })
+        ranged = scalar.evaluate_batch(
+            [],
+            metric_fields=fields,
+            metrics_format="array",
+            trusted_candidates=True,
+            grid_id="one-point",
+            ranges=((0, 1),),
+        )["results"][0]
+        assert ranged["ordinal"] == 0
+        assert ranged["candidate_id"] == "p00000000"
+        assert ranged["metrics"] == direct["metrics"]
+
+    with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as skipped:
+        _open(
+            skipped,
+            template,
+            candles,
+            "exact-skip",
+            event_cursor="exact_skip",
+            metric_profile="grid_core",
+        )
+        exact = skipped.evaluate_batch([
+            CandidateSpec(
+                ordinal=4,
+                candidate_id="exact-skip",
+                policy_params=policy_params,
+                pool_overrides=override,
+            )
+        ], metric_fields=fields).results[0]
+        assert exact.metrics == dict(zip(fields, direct["metrics"]))
+
+
+def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
+    assert EVALUATOR is not None
+    policy_params = _policy_defaults(_description())
+    template, candles = _write_inputs(tmp_path, flat=True)
+    observation = ObservationSpec(
+        kind="full_trace",
+        trace_interval=1,
+        trace_actions=True,
+        artifact_dir="sidecars",
+    )
+
+    client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
+    try:
+        hello = client.start()
+        assert "atomic_sidecars" in hello.capabilities
+        _open(
+            client,
+            template,
+            candles,
+            "scheduling",
+            dustswap_freq_s=120,
+        )
+        scheduled = _evaluate_once(
+            client,
+            policy_params,
+            candidate_id="scheduled",
+            observation=observation,
+        )
+        assert scheduled.status == "ok"
+        assert scheduled.artifacts is not None
+        trace_path = tmp_path / scheduled.artifacts.trace_path
+        actions_path = tmp_path / scheduled.artifacts.actions_path
         trace = json.loads(trace_path.read_text(encoding="utf-8"))
-        assert trace and {"xp_0", "p_chainlink", "yb_debt"} <= trace[0].keys()
-        actions_path = tmp_path / full.artifacts.actions_path
         actions = json.loads(actions_path.read_text(encoding="utf-8"))
-        assert all("type" in action for action in actions)
-        assert {path.name for path in (tmp_path / "trace").iterdir()} == {
+        tick_timestamps = [row["ts"] for row in actions if row["type"] == "tick"]
+        assert tick_timestamps[:2] == [1_700_000_125, 1_700_000_245]
+        assert all(
+            later - earlier == 120
+            for earlier, later in zip(tick_timestamps, tick_timestamps[1:])
+        )
+        assert {path.name for path in (tmp_path / "sidecars").iterdir()} == {
             trace_path.name,
             actions_path.name,
         }
 
-        full_repeat = persistent.evaluate_batch(
-            [candidate],
+        effective = scheduled.artifacts.effective_inputs
+        assert effective["pool.fee_gamma"] == pytest.approx(0.030000000000000123)
+        assert effective["pool.reserved_profit_fraction"] == pytest.approx(0.3400000123)
+    finally:
+        client.shutdown()
+
+    with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
+        _open(
+            client,
+            template,
+            candles,
+            "user-scheduling",
+            dustswap_freq_s=0,
+            user_swap_freq_s=180,
+            user_swap_size_frac=0.01,
+            user_swap_thresh=1.0,
+        )
+        user_result = _evaluate_once(
+            client,
+            policy_params,
+            candidate_id="user-scheduled",
             observation=ObservationSpec(
                 kind="full_trace",
                 trace_interval=1,
-                trace_actions=True,
-                artifact_dir="trace",
+                artifact_dir="user-sidecar",
             ),
-        ).results[0]
-        assert full_repeat.artifacts == full.artifacts
-
-        wrong_count = CandidateSpec(
-            ordinal=1,
-            candidate_id="wrong-count",
-            policy_params=[*policy_params, 1.0],
         )
-        with pytest.raises(RemoteEvaluatorError, match="expected .* policy parameters"):
-            persistent.evaluate_batch([wrong_count])
-
-        duplicate = CandidateSpec(
-            ordinal=0,
-            candidate_id="candidate-0",
-            policy_params=policy_params,
+        assert user_result.artifacts is not None
+        user_trace = json.loads(
+            (tmp_path / user_result.artifacts.trace_path).read_text(encoding="utf-8")
         )
-        with pytest.raises(RemoteEvaluatorError, match="must both be unique"):
-            persistent.evaluate_batch([candidate, duplicate])
+        by_time = {row["t"]: row for row in user_trace}
+        assert by_time[1_700_000_185]["xp_0"] != by_time[1_700_000_175]["xp_0"]
 
-        unknown_override = CandidateSpec(
-            ordinal=2,
-            candidate_id="unknown-override",
-            policy_params=policy_params,
-            pool_overrides={"pool": {"mid_fee_bps": 10}},
-        )
-        rejected = persistent.evaluate_batch([unknown_override]).results[0]
-        assert rejected.status == "failed"
-        assert "unknown field: mid_fee_bps" in (rejected.error or "")
-    finally:
-        persistent.shutdown()
-
-    short_lived = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
-    try:
-        ready_once = _open(short_lived, template, candles, "once")
-        once = short_lived.evaluate_batch([candidate]).results[0]
-        assert _economic_metrics(once) == _economic_metrics(summary)
-    finally:
-        short_lived.shutdown()
-
-    unsafe_client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
-    try:
-        with pytest.raises(RemoteEvaluatorError, match="unsafe characters"):
-            unsafe_client.open_session(
-                session_id="unsafe-scenario",
-                template_path=template,
-                scenario_id="../unsafe",
-                market_path=candles,
+    for mode in ("active_2l", "reference_2l"):
+        with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
+            _open(
+                client,
+                template,
+                candles,
+                f"yb-{mode}",
+                yb_mode=mode,
+                yb_releverage_fee=0.013,
+                yb_cash_multiplier=3.0,
             )
-    finally:
-        unsafe_client.shutdown()
-
-    feed_scenarios = []
-    for feed_price in (1.0001, 1.0002):
-        chainlink = tmp_path / f"chainlink-{feed_price:.4f}.csv"
-        chainlink.write_text(
-            "timestamp,datetime_utc,block_number,log_index,proxy_round_id,answer,decimals,price\n"
-            f"1600000000,2020-09-13T12:26:40+00:00,0,0,0,0,8,{feed_price}\n",
-            encoding="utf-8",
-        )
-        feed_client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
-        try:
-            feed_ready = feed_client.open_session(
-                session_id=f"feed-{feed_price:.4f}",
-                template_path=template,
-                scenario_id="protocol-smoke",
-                market_path=candles,
-                chainlink_path=chainlink,
-                start_time=1_700_000_000,
-                end_time=1_700_000_000 + 9 * 60,
-                candle_filter=100.0,
+            result = _evaluate_once(
+                client,
+                policy_params,
+                candidate_id=f"yb-{mode}",
+                metric_fields=("yb_apy", "yb_fee"),
             )
-            feed_scenarios.append(feed_ready.scenarios[0].id)
-        finally:
-            feed_client.shutdown()
-    assert feed_scenarios == ["protocol-smoke", "protocol-smoke"]
-
-    candles.write_text("[]", encoding="utf-8")
-    tampered = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
-    try:
-        with pytest.raises(RemoteEvaluatorError, match="candles"):
-            _open(tampered, template, candles, "tampered")
-    finally:
-        tampered.shutdown()
+            assert result.status == "ok"
+            assert result.metrics["yb_apy"] != -1.0
+            assert result.metrics["yb_fee"] == pytest.approx(0.013)
