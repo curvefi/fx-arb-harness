@@ -81,7 +81,6 @@ They are loaded once at admission.
   "min_swap": 1e-6,
   "max_swap": 1.0,
   "dustswap_freq_s": 3600,
-  "arbitrage_enabled": true,
   "enable_slippage_probes": false,
   "yb_mode": "off",
   "yb_releverage_fee": 0.012,
@@ -90,15 +89,17 @@ They are loaded once at admission.
 ```
 
 The remaining optional session controls are `user_swap_freq_s`,
-`user_swap_size_frac`, `user_swap_thresh`, `arbitrage_enabled`, `event_cursor`, `metric_profile`,
+`user_swap_size_frac`, `user_swap_thresh`, `event_cursor`, `metric_profile`,
 and `enable_slippage_probes`. Slippage probes are off unless explicitly enabled.
-Arbitrage is on by default; `arbitrage_enabled=false` bypasses arbitrage sizing
-and execution exactly rather than approximating it with an extreme cost.
-With arbitrage enabled, `event_cursor=exact_skip` requires
-`metric_profile=grid_core`. With arbitrage disabled it also supports
-`full_summary`, including scheduled user swaps and slippage probes, by jumping
-only to mandatory observation and mutation timestamps. Scalar supports both
-metric profiles and remains the reference cursor.
+`user_swap_size_frac` is the daily fair-TVL utilization fraction: each scheduled
+order has coin0-equivalent notional `fair_tvl * user_swap_size_frac *
+user_swap_freq_s / 86400`, converted into the alternating input coin at the
+current external price. Thus `1.0` means 100% attempted fair-TVL turnover per
+day, not 100% of one reserve per swap.
+Arbitrage sizing and execution are always evaluated. Model weak or absent
+arbitrage economically with `pool.costs.arb_fee_bps`, gas, and volume caps.
+`event_cursor=exact_skip` requires `metric_profile=grid_core`. Scalar supports
+both metric profiles and remains the reference cursor.
 `yb_mode` is `off`, `active_2l`, or `reference_2l`.
 The enabled modes use `yb_releverage_fee` and `yb_cash_multiplier`, and evaluate
 after every causal event. Summary valuation is hourly for GM accounting and once

@@ -16,7 +16,7 @@ struct StaticParameterDescriptor {
     std::string_view choices_json{};
 };
 
-inline constexpr std::array<StaticParameterDescriptor, 55> STATIC_PARAMETERS{{
+inline constexpr std::array<StaticParameterDescriptor, 54> STATIC_PARAMETERS{{
     {"pool.tag", "pool_overrides.tag", "string", "identifier", "utf8", "candidate", ""},
     {"pool.initial_liquidity", "pool_overrides.pool.initial_liquidity", "real_pair", "token_amount", "binary64_from_wad_1e18", "candidate", ""},
     {"pool.A", "pool_overrides.pool.A", "real", "pool_raw", "binary64", "candidate", ""},
@@ -37,7 +37,7 @@ inline constexpr std::array<StaticParameterDescriptor, 55> STATIC_PARAMETERS{{
     {"pool.donation_duration", "pool_overrides.pool.donation_duration", "real", "seconds", "binary64", "candidate", ""},
     {"pool.initial_donation_days", "pool_overrides.pool.initial_donation_days", "real", "days", "binary64", "candidate", ""},
     {"pool.donation_coins_ratio", "pool_overrides.pool.donation_coins_ratio", "real", "ratio", "binary64", "candidate", ""},
-    {"pool.user_swap_size_frac", "pool_overrides.pool.user_swap_size_frac", "real", "ratio", "binary64", "candidate", ""},
+    {"pool.user_swap_size_frac", "pool_overrides.pool.user_swap_size_frac", "real", "daily_tvl_fraction", "binary64", "candidate", ""},
     {"pool.costs.arb_fee_bps", "pool_overrides.costs.arb_fee_bps", "real", "basis_points", "binary64", "candidate", ""},
     {"pool.costs.gas_coin0", "pool_overrides.costs.gas_coin0", "real", "coin0", "binary64", "candidate", ""},
     {"pool.costs.use_volume_cap", "pool_overrides.costs.use_volume_cap", "boolean", "flag", "json_boolean", "candidate", ""},
@@ -58,9 +58,8 @@ inline constexpr std::array<StaticParameterDescriptor, 55> STATIC_PARAMETERS{{
     {"run.max_swap", "open_session.max_swap", "real", "ratio", "binary64", "session", "1.0"},
     {"run.dustswap_freq_s", "open_session.dustswap_freq_s", "integer", "seconds", "uint64", "session", "3600"},
     {"run.user_swap_freq_s", "open_session.user_swap_freq_s", "integer", "seconds", "uint64", "session", "0"},
-    {"run.user_swap_size_frac", "open_session.user_swap_size_frac", "real", "ratio", "binary64", "session", "0.01"},
+    {"run.user_swap_size_frac", "open_session.user_swap_size_frac", "real", "daily_tvl_fraction", "binary64", "session", "0.01"},
     {"run.user_swap_thresh", "open_session.user_swap_thresh", "real", "ratio", "binary64", "session", "0.05"},
-    {"run.arbitrage_enabled", "open_session.arbitrage_enabled", "boolean", "flag", "json_boolean", "session", "true"},
     {"run.enable_slippage_probes", "open_session.enable_slippage_probes", "boolean", "flag", "json_boolean", "observation", "false"},
     {"run.event_cursor", "open_session.event_cursor", "enum", "event_cursor", "utf8", "session", "\"scalar\"", "[\"scalar\",\"exact_skip\"]"},
     {"run.metric_profile", "open_session.metric_profile", "enum", "metric_profile", "utf8", "session", "\"full_summary\"", "[\"full_summary\",\"grid_core\"]"},

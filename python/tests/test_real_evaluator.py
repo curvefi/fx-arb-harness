@@ -260,32 +260,6 @@ def test_profiles_and_registered_range_match_public_results(tmp_path: Path) -> N
         ], metric_fields=fields).results[0]
         assert exact.metrics == dict(zip(fields, direct["metrics"]))
 
-    no_arb_fields = (*fields, "tw_real_slippage_1pct")
-    no_arb_results = []
-    for cursor in ("scalar", "exact_skip"):
-        with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
-            _open(
-                client,
-                template,
-                candles,
-                f"no-arb-{cursor}",
-                arbitrage_enabled=False,
-                event_cursor=cursor,
-                metric_profile="full_summary",
-                user_swap_freq_s=180,
-                user_swap_size_frac=0.01,
-                user_swap_thresh=1.0,
-                enable_slippage_probes=True,
-            )
-            no_arb_results.append(_evaluate_once(
-                client,
-                policy_params,
-                candidate_id=f"no-arb-{cursor}",
-                metric_fields=no_arb_fields,
-            ).metrics)
-    assert no_arb_results[1] == no_arb_results[0]
-
-
 def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
     assert EVALUATOR is not None
     policy_params = _policy_defaults(_description())
@@ -309,7 +283,6 @@ def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
             "scheduling",
             price_feed_path=price_feed,
             dustswap_freq_s=120,
-            arbitrage_enabled=False,
         )
         scheduled = _evaluate_once(
             client,
@@ -338,7 +311,6 @@ def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
         effective = scheduled.artifacts.effective_inputs
         assert effective["pool.fee_gamma"] == pytest.approx(0.030000000000000123)
         assert effective["pool.reserved_profit_fraction"] == pytest.approx(0.3400000123)
-        assert effective["run.arbitrage_enabled"] is False
     finally:
         client.shutdown()
 
@@ -353,11 +325,13 @@ def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
             user_swap_freq_s=180,
             user_swap_size_frac=0.01,
             user_swap_thresh=1.0,
+            enable_slippage_probes=True,
         )
         user_result = _evaluate_once(
             client,
             policy_params,
             candidate_id="user-scheduled",
+            metric_fields=("tw_real_slippage_1pct",),
             observation=ObservationSpec(
                 kind="full_trace",
                 trace_interval=1,
@@ -365,11 +339,16 @@ def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
             ),
         )
         assert user_result.artifacts is not None
+        assert user_result.metrics["tw_real_slippage_1pct"] != -1.0
         user_trace = json.loads(
             (tmp_path / user_result.artifacts.trace_path).read_text(encoding="utf-8")
         )
         by_time = {row["t"]: row for row in user_trace}
-        assert by_time[1_700_000_185]["xp_0"] != by_time[1_700_000_175]["xp_0"]
+        before = by_time[1_700_000_175]
+        after = by_time[1_700_000_185]
+        fair_tvl = before["token0"] + after["p_cex"] * before["token1"]
+        expected_dx = fair_tvl * 0.01 * 180 / 86_400
+        assert after["token0"] - before["token0"] == pytest.approx(expected_dx)
 
     for mode in ("active_2l", "reference_2l"):
         with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:

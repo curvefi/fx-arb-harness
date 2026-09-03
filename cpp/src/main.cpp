@@ -507,7 +507,7 @@ private:
                 "end_time", "candle_filter", "min_swap", "max_swap",
                 "dustswap_freq_s", "user_swap_freq_s",
                 "user_swap_size_frac", "user_swap_thresh",
-                "arbitrage_enabled", "enable_slippage_probes", "yb_releverage_fee",
+                "enable_slippage_probes", "yb_releverage_fee",
                 "yb_cash_multiplier", "yb_mode", "event_cursor",
                 "metric_profile"
             })) {
@@ -596,8 +596,6 @@ private:
             cfg.user_swap_freq_s = user_swap_freq_s;
             cfg.user_swap_size_frac = static_cast<RealT>(arb::get_double_opt(req, "user_swap_size_frac", 0.01));
             cfg.user_swap_thresh = static_cast<RealT>(arb::get_double_opt(req, "user_swap_thresh", 0.05));
-            cfg.arbitrage_enabled = !req.if_contains("arbitrage_enabled") ||
-                req.at("arbitrage_enabled").as_bool();
             cfg.enable_slippage_probes =
                 req.if_contains("enable_slippage_probes") &&
                 req.at("enable_slippage_probes").as_bool();
@@ -642,12 +640,11 @@ private:
             cfg.metric_profile = metric_profile;
             if (
                 cfg.event_cursor == "exact_skip" &&
-                cfg.metric_profile != "grid_core" &&
-                cfg.arbitrage_enabled
+                cfg.metric_profile != "grid_core"
             ) {
                 write_frame(std::cout, make_error_frame(
                     req_id, "session", "INVALID_EVENT_CURSOR",
-                    "exact_skip with arbitrage requires metric_profile='grid_core'"));
+                    "exact_skip requires metric_profile='grid_core'"));
                 return;
             }
             std::string yb_mode = "off";

@@ -60,7 +60,6 @@ struct SessionConfig {
     uint64_t user_swap_freq_s{0};
     T user_swap_size_frac{static_cast<T>(0.01)};
     T user_swap_thresh{static_cast<T>(0.05)};
-    bool arbitrage_enabled{true};
     bool enable_slippage_probes{false};
     std::string event_cursor{"scalar"};
     std::string metric_profile{"full_summary"};

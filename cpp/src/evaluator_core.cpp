@@ -280,7 +280,6 @@ void execute_scenario_job(
         run_cfg.user_swap_freq_s = session_cfg.user_swap_freq_s;
         run_cfg.user_swap_size_frac = session_cfg.user_swap_size_frac;
         run_cfg.user_swap_thresh = session_cfg.user_swap_thresh;
-        run_cfg.arbitrage_enabled = session_cfg.arbitrage_enabled;
         run_cfg.enable_slippage_probes = session_cfg.enable_slippage_probes;
         if (session_cfg.event_cursor == "exact_skip") {
             run_cfg.event_cursor = arb::harness::EventCursor::ExactSkip;
@@ -355,7 +354,6 @@ void execute_scenario_job(
                 static_cast<double>(run_cfg.yb_releverage_fee);
             effective["run.yb_cash_multiplier"] =
                 static_cast<double>(run_cfg.yb_cash_multiplier);
-            effective["run.arbitrage_enabled"] = run_cfg.arbitrage_enabled;
 
             trace_lease.emplace(TraceArena::global_instance().acquire());
             run_cfg.detailed_log = true;

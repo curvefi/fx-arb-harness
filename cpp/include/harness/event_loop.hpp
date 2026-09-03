@@ -62,7 +62,6 @@ EventLoopResult<T> run_event_loop_impl(
 ) {
     const T min_swap_frac = cfg.min_swap_frac;
     const T max_swap_frac = cfg.max_swap_frac;
-    const bool arbitrage_enabled = cfg.arbitrage_enabled;
     const bool enable_slippage_probes = cfg.enable_slippage_probes;
     const size_t detailed_interval = cfg.detailed_interval;
     const T yb_releverage_fee = cfg.yb_releverage_fee;
@@ -237,10 +236,13 @@ EventLoopResult<T> run_event_loop_impl(
         }
     };
 
-    auto apply_donation = [&](std::size_t, uint64_t ts) {
+    auto apply_donation = [&](std::size_t, uint64_t ts, T cex_price) {
         auto don_res = make_donation_ex(pool, dcfg, ts, m);
         if (don_res.success) {
             invalidate_edge_inputs();
+            if (enable_slippage_probes) {
+                sample_slippage_probes(ts, cex_price);
+            }
             action_logger.log_donation(ts, don_res, dcfg);
         }
     };
@@ -248,13 +250,13 @@ EventLoopResult<T> run_event_loop_impl(
     auto apply_user_swap = [&](std::size_t, uint64_t ts, T cex_price) {
         if (try_user_swap(pool, ucfg, ts, cex_price)) {
             invalidate_edge_inputs();
+            if (enable_slippage_probes) {
+                sample_slippage_probes(ts, cex_price);
+            }
         }
     };
 
     auto execute_arb = [&](size_t ev_idx, uint64_t ev_ts, T cex_price) -> bool {
-        if (!arbitrage_enabled) {
-            return false;
-        }
         refresh_geometry();
         if (!(omf_floor * (cex_fee_discount * cex_price) > edge_p_now) &&
             !(edge_floor_scaled_p > cex_fee_markup * cex_price)) {
@@ -381,22 +383,14 @@ EventLoopResult<T> run_event_loop_impl(
     const bool donation_on = dcfg.enabled && !yb_on;
     const bool have_price_feed = !events.p_price_feed.empty();
 
-    // With arbitrage enabled, skips are gated by the policy's conservative fee
-    // floor. With arbitrage disabled, only scheduled observations and
-    // mutations can affect results, so exact_skip may jump directly to them.
-    const bool arb_exact_skip_on =
+    // Exact skipping is gated by the policy's conservative fee floor.
+    const bool exact_skip_on =
         GridCore &&
         cfg.event_cursor == EventCursor::ExactSkip &&
-        arbitrage_enabled &&
         !EnableYb && !detailed_on && !action_logger.enabled() &&
         !enable_slippage_probes && !user_swap_on &&
         pool.mid_fee == pool.out_fee &&
         events.price_blocks.ready_for(n_events);
-    const bool no_arb_exact_skip_on =
-        cfg.event_cursor == EventCursor::ExactSkip &&
-        !arbitrage_enabled &&
-        !EnableYb && !detailed_on && !action_logger.enabled();
-    const bool exact_skip_on = arb_exact_skip_on || no_arb_exact_skip_on;
 
     const auto event_passes_floor_gate = [&](double raw_price) {
         if (!(raw_price > 0.0)) return false;
@@ -473,13 +467,6 @@ EventLoopResult<T> run_event_loop_impl(
 
         const uint64_t mandatory_ts = next_mandatory_ts();
         if (events.ts[start] >= mandatory_ts) return start;
-        if (no_arb_exact_skip_on) {
-            return static_cast<size_t>(std::lower_bound(
-                events.ts.begin() + static_cast<std::ptrdiff_t>(start),
-                events.ts.end(),
-                mandatory_ts
-            ) - events.ts.begin());
-        }
         refresh_geometry();
         const auto finish_jump = [&](size_t destination) {
 #if defined(ARB_VALIDATE_EVENT_JUMPS)
@@ -674,7 +661,7 @@ EventLoopResult<T> run_event_loop_impl(
 
         sample_pre_trade(ev_ts, cex_price);
         if (donation_on && dcfg.next_ts != 0 && ev_ts >= dcfg.next_ts) {
-            apply_donation(ev_idx, ev_ts);
+            apply_donation(ev_idx, ev_ts, cex_price);
         }
 
         if (!(cex_price > T(0))) {

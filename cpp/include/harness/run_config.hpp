@@ -33,7 +33,6 @@ struct RunConfig {
     uint64_t user_swap_freq_s{0};
     T user_swap_size_frac{T(0.01)};
     T user_swap_thresh{T(0.05)};
-    bool arbitrage_enabled{true};
     bool save_actions{false};
 
     // Detailed per-event logging
