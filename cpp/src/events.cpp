@@ -428,27 +428,27 @@ EventSoA EventSoA::from_events(const std::vector<Event>& evs) {
     s.p_cex.reserve(n);
     s.volume.reserve(n);
     s.candle_idx.reserve(n);
-    bool any_chainlink = false;
+    bool any_price_feed = false;
     for (const auto& e : evs) {
-        if (e.p_chainlink != 0.0) {
-            any_chainlink = true;
+        if (e.p_price_feed != 0.0) {
+            any_price_feed = true;
             break;
         }
     }
-    if (any_chainlink) {
-        s.p_chainlink.reserve(n);
-        s.chainlink_ts.reserve(n);
-        s.chainlink_answer_index.reserve(n);
+    if (any_price_feed) {
+        s.p_price_feed.reserve(n);
+        s.price_feed_ts.reserve(n);
+        s.price_feed_index.reserve(n);
     }
     for (const auto& e : evs) {
         s.ts.push_back(e.ts);
         s.p_cex.push_back(e.p_cex);
         s.volume.push_back(e.volume);
         s.candle_idx.push_back(e.candle_idx);
-        if (any_chainlink) {
-            s.p_chainlink.push_back(e.p_chainlink);
-            s.chainlink_ts.push_back(e.chainlink_ts);
-            s.chainlink_answer_index.push_back(e.chainlink_answer_index);
+        if (any_price_feed) {
+            s.p_price_feed.push_back(e.p_price_feed);
+            s.price_feed_ts.push_back(e.price_feed_ts);
+            s.price_feed_index.push_back(e.price_feed_index);
         }
     }
     s.price_blocks.build(s.p_cex);

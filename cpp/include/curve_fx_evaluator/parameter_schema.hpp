@@ -16,7 +16,7 @@ struct StaticParameterDescriptor {
     std::string_view choices_json{};
 };
 
-inline constexpr std::array<StaticParameterDescriptor, 54> STATIC_PARAMETERS{{
+inline constexpr std::array<StaticParameterDescriptor, 55> STATIC_PARAMETERS{{
     {"pool.tag", "pool_overrides.tag", "string", "identifier", "utf8", "candidate", ""},
     {"pool.initial_liquidity", "pool_overrides.pool.initial_liquidity", "real_pair", "token_amount", "binary64_from_wad_1e18", "candidate", ""},
     {"pool.A", "pool_overrides.pool.A", "real", "pool_raw", "binary64", "candidate", ""},
@@ -48,7 +48,7 @@ inline constexpr std::array<StaticParameterDescriptor, 54> STATIC_PARAMETERS{{
     {"run.template_path", "open_session.template_path", "string", "path", "utf8", "session", ""},
     {"run.scenario_id", "open_session.scenario_id", "string", "identifier", "utf8", "session", ""},
     {"run.market_path", "open_session.market_path", "string", "path", "utf8", "session", ""},
-    {"run.chainlink_path", "open_session.chainlink_path", "string", "path", "utf8", "session", ""},
+    {"run.price_feed_path", "open_session.price_feed_path", "string", "path", "utf8", "session", ""},
     {"run.pool_index", "open_session.pool_index", "integer", "index", "uint64", "session", "0"},
     {"run.n_candles", "open_session.n_candles", "integer", "count", "uint64", "session", "0"},
     {"run.start_time", "open_session.start_time", "integer", "unix_seconds", "uint64", "session", "0"},
@@ -60,6 +60,7 @@ inline constexpr std::array<StaticParameterDescriptor, 54> STATIC_PARAMETERS{{
     {"run.user_swap_freq_s", "open_session.user_swap_freq_s", "integer", "seconds", "uint64", "session", "0"},
     {"run.user_swap_size_frac", "open_session.user_swap_size_frac", "real", "ratio", "binary64", "session", "0.01"},
     {"run.user_swap_thresh", "open_session.user_swap_thresh", "real", "ratio", "binary64", "session", "0.05"},
+    {"run.arbitrage_enabled", "open_session.arbitrage_enabled", "boolean", "flag", "json_boolean", "session", "true"},
     {"run.enable_slippage_probes", "open_session.enable_slippage_probes", "boolean", "flag", "json_boolean", "observation", "false"},
     {"run.event_cursor", "open_session.event_cursor", "enum", "event_cursor", "utf8", "session", "\"scalar\"", "[\"scalar\",\"exact_skip\"]"},
     {"run.metric_profile", "open_session.metric_profile", "enum", "metric_profile", "utf8", "session", "\"full_summary\"", "[\"full_summary\",\"grid_core\"]"},

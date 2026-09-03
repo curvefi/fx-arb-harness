@@ -127,7 +127,7 @@ public:
     // Log current pool state for this event (respects interval)
     template <typename Pool>
     bool log_event(const Pool& pool, uint64_t ts, const Candle& candle, T p_cex,
-                   T p_chainlink,
+                   T p_price_feed,
                    T donation_apy, uint64_t n_trades, uint64_t n_rebalances,
                    T slippage_1pct_0to1, T slippage_1pct_1to0) {
         if (!enabled()) return false;
@@ -160,7 +160,7 @@ public:
         entry.low = static_cast<T>(candle.low);
         entry.close = static_cast<T>(candle.close);
         entry.p_cex = p_cex;
-        entry.p_chainlink = p_chainlink;
+        entry.p_price_feed = p_price_feed;
         entry.fee = pools::twocrypto_fx::viewer_exchange_fee_fraction(pool, p_cex);
         entry.slippage_1pct_0to1 = slippage_1pct_0to1;
         entry.slippage_1pct_1to0 = slippage_1pct_1to0;

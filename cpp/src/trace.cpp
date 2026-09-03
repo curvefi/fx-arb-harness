@@ -39,7 +39,7 @@ json::object detailed_entry_to_json(const arb::harness::DetailedEntry<RealT>& e)
     o["low"] = static_cast<double>(e.low);
     o["close"] = static_cast<double>(e.close);
     o["p_cex"] = static_cast<double>(e.p_cex);
-    o["p_chainlink"] = static_cast<double>(e.p_chainlink);
+    o["p_price_feed"] = static_cast<double>(e.p_price_feed);
     o["fee"] = static_cast<double>(e.fee);
     o["slippage_1pct_0to1"] = static_cast<double>(e.slippage_1pct_0to1);
     o["slippage_1pct_1to0"] = static_cast<double>(e.slippage_1pct_1to0);

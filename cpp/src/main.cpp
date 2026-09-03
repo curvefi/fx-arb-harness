@@ -502,12 +502,12 @@ private:
     void handle_open_session(const json::object& req, const std::string& req_id) {
         if (const auto field = unknown_field(req, {
                 "protocol", "type", "request_id", "session_id",
-                "template_path", "scenario_id", "market_path", "chainlink_path",
+                "template_path", "scenario_id", "market_path", "price_feed_path",
                 "pool_index", "n_candles", "start_time",
                 "end_time", "candle_filter", "min_swap", "max_swap",
                 "dustswap_freq_s", "user_swap_freq_s",
                 "user_swap_size_frac", "user_swap_thresh",
-                "enable_slippage_probes", "yb_releverage_fee",
+                "arbitrage_enabled", "enable_slippage_probes", "yb_releverage_fee",
                 "yb_cash_multiplier", "yb_mode", "event_cursor",
                 "metric_profile"
             })) {
@@ -531,7 +531,7 @@ private:
         const std::string tpl_path = arb::get_string_opt(req, "template_path", "");
         const std::string scenario_id = arb::get_string_opt(req, "scenario_id", "");
         const std::string market_path = arb::get_string_opt(req, "market_path", "");
-        const std::string chainlink_path = arb::get_string_opt(req, "chainlink_path", "");
+        const std::string price_feed_path = arb::get_string_opt(req, "price_feed_path", "");
 
         if (tpl_path.empty() || scenario_id.empty() || market_path.empty()) {
             write_frame(std::cout, make_error_frame(
@@ -548,9 +548,9 @@ private:
             write_frame(std::cout, make_error_frame(req_id, "session", "FILE_NOT_FOUND", "Market file not found: " + market_path));
             return;
         }
-        if (!chainlink_path.empty() &&
-            (!fs::exists(chainlink_path) || fs::is_directory(chainlink_path))) {
-            write_frame(std::cout, make_error_frame(req_id, "session", "FILE_NOT_FOUND", "Chainlink file not found: " + chainlink_path));
+        if (!price_feed_path.empty() &&
+            (!fs::exists(price_feed_path) || fs::is_directory(price_feed_path))) {
+            write_frame(std::cout, make_error_frame(req_id, "session", "FILE_NOT_FOUND", "Price-feed file not found: " + price_feed_path));
             return;
         }
         size_t pool_index = 0;
@@ -586,7 +586,7 @@ private:
 
             std::cerr << "[evaluator] Loading scenario '" << scenario_id
                       << "' from " << market_path << " with template: " << tpl_path << "\n";
-            store->load(tpl_path, scenario_id, market_path, chainlink_path, opts);
+            store->load(tpl_path, scenario_id, market_path, price_feed_path, opts);
 
             curve_fx::evaluator::SessionConfig<RealT> cfg{};
             cfg.min_swap_frac = static_cast<RealT>(arb::get_double_opt(req, "min_swap", 1e-6));
@@ -596,6 +596,8 @@ private:
             cfg.user_swap_freq_s = user_swap_freq_s;
             cfg.user_swap_size_frac = static_cast<RealT>(arb::get_double_opt(req, "user_swap_size_frac", 0.01));
             cfg.user_swap_thresh = static_cast<RealT>(arb::get_double_opt(req, "user_swap_thresh", 0.05));
+            cfg.arbitrage_enabled = !req.if_contains("arbitrage_enabled") ||
+                req.at("arbitrage_enabled").as_bool();
             cfg.enable_slippage_probes =
                 req.if_contains("enable_slippage_probes") &&
                 req.at("enable_slippage_probes").as_bool();
@@ -640,11 +642,12 @@ private:
             cfg.metric_profile = metric_profile;
             if (
                 cfg.event_cursor == "exact_skip" &&
-                cfg.metric_profile != "grid_core"
+                cfg.metric_profile != "grid_core" &&
+                cfg.arbitrage_enabled
             ) {
                 write_frame(std::cout, make_error_frame(
                     req_id, "session", "INVALID_EVENT_CURSOR",
-                    "exact_skip requires metric_profile='grid_core'"));
+                    "exact_skip with arbitrage requires metric_profile='grid_core'"));
                 return;
             }
             std::string yb_mode = "off";

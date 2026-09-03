@@ -35,7 +35,7 @@ struct DetailedEntry {
     T low{};
     T close{};
     T p_cex{};            // event price used for this tick
-    T p_chainlink{};      // latest Chainlink price available at this tick
+    T p_price_feed{};     // latest generic feed price available at this tick
     T fee{};              // dynamic fee at this point
     T slippage_1pct_0to1{}; // current 1%-TVL real slippage, coin0 -> coin1
     T slippage_1pct_1to0{}; // current 1%-TVL real slippage, coin1 -> coin0

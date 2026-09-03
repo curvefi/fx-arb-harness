@@ -27,7 +27,7 @@ void ScenarioStore<T>::load(
     const std::string& template_path,
     const std::string& scenario_id,
     const std::string& market_path,
-    const std::string& chainlink_path,
+    const std::string& price_feed_path,
     const ScenarioLoadOptions& opts
 ) {
     auto pool_doc = arb::pools::PoolConfigDocument::from_file(template_path);
@@ -64,19 +64,19 @@ void ScenarioStore<T>::load(
     }
 
     auto events = arb::gen_events(candles);
-    if (!chainlink_path.empty()) {
-        if (!fs::exists(chainlink_path) || fs::is_directory(chainlink_path)) {
+    if (!price_feed_path.empty()) {
+        if (!fs::exists(price_feed_path) || fs::is_directory(price_feed_path)) {
             throw std::runtime_error(
-                "Chainlink file not found for scenario '" + scenario_id + "': " + chainlink_path);
+                "Price-feed file not found for scenario '" + scenario_id + "': " + price_feed_path);
         }
-        auto cl_points = arb::oracles::load_chainlink_csv(chainlink_path);
-        arb::oracles::attach_chainlink_prices(events, cl_points);
+        auto feed_points = arb::price_feeds::load_price_feed_csv(price_feed_path);
+        arb::price_feeds::attach_price_feed(events, feed_points);
     }
 
     Scenario<T> scenario;
     scenario.id = scenario_id;
     scenario.candle_path = market_path;
-    scenario.chainlink_path = chainlink_path;
+    scenario.price_feed_path = price_feed_path;
     scenario.candles = std::move(candles);
     scenario.events = arb::EventSoA::from_events(events);
     scenario.base_pool = base_pool;

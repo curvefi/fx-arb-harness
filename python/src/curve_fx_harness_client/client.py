@@ -247,7 +247,7 @@ class EvaluatorClient:
         template_path: Union[str, Path],
         scenario_id: str,
         market_path: Union[str, Path],
-        chainlink_path: Optional[Union[str, Path]] = None,
+        price_feed_path: Optional[Union[str, Path]] = None,
         pool_index: int = 0,
         n_candles: int = 0,
         start_time: int = 0,
@@ -259,6 +259,7 @@ class EvaluatorClient:
         user_swap_freq_s: int = 0,
         user_swap_size_frac: float = 0.01,
         user_swap_thresh: float = 0.05,
+        arbitrage_enabled: bool = True,
         enable_slippage_probes: bool = False,
         event_cursor: str = "scalar",
         metric_profile: str = "full_summary",
@@ -284,11 +285,11 @@ class EvaluatorClient:
                     raise FileNotFoundError(f"Template file not found: {full_tpl}")
                 if not full_market.exists():
                     raise FileNotFoundError(f"Market file not found: {full_market}")
-                if chainlink_path is not None:
-                    full_chainlink = self.work_dir / chainlink_path
-                    if not full_chainlink.exists():
+                if price_feed_path is not None:
+                    full_price_feed = self.work_dir / price_feed_path
+                    if not full_price_feed.exists():
                         raise FileNotFoundError(
-                            f"Chainlink file not found: {full_chainlink}"
+                            f"Price-feed file not found: {full_price_feed}"
                         )
 
             req_id = self._next_request_id("session")
@@ -298,8 +299,8 @@ class EvaluatorClient:
                 template_path=str(template_path),
                 scenario_id=scenario_id,
                 market_path=str(market_path),
-                chainlink_path=(
-                    str(chainlink_path) if chainlink_path is not None else None
+                price_feed_path=(
+                    str(price_feed_path) if price_feed_path is not None else None
                 ),
                 pool_index=pool_index,
                 n_candles=n_candles,
@@ -312,6 +313,7 @@ class EvaluatorClient:
                 user_swap_freq_s=user_swap_freq_s,
                 user_swap_size_frac=user_swap_size_frac,
                 user_swap_thresh=user_swap_thresh,
+                arbitrage_enabled=arbitrage_enabled,
                 enable_slippage_probes=enable_slippage_probes,
                 event_cursor=event_cursor,
                 metric_profile=metric_profile,

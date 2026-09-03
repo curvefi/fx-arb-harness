@@ -2,7 +2,7 @@
 
 import math
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -71,7 +71,7 @@ class OpenSessionFrame(ProtocolModel):
     template_path: str
     scenario_id: str
     market_path: str
-    chainlink_path: Optional[str] = None
+    price_feed_path: Optional[str] = None
     pool_index: int = 0
     n_candles: int = 0
     start_time: int = 0
@@ -83,6 +83,7 @@ class OpenSessionFrame(ProtocolModel):
     user_swap_freq_s: int = 0
     user_swap_size_frac: FiniteFloat = 0.01
     user_swap_thresh: FiniteFloat = 0.05
+    arbitrage_enabled: bool = True
     enable_slippage_probes: bool = False
     event_cursor: Literal["scalar", "exact_skip"] = "scalar"
     metric_profile: Literal["full_summary", "grid_core"] = "full_summary"
@@ -167,7 +168,7 @@ class EvaluateBatchFrame(ProtocolModel):
 class ArtifactRef(ProtocolModel):
     trace_path: Optional[str] = None
     actions_path: Optional[str] = None
-    effective_inputs: Optional[Dict[str, FiniteFloat]] = None
+    effective_inputs: Optional[Dict[str, Union[bool, FiniteFloat]]] = None
 
 
 class ScenarioResult(ProtocolModel):

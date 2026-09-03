@@ -23,7 +23,7 @@
 #include "harness/precision.hpp"
 #include "harness/run_config.hpp"
 #include "harness/runner.hpp"
-#include "oracles/chainlink.hpp"
+#include "price_feeds/price_feed.hpp"
 #include "pools/pool_config_source.hpp"
 #include "pools/pool_config_parse.hpp"
 #include "pools/pool_init.hpp"
@@ -43,7 +43,7 @@ template <typename T = RealT>
 struct Scenario {
     std::string id;
     std::string candle_path;
-    std::string chainlink_path;
+    std::string price_feed_path;
     std::vector<arb::Candle> candles;
     arb::EventSoA events;
     arb::pools::PoolInit<T> base_pool;
@@ -60,6 +60,7 @@ struct SessionConfig {
     uint64_t user_swap_freq_s{0};
     T user_swap_size_frac{static_cast<T>(0.01)};
     T user_swap_thresh{static_cast<T>(0.05)};
+    bool arbitrage_enabled{true};
     bool enable_slippage_probes{false};
     std::string event_cursor{"scalar"};
     std::string metric_profile{"full_summary"};
@@ -133,7 +134,7 @@ public:
         const std::string& template_path,
         const std::string& scenario_id,
         const std::string& market_path,
-        const std::string& chainlink_path,
+        const std::string& price_feed_path,
         const ScenarioLoadOptions& opts
     );
 

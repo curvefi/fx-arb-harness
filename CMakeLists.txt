@@ -177,7 +177,7 @@ set(CURVE_FX_EVALUATOR_SOURCES
     cpp/src/scenario_store.cpp
     cpp/src/trace.cpp
     cpp/src/events.cpp
-    cpp/src/chainlink.cpp
+    cpp/src/price_feed.cpp
     cpp/src/pool_config_source.cpp
 )
 

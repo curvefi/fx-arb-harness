@@ -72,7 +72,7 @@ They are loaded once at admission.
   "template_path": "templates/pool.json",
   "scenario_id": "eurusd-2024",
   "market_path": "data/eurusd.json",
-  "chainlink_path": "data/eurusd-chainlink.csv",
+  "price_feed_path": "data/eurusd-reference-prices.csv",
   "pool_index": 0,
   "n_candles": 0,
   "start_time": 0,
@@ -81,6 +81,7 @@ They are loaded once at admission.
   "min_swap": 1e-6,
   "max_swap": 1.0,
   "dustswap_freq_s": 3600,
+  "arbitrage_enabled": true,
   "enable_slippage_probes": false,
   "yb_mode": "off",
   "yb_releverage_fee": 0.012,
@@ -89,10 +90,15 @@ They are loaded once at admission.
 ```
 
 The remaining optional session controls are `user_swap_freq_s`,
-`user_swap_size_frac`, `user_swap_thresh`, `event_cursor`, `metric_profile`,
+`user_swap_size_frac`, `user_swap_thresh`, `arbitrage_enabled`, `event_cursor`, `metric_profile`,
 and `enable_slippage_probes`. Slippage probes are off unless explicitly enabled.
-`event_cursor=exact_skip` requires `metric_profile=grid_core`; scalar supports
-both metric profiles.
+Arbitrage is on by default; `arbitrage_enabled=false` bypasses arbitrage sizing
+and execution exactly rather than approximating it with an extreme cost.
+With arbitrage enabled, `event_cursor=exact_skip` requires
+`metric_profile=grid_core`. With arbitrage disabled it also supports
+`full_summary`, including scheduled user swaps and slippage probes, by jumping
+only to mandatory observation and mutation timestamps. Scalar supports both
+metric profiles and remains the reference cursor.
 `yb_mode` is `off`, `active_2l`, or `reference_2l`.
 The enabled modes use `yb_releverage_fee` and `yb_cash_multiplier`, and evaluate
 after every causal event. Summary valuation is hourly for GM accounting and once
@@ -112,7 +118,7 @@ with synthetic fresh-L2 state, not a historical LT replay.
 ```
 
 `scenario_id`, `market_path`, and `template_path` are required;
-`chainlink_path` is optional. The response keeps `scenarios` as an array so
+`price_feed_path` is optional. The response keeps `scenarios` as an array so
 clients can consume its event and candle counts uniformly.
 
 ### `evaluate_batch`

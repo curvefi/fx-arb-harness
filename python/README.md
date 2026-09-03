@@ -17,7 +17,7 @@ with EvaluatorClient(executable_path="../build/native/arb_evaluator_ld") as clie
         template_path="templates/pool_btc.json",
         scenario_id="btc-2024",
         market_path="markets/btc.json",
-        chainlink_path="markets/btc_chainlink.json",
+        price_feed_path="markets/btc_reference_prices.csv",
     )
     result = client.evaluate_batch(
         candidates=[

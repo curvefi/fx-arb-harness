@@ -71,6 +71,12 @@ def _write_inputs(root: Path, *, flat: bool = False) -> tuple[Path, Path]:
     return template, candles
 
 
+def _write_price_feed(root: Path, contents: str) -> Path:
+    path = root / "price-feed.csv"
+    path.write_text(contents, encoding="utf-8")
+    return path
+
+
 def _description() -> dict[str, object]:
     assert EVALUATOR is not None
     return json.loads(subprocess.run(
@@ -126,7 +132,14 @@ def _evaluate_once(
     ], **kwargs).results[0]
 
 
-def test_identity_policy_admission_and_batch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("price_feed_csv", [
+    "ts,nav\n1699999995,1.0\n1700000600,1.001\n",
+    "1699999995,1.0\n1700000600,1.001\n",
+    "timestamp,a,b,c,d,e,f,price\n1699999995,0,0,0,0,0,0,1.0\n",
+])
+def test_identity_policy_admission_and_batch(
+    tmp_path: Path, price_feed_csv: str,
+) -> None:
     assert EVALUATOR is not None
     description = _description()
     build = description["build"]
@@ -143,7 +156,7 @@ def test_identity_policy_admission_and_batch(tmp_path: Path) -> None:
 
     policy_params = _policy_defaults(description)
     policy = description["policy"]
-    expected_count = 0 if policy["id"] == "none" else 6
+    expected_count = len(policy_params)
     assert policy["parameter_count"] == expected_count == len(policy_params)
     with pytest.raises(ValueError, match="finite"):
         CandidateSpec(
@@ -153,6 +166,7 @@ def test_identity_policy_admission_and_batch(tmp_path: Path) -> None:
         )
 
     template, candles = _write_inputs(tmp_path)
+    price_feed = _write_price_feed(tmp_path, price_feed_csv)
     client = EvaluatorClient(EVALUATOR, work_dir=tmp_path)
     try:
         hello = client.start()
@@ -161,7 +175,7 @@ def test_identity_policy_admission_and_batch(tmp_path: Path) -> None:
         assert identity.real_type == build["real_type"]
         assert identity.policy_id == policy["id"]
         assert identity.policy_parameter_count == expected_count
-        _open(client, template, candles, "identity")
+        _open(client, template, candles, "identity", price_feed_path=price_feed)
         result = _evaluate_once(
             client,
             policy_params,
@@ -246,11 +260,37 @@ def test_profiles_and_registered_range_match_public_results(tmp_path: Path) -> N
         ], metric_fields=fields).results[0]
         assert exact.metrics == dict(zip(fields, direct["metrics"]))
 
+    no_arb_fields = (*fields, "tw_real_slippage_1pct")
+    no_arb_results = []
+    for cursor in ("scalar", "exact_skip"):
+        with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
+            _open(
+                client,
+                template,
+                candles,
+                f"no-arb-{cursor}",
+                arbitrage_enabled=False,
+                event_cursor=cursor,
+                metric_profile="full_summary",
+                user_swap_freq_s=180,
+                user_swap_size_frac=0.01,
+                user_swap_thresh=1.0,
+                enable_slippage_probes=True,
+            )
+            no_arb_results.append(_evaluate_once(
+                client,
+                policy_params,
+                candidate_id=f"no-arb-{cursor}",
+                metric_fields=no_arb_fields,
+            ).metrics)
+    assert no_arb_results[1] == no_arb_results[0]
+
 
 def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
     assert EVALUATOR is not None
     policy_params = _policy_defaults(_description())
     template, candles = _write_inputs(tmp_path, flat=True)
+    price_feed = _write_price_feed(tmp_path, "ts,price\n1699999995,1.0\n")
     observation = ObservationSpec(
         kind="full_trace",
         trace_interval=1,
@@ -267,7 +307,9 @@ def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
             template,
             candles,
             "scheduling",
+            price_feed_path=price_feed,
             dustswap_freq_s=120,
+            arbitrage_enabled=False,
         )
         scheduled = _evaluate_once(
             client,
@@ -281,6 +323,7 @@ def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
         actions_path = tmp_path / scheduled.artifacts.actions_path
         trace = json.loads(trace_path.read_text(encoding="utf-8"))
         actions = json.loads(actions_path.read_text(encoding="utf-8"))
+        assert trace[0]["p_price_feed"] == pytest.approx(1.0)
         tick_timestamps = [row["ts"] for row in actions if row["type"] == "tick"]
         assert tick_timestamps[:2] == [1_700_000_125, 1_700_000_245]
         assert all(
@@ -295,6 +338,7 @@ def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
         effective = scheduled.artifacts.effective_inputs
         assert effective["pool.fee_gamma"] == pytest.approx(0.030000000000000123)
         assert effective["pool.reserved_profit_fraction"] == pytest.approx(0.3400000123)
+        assert effective["run.arbitrage_enabled"] is False
     finally:
         client.shutdown()
 
@@ -304,6 +348,7 @@ def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
             template,
             candles,
             "user-scheduling",
+            price_feed_path=price_feed,
             dustswap_freq_s=0,
             user_swap_freq_s=180,
             user_swap_size_frac=0.01,
@@ -333,6 +378,7 @@ def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
                 template,
                 candles,
                 f"yb-{mode}",
+                price_feed_path=price_feed,
                 yb_mode=mode,
                 yb_releverage_fee=0.013,
                 yb_cash_multiplier=3.0,
