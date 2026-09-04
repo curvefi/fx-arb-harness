@@ -93,6 +93,8 @@ json::object action_to_json(const arb::harness::Action<RealT>& action) {
             o["fee_tokens"] = static_cast<double>(act.fee_tokens);
             o["profit_coin0"] = static_cast<double>(act.profit_coin0);
             o["p_cex"] = static_cast<double>(act.p_cex);
+            o["implied_fair"] = static_cast<double>(act.implied_fair);
+            o["floor_implied_fair"] = static_cast<double>(act.floor_implied_fair);
             o["p_pool_before"] = static_cast<double>(act.p_pool_before);
             o["p_pool_after"] = static_cast<double>(act.p_pool_after);
             o["oracle_before"] = static_cast<double>(act.oracle_before);

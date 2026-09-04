@@ -331,7 +331,8 @@ EventLoopResult<T> run_event_loop_impl(
 
             if (log_actions) {
                 action_logger.log_exchange(ev_ts, dec.i, dec.j, dec.dx, dy_after_fee, fee_tokens,
-                                           dec.profit, cex_price, p_pool_before,
+                                           dec.profit, cex_price, dec.implied_fair,
+                                           dec.floor_implied_fair, p_pool_before,
                                            oracle_before, ps_before, last_ts_before, lp_before,
                                            xcp_profit_before, vp_before, pool);
             }

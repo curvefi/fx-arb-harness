@@ -26,6 +26,8 @@ struct Decision {
     T profit{};
     T fee_tokens{};
     T notional_coin0{};
+    T implied_fair{};
+    T floor_implied_fair{};
 };
 
 inline constexpr int NUMERIC_SEARCH_ITERS = 24;   // legacy golden-section iters
@@ -477,6 +479,43 @@ Decision<T> decide_trade(
     d.profit = best.profit;
     d.fee_tokens = best.fee_tokens;
     d.notional_coin0 = (sel_i == 0) ? best.dx : best.dx * cex_price;
+
+    const T derivative_step = std::max(best.dx * T(1e-4), avail * T(1e-10));
+    const T derivative_lo = std::max(dx_lo, best.dx - derivative_step);
+    const T derivative_hi = std::min(dx_hi, best.dx + derivative_step);
+    if (derivative_hi > derivative_lo) {
+        const auto lo = fx::simulate_exchange_once(
+            pool, static_cast<size_t>(sel_i), static_cast<size_t>(sel_j), derivative_lo
+        );
+        const auto hi = fx::simulate_exchange_once(
+            pool, static_cast<size_t>(sel_i), static_cast<size_t>(sel_j), derivative_hi
+        );
+        const T marginal_net = (hi.first - lo.first) / (derivative_hi - derivative_lo);
+        if (marginal_net > T(0)) {
+            d.implied_fair = sel_i == 0
+                ? T(1) / (cex_fee_discount * marginal_net)
+                : marginal_net / cex_fee_markup;
+        }
+
+        const auto gross_at = [&](const T& dx) {
+            const auto post = fx::post_swap_xp(
+                pool, static_cast<size_t>(sel_i), static_cast<size_t>(sel_j),
+                dx, pool.cached_price_scale
+            );
+            return fx::xp_to_tokens_j(
+                pool, static_cast<size_t>(sel_j), post.second,
+                pool.cached_price_scale
+            );
+        };
+        const T marginal_floor =
+            (gross_at(derivative_hi) - gross_at(derivative_lo)) /
+            (derivative_hi - derivative_lo) * (T(1) - floor_fee_sel);
+        if (marginal_floor > T(0)) {
+            d.floor_implied_fair = sel_i == 0
+                ? T(1) / (cex_fee_discount * marginal_floor)
+                : marginal_floor / cex_fee_markup;
+        }
+    }
 
     return d;
 }
