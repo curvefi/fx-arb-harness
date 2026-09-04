@@ -23,7 +23,6 @@ struct Event {
     double p_cex;
     double p_price_feed{0.0};
     uint64_t price_feed_ts{0};
-    uint64_t price_feed_index{0};
     double volume;
     uint32_t candle_idx;  // index into candle vector (used for detailed logging)
 };
@@ -50,7 +49,7 @@ struct PriceBlockIndex {
 // candle_idx only when detailed/YB sampling is on, and p_price_feed only by
 // externally priced policy pools (the array stays empty when no feed was
 // attached). Splitting the streams cuts the bytes touched per event from
-// sizeof(Event)=40 to 16-20, which matters when many threads each stream
+// sizeof(Event) to 16-20, which matters when many threads each stream
 // millions of events.
 struct EventSoA {
     std::vector<uint64_t> ts;
@@ -59,7 +58,6 @@ struct EventSoA {
     std::vector<uint32_t> candle_idx;
     std::vector<double> p_price_feed;  // empty unless a price feed was attached
     std::vector<uint64_t> price_feed_ts;
-    std::vector<uint64_t> price_feed_index;
     PriceBlockIndex price_blocks;
 
     size_t size() const { return ts.size(); }

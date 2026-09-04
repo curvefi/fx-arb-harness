@@ -16,7 +16,7 @@ struct StaticParameterDescriptor {
     std::string_view choices_json{};
 };
 
-inline constexpr std::array<StaticParameterDescriptor, 54> STATIC_PARAMETERS{{
+inline constexpr std::array<StaticParameterDescriptor, 53> STATIC_PARAMETERS{{
     {"pool.tag", "pool_overrides.tag", "string", "identifier", "utf8", "candidate", ""},
     {"pool.initial_liquidity", "pool_overrides.pool.initial_liquidity", "real_pair", "token_amount", "binary64_from_wad_1e18", "candidate", ""},
     {"pool.A", "pool_overrides.pool.A", "real", "pool_raw", "binary64", "candidate", ""},
@@ -66,7 +66,6 @@ inline constexpr std::array<StaticParameterDescriptor, 54> STATIC_PARAMETERS{{
     {"run.yb_mode", "open_session.yb_mode", "enum", "yb_mode", "utf8", "session", "\"off\"", "[\"off\",\"active_2l\",\"reference_2l\"]"},
     {"run.yb_releverage_fee", "open_session.yb_releverage_fee", "real", "fee_fraction", "binary64", "session", "0.012"},
     {"run.yb_cash_multiplier", "open_session.yb_cash_multiplier", "real", "ratio", "binary64", "session", "1.0"},
-    {"run.metric_projection", "evaluate_batch.metric_projection", "enum", "projection", "utf8", "observation", "", "[\"summary\",\"full\"]"},
     {"run.observation.kind", "evaluate_batch.observation.kind", "enum", "observation_kind", "utf8", "observation", "\"summary\"", "[\"summary\",\"full_trace\"]"},
     {"run.observation.trace_interval", "evaluate_batch.observation.trace_interval", "integer", "events", "uint64", "observation", "1"},
     {"run.observation.trace_actions", "evaluate_batch.observation.trace_actions", "boolean", "flag", "json_boolean", "observation", "false"},

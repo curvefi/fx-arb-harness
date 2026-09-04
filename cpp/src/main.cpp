@@ -691,20 +691,16 @@ private:
             resp["request_id"] = req_id;
             resp["session_id"] = session_id;
 
-            json::array scen_arr;
-            for (const auto& sc : store->scenarios()) {
-                json::object s;
-                s["id"] = sc.id;
-                s["events_count"] = sc.events.size();
-                s["candles_count"] = sc.candles.size();
-                s["start_ts"] = sc.start_ts;
-                s["end_ts"] = sc.candles.empty() ? 0 : sc.candles.back().ts;
-                scen_arr.push_back(s);
-            }
-            resp["scenarios"] = scen_arr;
+            const auto& sc = store->scenario();
+            json::object scenario;
+            scenario["id"] = sc.id;
+            scenario["events_count"] = sc.events.size();
+            scenario["candles_count"] = sc.candles.size();
+            scenario["start_ts"] = sc.start_ts;
+            scenario["end_ts"] = sc.candles.empty() ? 0 : sc.candles.back().ts;
+            resp["scenario"] = std::move(scenario);
             write_frame(std::cout, resp);
-            std::cerr << "[evaluator] Session '" << session_id << "' initialized successfully with "
-                      << store->scenarios().size() << " scenarios.\n";
+            std::cerr << "[evaluator] Session '" << session_id << "' initialized.\n";
 
         } catch (const std::exception& e) {
             write_frame(std::cout, make_error_frame(req_id, "session", "SESSION_INIT_FAILED", e.what()));
@@ -785,7 +781,7 @@ private:
     void handle_evaluate_batch(const json::object& req, const std::string& req_id) {
         if (const auto field = unknown_field(req, {
                 "protocol", "type", "request_id", "session_id",
-                "metric_projection", "metric_fields", "metrics_format",
+                "metric_fields", "metrics_format",
                 "observation", "candidates", "grid_id", "ranges"
             })) {
             write_frame(std::cout, make_error_frame(
@@ -805,28 +801,6 @@ private:
             return;
         }
 
-        // metric_projection is required on the wire; do not silently choose a
-        // projection when a client omits it.
-        const auto* metric_projection_value = req.if_contains("metric_projection");
-        if (metric_projection_value == nullptr) {
-            write_frame(std::cout, make_error_frame(
-                req_id, "protocol", "MISSING_REQUIRED_FIELD",
-                "evaluate_batch requires metric_projection ('summary' or 'full')"));
-            return;
-        }
-        if (!metric_projection_value->is_string()) {
-            write_frame(std::cout, make_error_frame(
-                req_id, "protocol", "INVALID_METRIC_PROJECTION",
-                "metric_projection must be 'summary' or 'full'"));
-            return;
-        }
-        const std::string metric_proj_str = metric_projection_value->as_string().c_str();
-        if (metric_proj_str != "summary" && metric_proj_str != "full") {
-            write_frame(std::cout, make_error_frame(req_id, "protocol", "INVALID_METRIC_PROJECTION",
-                "metric_projection must be 'summary' or 'full'"));
-            return;
-        }
-        const bool full_metric_projection = (metric_proj_str == "full");
         std::string metrics_format = "object";
         if (const auto* value = req.if_contains("metrics_format")) {
             if (!value->is_string()) {
@@ -1178,7 +1152,6 @@ private:
         resp["request_id"] = req_id;
         resp["session_id"] = session_->session_id;
         resp["status"] = "complete";
-        resp["metric_projection"] = full_metric_projection ? "full" : "summary";
         if (metrics_format == "array") {
             json::array fields;
             for (const auto& name : metric_fields) fields.push_back(json::value(name));
@@ -1202,41 +1175,21 @@ private:
             if (metrics_format == "array") {
                 json::array values;
                 for (const auto& field_name : metric_fields) {
-                    const auto it = res.aggregate_metrics.find(field_name);
+                    const auto it = res.metrics.find(field_name);
                     values.push_back(
-                        it != res.aggregate_metrics.end() ? it->second : -1.0
+                        it != res.metrics.end() ? it->second : -1.0
                     );
                 }
                 r["metrics"] = std::move(values);
             } else {
                 json::object metrics_obj;
                 for (const auto& field_name : metric_fields) {
-                    const auto it = res.aggregate_metrics.find(field_name);
+                    const auto it = res.metrics.find(field_name);
                     metrics_obj[field_name] =
-                        it != res.aggregate_metrics.end() ? it->second : -1.0;
+                        it != res.metrics.end() ? it->second : -1.0;
                 }
                 r["metrics"] = std::move(metrics_obj);
             }
-
-            // Scenario results: populated only when metric_projection is "full"
-            json::array sc_results;
-            if (full_metric_projection) {
-                for (const auto& sc_res : res.scenario_results) {
-                    json::object s_obj;
-                    s_obj["scenario_id"] = sc_res.scenario_id;
-                    s_obj["status"] = sc_res.success ? "ok" : "failed";
-                    if (!sc_res.success) {
-                        s_obj["error"] = sc_res.error_message;
-                    }
-                    json::object sc_m;
-                    for (const auto& kv : sc_res.metrics) {
-                        sc_m[kv.first] = kv.second;
-                    }
-                    s_obj["metrics"] = sc_m;
-                    sc_results.push_back(s_obj);
-                }
-            }
-            r["scenario_results"] = sc_results;
 
             // A direct session has exactly one scenario, so its sidecars are
             // already an unambiguous candidate result.
@@ -1252,18 +1205,19 @@ private:
                     }
                 };
 
-                if (res.scenario_results.size() != 1 || !res.scenario_results.front().has_trace) {
+                if (!res.has_trace) {
                     all_writes_ok = false;
                 } else {
-                    const auto& sc_res = res.scenario_results.front();
-                    if (!is_safe_identifier(sc_res.scenario_id)) {
+                    const auto& sc_res = res;
+                    const auto& scenario_id = session_->store->scenario().id;
+                    if (!is_safe_identifier(scenario_id)) {
                         write_frame(std::cout, make_error_frame(req_id, "sidecar", "INVALID_SCENARIO_ID",
-                            "scenario_id contains unsafe path characters: " + sc_res.scenario_id));
+                            "scenario_id contains unsafe path characters: " + scenario_id));
                         return;
                     }
 
                     const std::string stem = "candidate_" +
-                        std::to_string(response_ordinal) + "." + sc_res.scenario_id;
+                        std::to_string(response_ordinal) + "." + scenario_id;
                     const fs::path trace_path = base_art_path / (stem + ".trace.json");
                     const bool trace_preexisting = fs::exists(trace_path);
                     all_writes_ok = write_atomic_file(trace_path, sc_res.trace_json);

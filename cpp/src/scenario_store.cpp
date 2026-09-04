@@ -83,8 +83,7 @@ void ScenarioStore<T>::load(
     scenario.base_costs = base_costs;
     scenario.start_ts = scenario.candles.front().ts;
 
-    scenarios_.clear();
-    scenarios_.push_back(std::move(scenario));
+    scenario_ = std::move(scenario);
 }
 
 // Explicit template instantiations

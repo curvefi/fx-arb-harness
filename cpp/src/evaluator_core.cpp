@@ -144,16 +144,18 @@ void extract_metrics_from_pool_result(
     const double exponent = (duration_s > 0.0) ? (SEC_PER_YEAR / duration_s) : 0.0;
 
     const double vp_end = static_cast<double>(res.virtual_price);
-    const double apy = (vp_end > 0.0 && exponent > 0.0) ? std::pow(vp_end, exponent) - 1.0 : -1.0;
+    const double vp_start = static_cast<double>(res.initial_virtual_price);
+    const double apy = (vp_end > 0.0 && vp_start > 0.0 && exponent > 0.0) ? std::pow(vp_end / vp_start, exponent) - 1.0 : -1.0;
 
     const double donation_apy = static_cast<double>(res.donation_apy);
     const double donation_freq_s = static_cast<double>(res.donation_frequency);
     const double don_growth = arb::harness::donation_growth<double>(donation_apy, donation_freq_s, duration_s);
 
     const double lp_xcp_end = static_cast<double>(res.lp_xcp_profit);
+    const double lp_xcp_start = static_cast<double>(res.initial_lp_xcp_profit);
     double apy_net = -1.0;
-    if (lp_xcp_end > 0.0 && don_growth > 0.0 && exponent > 0.0) {
-        const double net_growth = lp_xcp_end / don_growth;
+    if (lp_xcp_end > 0.0 && lp_xcp_start > 0.0 && don_growth > 0.0 && exponent > 0.0) {
+        const double net_growth = lp_xcp_end / lp_xcp_start / don_growth;
         if (net_growth > 0.0) {
             apy_net = std::pow(net_growth, exponent) - 1.0;
         }
@@ -218,9 +220,8 @@ void execute_scenario_job(
     const ObservationSpec& obs_spec,
     const arb::pools::PoolOverride<RealT>* pool_override,
     const std::string& pool_override_error,
-    ScenarioEvaluationResult& sc_res
+    CandidateEvaluationResult& sc_res
 ) {
-    sc_res.scenario_id = scen.id;
 
     try {
         if (!pool_override_error.empty()) {
@@ -442,8 +443,7 @@ BatchEvaluationResult evaluate_batch_candidates(
     auto t_start = std::chrono::high_resolution_clock::now();
 
     const size_t n_candidates = candidates.size();
-    const auto& scenarios = store.scenarios();
-    const size_t n_scenarios = scenarios.size();
+    const auto& scenario = store.scenario();
 
     BatchEvaluationResult batch_result;
     batch_result.candidate_results.resize(n_candidates);
@@ -452,8 +452,6 @@ BatchEvaluationResult evaluate_batch_candidates(
         auto& cand_res = batch_result.candidate_results[cand_idx];
         cand_res.ordinal = candidates[cand_idx].ordinal;
         cand_res.candidate_id = candidates[cand_idx].candidate_id;
-        cand_res.success = true;
-        cand_res.scenario_results.resize(n_scenarios);
     }
 
     // Materialize each candidate override exactly once. The typed overlay is
@@ -475,59 +473,15 @@ BatchEvaluationResult evaluate_batch_candidates(
     }
 
 
-    const size_t total_jobs = n_candidates * n_scenarios;
-
-    if (total_jobs > 0) {
-        // One fixed process-lifetime pool. Both summary and full-trace jobs
-        // are submitted through the same pool: TraceArena::acquire() holds the
-        // arena mutex for the duration of a full-trace run, which keeps at most
-        // one trace job executing at any instant (one in flight); each job
-        // still writes its canonical candidate/scenario result slot below.
-        auto& pool = WorkerPool::global();
-        pool.run_jobs(total_jobs, [&](size_t job_idx) {
-            const size_t cand_idx = job_idx / n_scenarios;
-            const size_t sc_idx = job_idx % n_scenarios;
+    if (n_candidates > 0) {
+        // Each job owns one candidate result. TraceArena serializes full traces.
+        WorkerPool::global().run_jobs(n_candidates, [&](size_t cand_idx) {
             execute_scenario_job(
-                candidates[cand_idx],
-                scenarios[sc_idx],
-                session_cfg,
-                obs_spec,
-                parsed_overrides[cand_idx]
-                    ? &*parsed_overrides[cand_idx]
-                    : nullptr,
-                override_errors[cand_idx],
-                batch_result.candidate_results[cand_idx].scenario_results[sc_idx]
+                candidates[cand_idx], scenario, session_cfg, obs_spec,
+                parsed_overrides[cand_idx] ? &*parsed_overrides[cand_idx] : nullptr,
+                override_errors[cand_idx], batch_result.candidate_results[cand_idx]
             );
         });
-    }
-
-    // Deterministic post-join aggregation across scenarios for each candidate
-    for (size_t cand_idx = 0; cand_idx < n_candidates; ++cand_idx) {
-        auto& cand_res = batch_result.candidate_results[cand_idx];
-        std::map<std::string, double> sum_metrics;
-        size_t successful_scenarios = 0;
-
-        for (size_t sc_idx = 0; sc_idx < n_scenarios; ++sc_idx) {
-            const auto& sc_res = cand_res.scenario_results[sc_idx];
-            if (!sc_res.success) {
-                cand_res.success = false;
-                if (cand_res.error_message.empty()) {
-                    cand_res.error_message = "Scenario '" + sc_res.scenario_id + "' failed: " + sc_res.error_message;
-                }
-            } else {
-                for (const auto& [k, v] : sc_res.metrics) {
-                    sum_metrics[k] += v;
-                }
-                ++successful_scenarios;
-            }
-        }
-
-        if (successful_scenarios > 0) {
-            for (const auto& [k, v] : sum_metrics) {
-                cand_res.aggregate_metrics[k] = v / static_cast<double>(successful_scenarios);
-            }
-        }
-
     }
 
     auto t_end = std::chrono::high_resolution_clock::now();

@@ -94,8 +94,9 @@ struct EvaluationCandidate {
     std::optional<arb::pools::PoolOverride<T>> typed_pool_override;
 };
 
-struct ScenarioEvaluationResult {
-    std::string scenario_id;
+struct CandidateEvaluationResult {
+    uint32_t ordinal{0};
+    std::string candidate_id;
     bool success{false};
     std::string error_message;
     std::map<std::string, double> metrics;
@@ -105,15 +106,6 @@ struct ScenarioEvaluationResult {
     boost::json::object effective_inputs;
     uint64_t trace_record_count{0};
     uint64_t action_count{0};
-};
-
-struct CandidateEvaluationResult {
-    uint32_t ordinal{0};
-    std::string candidate_id;
-    bool success{false};
-    std::string error_message;
-    std::map<std::string, double> aggregate_metrics;
-    std::vector<ScenarioEvaluationResult> scenario_results;
 };
 
 struct BatchEvaluationResult {
@@ -137,12 +129,12 @@ public:
         const ScenarioLoadOptions& opts
     );
 
-    const std::vector<Scenario<T>>& scenarios() const {
-        return scenarios_;
+    const Scenario<T>& scenario() const {
+        return scenario_.value();
     }
 
 private:
-    std::vector<Scenario<T>> scenarios_;
+    std::optional<Scenario<T>> scenario_;
 };
 
 // Main evaluation entry point

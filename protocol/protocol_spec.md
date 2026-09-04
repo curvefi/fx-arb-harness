@@ -112,9 +112,9 @@ with synthetic fresh-L2 state, not a historical LT replay.
   "type": "session_ready",
   "request_id": "open-1",
   "session_id": "session-1",
-  "scenarios": [{"id": "scenario-1", "events_count": 14400,
+  "scenario": {"id": "scenario-1", "events_count": 14400,
                  "candles_count": 1440, "start_ts": 1704067200,
-                 "end_ts": 1704153540}]
+                 "end_ts": 1704153540}
 }
 ```
 
@@ -124,7 +124,6 @@ clients can consume its event and candle counts uniformly.
 
 ### `evaluate_batch`
 
-`metric_projection` is required and is either `summary` or `full`.
 `metrics_format` is `object` or `array`, and defaults to `object`.
 `metric_fields` optionally selects a non-empty, unique, order-significant subset
 of the canonical fields advertised by `hello`; array format requires it.
@@ -135,7 +134,7 @@ Candidates carry a unique `ordinal`, a unique `candidate_id`, finite binary64
 {
   "protocol": "curve_fx_eval", "type": "evaluate_batch",
   "request_id": "batch-1", "session_id": "session-1",
-  "metric_projection": "summary", "observation": {"kind": "summary"},
+  "observation": {"kind": "summary"},
   "candidates": [{"ordinal": 0, "candidate_id": "candidate-0",
                   "policy_params": [], "pool_overrides": {}}]
 }
@@ -169,7 +168,7 @@ Subsequent batches carry only ordered, disjoint `[start, count]` ranges:
 {
   "protocol": "curve_fx_eval", "type": "evaluate_batch",
   "request_id": "batch-2", "session_id": "session-1",
-  "metric_projection": "summary", "metrics_format": "array",
+  "metrics_format": "array",
   "metric_fields": ["apy_net", "max_7d_rel_price_diff"],
   "observation": {"kind": "summary"},
   "grid_id": "grid", "ranges": [[0, 1], [3, 1]]
@@ -194,10 +193,9 @@ changes capture only, not the economic simulation.
 {
   "protocol": "curve_fx_eval", "type": "batch_result",
   "request_id": "batch-1", "session_id": "session-1", "status": "complete",
-  "metric_projection": "summary",
   "results": [{"ordinal": 0, "candidate_id": "candidate-0", "status": "ok",
                "metrics": {"vp": 0.0, "apy": 0.0, "trades": 0.0},
-               "scenario_results": [], "artifacts": null}],
+               "artifacts": null}],
   "elapsed_ms": 1.0
 }
 ```
@@ -206,8 +204,7 @@ With `metrics_format = array`, the response echoes the exact requested
 `metric_fields` once at batch level and each candidate `metrics` array has the
 same length and order. Object and array forms carry identical values.
 
-With `metric_projection = full`, `scenario_results` contains the admitted
-scenario's raw metrics. With `full_trace`, successful results return an
+With `full_trace`, successful results return an
 `artifacts` object containing `trace_path`, optional `actions_path`, and
 `effective_inputs`. The latter is a finite numeric map of the resolved pool
 and run controls used to initialize the replay; candidate policy parameters
@@ -228,7 +225,7 @@ Errors retain the request ID where available:
 ```json
 {"protocol":"curve_fx_eval","type":"error","request_id":"batch-1",
  "scope":"protocol","error_code":"MISSING_REQUIRED_FIELD",
- "message":"evaluate_batch requires metric_projection","details":{}}
+ "message":"evaluate_batch requires candidates or grid ranges","details":{}}
 ```
 
 Unknown fields are rejected. Invalid JSON, oversized frames, missing paths,

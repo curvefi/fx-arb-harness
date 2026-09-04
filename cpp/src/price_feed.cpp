@@ -127,7 +127,6 @@ void attach_price_feed(
         }
         ev.p_price_feed = points[idx].price;
         ev.price_feed_ts = points[idx].ts;
-        ev.price_feed_index = static_cast<uint64_t>(idx);
     }
 }
 

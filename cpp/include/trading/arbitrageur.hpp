@@ -26,11 +26,8 @@ struct Decision {
     T profit{};
     T fee_tokens{};
     T notional_coin0{};
-    T implied_fair{};
-    T floor_implied_fair{};
 };
 
-inline constexpr int NUMERIC_SEARCH_ITERS = 24;   // legacy golden-section iters
 inline constexpr int MAX_SIZING_EVALS = 24;       // hard eval budget per decision
 
 template <typename T, typename PoolT>
@@ -150,27 +147,6 @@ Decision<T> decide_trade(
         return Candidate{dx, sim.first, profit, sim.second};
     };
 
-#if defined(ARB_SIZING_GOLDEN)
-    // Legacy profit maximizer: golden-section search within sizing bounds.
-    constexpr T phi = static_cast<T>(0x1.3c6ef372fe95p-1);  // (sqrt(5) - 1) / 2
-    T a = dx_lo;
-    T b = dx_hi;
-    Candidate c = evaluate_candidate(b - phi * (b - a));
-    Candidate e = evaluate_candidate(a + phi * (b - a));
-    for (int it = 0; it < NUMERIC_SEARCH_ITERS; ++it) {
-        if (c.profit < e.profit) {
-            a = c.dx;
-            c = e;
-            e = evaluate_candidate(a + phi * (b - a));
-        } else {
-            b = e.dx;
-            e = c;
-            c = evaluate_candidate(b - phi * (b - a));
-        }
-    }
-
-    Candidate best = (c.profit > e.profit) ? c : e;
-#else
     // ------------------------------------------------------------------
     // Scan-and-refine profit maximizer (derivative-free).
     //
@@ -189,7 +165,7 @@ Decision<T> decide_trade(
     //      superlinear on smooth fees, still convergent on kinks/jumps.
     // The answer is the best of *all* evaluations; total full evaluations
     // are capped at MAX_SIZING_EVALS = 24 by construction (ladder <= 20,
-    // refine consumes the remainder; the legacy golden section spends 26).
+    // refine consumes the remainder).
     // Fee-free envelope probes are extra but ~half-cost (no policy call).
     // All stepping is multiplicative in dx (no log/exp calls).
     // ------------------------------------------------------------------
@@ -274,8 +250,7 @@ Decision<T> decide_trade(
     //      profitable window is centered on the balance-crossing trade
     //      size, far from the frozen-fee seed and narrower than a ladder
     //      rung, so without an explicit probe the search misses it
-    //      entirely (orders-of-magnitude shortfalls; see
-    //      tests/test_sizing.cpp small-fee_gamma surfaces). The crossing
+    //      entirely. The crossing
     //      sits where post-trade xp equalize: dxp ~ (xp_out - xp_in) / 2.
     T dx_dip = T(0);
     if (native_fee_mode && xp_bal[static_cast<size_t>(sel_i)] < xp_bal[static_cast<size_t>(sel_j)]) {
@@ -462,7 +437,6 @@ Decision<T> decide_trade(
             eval_at(std::sqrt(dx_lo * low_cover));
         }
     }
-#endif
 
     if (!(best.profit > T(0))) {
         d.dx = best.dx;
@@ -479,43 +453,6 @@ Decision<T> decide_trade(
     d.profit = best.profit;
     d.fee_tokens = best.fee_tokens;
     d.notional_coin0 = (sel_i == 0) ? best.dx : best.dx * cex_price;
-
-    const T derivative_step = std::max(best.dx * T(1e-4), avail * T(1e-10));
-    const T derivative_lo = std::max(dx_lo, best.dx - derivative_step);
-    const T derivative_hi = std::min(dx_hi, best.dx + derivative_step);
-    if (derivative_hi > derivative_lo) {
-        const auto lo = fx::simulate_exchange_once(
-            pool, static_cast<size_t>(sel_i), static_cast<size_t>(sel_j), derivative_lo
-        );
-        const auto hi = fx::simulate_exchange_once(
-            pool, static_cast<size_t>(sel_i), static_cast<size_t>(sel_j), derivative_hi
-        );
-        const T marginal_net = (hi.first - lo.first) / (derivative_hi - derivative_lo);
-        if (marginal_net > T(0)) {
-            d.implied_fair = sel_i == 0
-                ? T(1) / (cex_fee_discount * marginal_net)
-                : marginal_net / cex_fee_markup;
-        }
-
-        const auto gross_at = [&](const T& dx) {
-            const auto post = fx::post_swap_xp(
-                pool, static_cast<size_t>(sel_i), static_cast<size_t>(sel_j),
-                dx, pool.cached_price_scale
-            );
-            return fx::xp_to_tokens_j(
-                pool, static_cast<size_t>(sel_j), post.second,
-                pool.cached_price_scale
-            );
-        };
-        const T marginal_floor =
-            (gross_at(derivative_hi) - gross_at(derivative_lo)) /
-            (derivative_hi - derivative_lo) * (T(1) - floor_fee_sel);
-        if (marginal_floor > T(0)) {
-            d.floor_implied_fair = sel_i == 0
-                ? T(1) / (cex_fee_discount * marginal_floor)
-                : marginal_floor / cex_fee_markup;
-        }
-    }
 
     return d;
 }

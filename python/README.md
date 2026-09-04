@@ -9,7 +9,7 @@ uv pip install -e .
 
 ## Quick Start
 ```python
-from curve_fx_harness_client import EvaluatorClient, CandidateSpec, MetricProjection
+from curve_fx_harness_client import EvaluatorClient, CandidateSpec
 
 with EvaluatorClient(executable_path="../build/native/arb_evaluator_ld") as client:
     client.open_session(
@@ -27,7 +27,6 @@ with EvaluatorClient(executable_path="../build/native/arb_evaluator_ld") as clie
                 policy_params=[],
             )
         ],
-        metric_projection=MetricProjection.SUMMARY,
     )
     print(result.results[0].metrics)
 ```

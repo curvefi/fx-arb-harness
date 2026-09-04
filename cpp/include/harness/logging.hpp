@@ -77,8 +77,7 @@ public:
     // Log an arb exchange action
     template <typename Pool>
     void log_exchange(uint64_t ts, int i, int j, T dx, T dy_after_fee, T fee_tokens,
-                      T profit_coin0, T p_cex, T implied_fair,
-                      T floor_implied_fair, T p_pool_before,
+                      T profit_coin0, T p_cex, T p_pool_before,
                       T oracle_before, T ps_before, uint64_t last_ts_before, T lp_before,
                       T xcp_profit_before, T vp_before,
                       const Pool& pool) {
@@ -92,8 +91,6 @@ public:
         act.fee_tokens = fee_tokens;
         act.profit_coin0 = profit_coin0;
         act.p_cex = p_cex;
-        act.implied_fair = implied_fair;
-        act.floor_implied_fair = floor_implied_fair;
         act.p_pool_before = p_pool_before;
         act.p_pool_after = pool.get_p();
         act.oracle_before = oracle_before;

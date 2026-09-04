@@ -25,7 +25,6 @@ from .models import (
     EvaluateBatchFrame,
     GridReadyFrame,
     HelloFrame,
-    MetricProjection,
     ObservationKind,
     ObservationSpec,
     OpenSessionFrame,
@@ -323,7 +322,7 @@ class EvaluatorClient:
             resp_data = self._transact(frame.model_dump(exclude_none=True))
             session_ready = SessionReadyFrame.model_validate(resp_data)
             self._current_session_id = session_id
-            logger.info("Session '%s' ready with %d scenarios", session_id, len(session_ready.scenarios))
+            logger.info("Session '%s' ready with scenario %s", session_id, session_ready.scenario.id)
             return session_ready
 
     def register_grid(
@@ -358,7 +357,6 @@ class EvaluatorClient:
         self,
         candidates: List[Union[CandidateSpec, Dict[str, Any]]],
         observation: Optional[Union[ObservationSpec, Dict[str, Any]]] = None,
-        metric_projection: Union[MetricProjection, str] = MetricProjection.SUMMARY,
         metric_fields: Optional[Sequence[str]] = None,
         metrics_format: str = "object",
         session_id: Optional[str] = None,
@@ -427,11 +425,7 @@ class EvaluatorClient:
             else:
                 raise ValueError(f"Invalid observation type: {type(observation)}")
 
-            proj = (
-                MetricProjection(metric_projection)
-                if isinstance(metric_projection, str)
-                else metric_projection
-            )
+
             if metrics_format == "array" and not metric_fields:
                 raise ValueError(
                     "metric_fields must be non-empty for array metrics"
@@ -444,7 +438,6 @@ class EvaluatorClient:
                     "type": "evaluate_batch",
                     "request_id": req_id,
                     "session_id": eff_session_id,
-                    "metric_projection": proj.value,
                     "metric_fields": list(metric_fields or ()),
                     "metrics_format": metrics_format,
                     "observation": obs_spec.model_dump(exclude_none=True),
@@ -458,7 +451,6 @@ class EvaluatorClient:
                 request_data = EvaluateBatchFrame(
                     request_id=req_id,
                     session_id=eff_session_id,
-                    metric_projection=proj,
                     metric_fields=(
                         None if metric_fields is None else list(metric_fields)
                     ),

@@ -21,11 +21,6 @@ class ObservationKind(str, Enum):
     FULL_TRACE = "full_trace"
 
 
-class MetricProjection(str, Enum):
-    SUMMARY = "summary"
-    FULL = "full"
-
-
 class EvaluatorIdentity(ProtocolModel):
     harness_version: str
     pool_version: str
@@ -104,7 +99,7 @@ class SessionReadyFrame(ProtocolModel):
     type: Literal["session_ready"] = "session_ready"
     request_id: str
     session_id: str
-    scenarios: List[ScenarioInfo]
+    scenario: ScenarioInfo
 
 
 class GridReadyFrame(ProtocolModel):
@@ -157,7 +152,6 @@ class EvaluateBatchFrame(ProtocolModel):
     type: Literal["evaluate_batch"] = "evaluate_batch"
     request_id: str
     session_id: str
-    metric_projection: MetricProjection
     metric_fields: Optional[List[str]] = None
     metrics_format: Literal["object", "array"] = "object"
     observation: ObservationSpec = Field(default_factory=ObservationSpec)
@@ -170,20 +164,12 @@ class ArtifactRef(ProtocolModel):
     effective_inputs: Optional[Dict[str, Union[bool, FiniteFloat]]] = None
 
 
-class ScenarioResult(ProtocolModel):
-    scenario_id: str
-    status: Literal["ok", "failed"] = "ok"
-    error: Optional[str] = None
-    metrics: Dict[str, Any] = Field(default_factory=dict)
-
-
 class CandidateResult(ProtocolModel):
     ordinal: int
     candidate_id: str
     status: Literal["ok", "failed", "cancelled"] = "ok"
     error: Optional[str] = None
     metrics: Dict[str, Any] = Field(default_factory=dict)
-    scenario_results: List[ScenarioResult] = Field(default_factory=list)
     artifacts: Optional[ArtifactRef] = None
 
 
@@ -193,7 +179,6 @@ class BatchResultFrame(ProtocolModel):
     request_id: str
     session_id: str
     status: Literal["complete", "partial", "failed", "cancelled"]
-    metric_projection: MetricProjection = MetricProjection.SUMMARY
     results: List[CandidateResult]
     elapsed_ms: float
 

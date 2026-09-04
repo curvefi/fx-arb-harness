@@ -100,11 +100,13 @@ struct PoolResult {
     uint64_t yb_releverage_gm_floored_windows{0};
     double yb_releverage_gm_floor_share{-1.0};
 
+    T initial_virtual_price{1};
+    T initial_lp_xcp_profit{1};
+
     // Final pool state
     std::array<T, 2> balances{T(0), T(0)};
     T price_scale{0};
     T virtual_price{0};
-    T xcp_profit{0};
     T lp_xcp_profit{0};
 
     // Timing
@@ -274,6 +276,9 @@ PoolResult<T> run_single_pool(
             ucfg.init(init_ts);
         }
 
+        result.initial_virtual_price = pool.virtual_price;
+        result.initial_lp_xcp_profit = pool.lp_xcp_profit;
+
         auto loop_result = run_event_loop(
             pool, events, costs, dcfg, icfg, ucfg, cfg,
             candles,
@@ -306,7 +311,6 @@ PoolResult<T> run_single_pool(
         result.balances[1] = pool.balances[1];
         result.price_scale = pool.cached_price_scale;
         result.virtual_price = pool.get_virtual_price();
-        result.xcp_profit = pool.xcp_profit;
         result.lp_xcp_profit = pool.lp_xcp_profit;
         result.success = true;
 

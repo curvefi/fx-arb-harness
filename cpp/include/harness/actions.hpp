@@ -48,8 +48,6 @@ struct ExchangeAction {
     T fee_tokens{0};
     T profit_coin0{0};
     T p_cex{0};
-    T implied_fair{0};
-    T floor_implied_fair{0};
     T p_pool_before{0};
     T p_pool_after{0};
     T oracle_before{0};

@@ -132,6 +132,40 @@ def _evaluate_once(
     ], **kwargs).results[0]
 
 
+def test_historical_start_apy_excludes_checkpoint_growth(tmp_path: Path) -> None:
+    template, candles = _write_inputs(tmp_path, flat=True)
+    document = json.loads(template.read_text())
+    wad = 10**18
+    # Balanced reserves imply XCP=100,000; supply=50,000 gives starting VP=2.
+    state = {
+        "source_timestamp": 1_700_000_000,
+        "last_timestamp": 1_700_000_000,
+        "balances": [str(100_000 * wad)] * 2,
+        "admin_balances": ["0", "0"],
+        "D": str(200_000 * wad),
+        "total_supply": str(50_000 * wad),
+        "price_scale": str(wad), "price_oracle": str(wad),
+        "last_prices": str(wad), "virtual_price": str(2 * wad),
+        "xcp_profit": str(2 * wad), "lp_xcp_profit": str(3 * wad // 2),
+        "donation_shares": "0", "last_donation_release_ts": "1700000000",
+        "donation_protection_expiry_ts": "0", "donation_protection_period": "3600",
+        "donation_protection_lp_threshold": "0",
+        "donation_protection_extension_remainder": "0",
+        "donation_shares_max_ratio": str(wad // 4),
+    }
+    document["pools"][0]["pool"]["historical_state"] = state
+    template.write_text(json.dumps(document))
+    with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
+        _open(client, template, candles, "historical", dustswap_freq_s=0)
+        result = _evaluate_once(client, _policy_defaults(_description()), candidate_id="historical")
+    assert result.status == "ok"
+    assert result.metrics["trades"] == 0
+    assert result.metrics["vp"] == 2.0
+    assert result.metrics["lp_xcp_profit"] == 1.5
+    assert result.metrics["apy"] == 0.0
+    assert result.metrics["apy_net"] == 0.0
+
+
 @pytest.mark.parametrize("price_feed_csv", [
     "ts,nav\n1699999995,1.0\n1700000600,1.001\n",
     "1699999995,1.0\n1700000600,1.001\n",
