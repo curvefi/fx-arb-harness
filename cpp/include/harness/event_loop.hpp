@@ -389,7 +389,6 @@ EventLoopResult<T> run_event_loop_impl(
         cfg.event_cursor == EventCursor::ExactSkip &&
         !EnableYb && !detailed_on && !action_logger.enabled() &&
         !enable_slippage_probes && !user_swap_on &&
-        pool.mid_fee == pool.out_fee &&
         events.price_blocks.ready_for(n_events);
 
     const auto event_passes_floor_gate = [&](double raw_price) {
