@@ -19,6 +19,7 @@
 #include <utility>
 
 #include "harness/pool_snapshot.hpp"
+#include "harness/yb_initial_state.hpp"
 #include "pools/twocrypto_fx/twocrypto.hpp"
 
 namespace arb::harness {
@@ -42,6 +43,7 @@ struct Yb2LState {
     T stable_balance{};
     T lt_donation_discount{};
     T lt_stable_balance{};
+    bool killed{false};
 };
 
 template <typename T>
@@ -174,6 +176,42 @@ public:
         return Yb2LActor(std::move(state));
     }
 
+    static Yb2LActor from_state(const YbInitialState<T>& initial) {
+        validate_yb_initial_state(initial);
+        const T one = PoolTraits::PRECISION();
+        const T denominator = T(2) * initial.leverage - one;
+        State state;
+        state.leverage = initial.leverage;
+        state.lev_ratio = initial.leverage * initial.leverage * one /
+            (denominator * denominator);
+        state.min_safe_debt_ratio = one * one * one /
+            (T(4) * initial.leverage * initial.leverage);
+        state.max_safe_debt_ratio = denominator * denominator * one /
+            (T(4) * initial.leverage * initial.leverage) -
+            one * one * one / (T(8) * initial.leverage * initial.leverage);
+        state.fee = initial.fee;
+        state.collateral = initial.collateral;
+        state.debt = initial.debt;
+        state.rate = initial.rate;
+        state.rate_mul = initial.rate_mul;
+        state.rate_time = initial.rate_time;
+        state.minted = initial.minted;
+        state.redeemed = initial.redeemed;
+        state.stable_balance = initial.stable_balance;
+        state.lt_donation_discount = initial.lt_donation_discount;
+        state.lt_stable_balance = initial.lt_stable_balance;
+        state.killed = initial.killed;
+        Yb2LActor actor(std::move(state));
+        const T debt_at_checkpoint = actor.projected_debt(initial.source_timestamp);
+        actor.initial_unsettled_interest_ = std::max(
+            T(0), debt_at_checkpoint + actor.state_.redeemed - actor.state_.minted
+        ) + actor.state_.lt_stable_balance;
+        // advance_debt starts from stored rate_time; offset its pre-checkpoint
+        // portion so cumulative accrual begins at the authoritative checkpoint.
+        actor.accrued_interest_total_ = actor.state_.debt - debt_at_checkpoint;
+        return actor;
+    }
+
     bool enabled() const { return enabled_; }
     const State& state() const { return state_; }
     uint64_t fires() const { return fires_; }
@@ -228,7 +266,7 @@ public:
             "YieldBasis 2L is available only on floating-point runtimes"
         );
         Yb2LResult<T> result;
-        if (!enabled_ || !(external_cex_price > T(0)) ||
+        if (!enabled_ || state_.killed || !(external_cex_price > T(0)) ||
             timestamp < state_.rate_time) {
             result.abstain = Yb2LAbstainReason::InvalidState;
             return result;

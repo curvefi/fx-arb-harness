@@ -35,6 +35,29 @@ Pool make_pool() {
     return pool;
 }
 
+harness::YbInitialState<double> historical_yb_state() {
+    harness::YbInitialState<double> state;
+    state.source_block = 25'455'433;
+    state.source_timestamp = 1'783'123'199;
+    state.block_hash = "0x75c35faef49be034f515fbfd273a1f1213c78bbaa516fbda170c901ea3cfc7b1";
+    state.leverage = 2.0;
+    state.fee = 0.013;
+    state.collateral = 168'021.7402032929;
+    state.debt = 44'446'693.206598505;
+    state.rate = 2.59443752e-10;
+    state.rate_mul = 1.000887149349038;
+    state.rate_time = 1'783'111'751;
+    state.minted = 56'657'739.06125437;
+    state.redeemed = 12'211'045.854655864;
+    state.stable_balance = 40'632'546.70310546;
+    state.lt_stable_balance = 0.0;
+    state.flash_max_loan = 30'000'000.379967466;
+    state.stable_aggregator = 0.9999390559313684;
+    state.rounding_discount = 1e-8;
+    state.lt_donation_discount = 0.01;
+    return state;
+}
+
 bool same_pool_state(const Pool& lhs, const Pool& rhs) {
     return std::tie(
         lhs.balances,
@@ -92,6 +115,52 @@ void require(bool condition, const char* message) {
 } // namespace
 
 int main() {
+    {
+        const auto initial = historical_yb_state();
+        const auto actor = Actor::from_state(initial);
+        const auto market = ReferenceMarket::from_state(initial);
+        require(actor.state().collateral == initial.collateral,
+                "active_2l did not retain historical collateral");
+        require(actor.state().debt == initial.debt && actor.state().rate == initial.rate &&
+                    actor.state().rate_time == initial.rate_time,
+                "active_2l did not retain stored debt bookkeeping");
+        require(std::fabs(actor.state().lev_ratio - 4.0 / 9.0) < 1e-15 &&
+                    actor.state().min_safe_debt_ratio == 1.0 / 16.0 &&
+                    actor.state().max_safe_debt_ratio == 17.0 / 32.0,
+                "historical leverage did not derive the deployed safety ratios");
+        require(market.state().flash_max_loan == initial.flash_max_loan &&
+                    market.state().stable_aggregator == initial.stable_aggregator &&
+                    market.state().rounding_discount == initial.rounding_discount,
+                "reference_2l did not retain historical external inputs");
+        const auto checkpoint_interest =
+            actor.projected_interest_summary(initial.source_timestamp);
+        require(std::fabs(checkpoint_interest.accrued) < 1e-9 &&
+                    checkpoint_interest.pending_interest > 0.0 &&
+                    std::fabs(checkpoint_interest.conservation_residual) < 1e-6,
+                "historical state lost initial pending-interest conservation");
+        const auto future_interest =
+            actor.projected_interest_summary(initial.source_timestamp + 86400);
+        require(future_interest.accrued > 0.0 &&
+                    std::fabs(future_interest.conservation_residual) < 1e-6,
+                "post-checkpoint interest accounting did not conserve");
+
+        auto zero_cash = initial;
+        zero_cash.stable_balance = 0.0;
+        zero_cash.flash_max_loan = 0.0;
+        (void)Actor::from_state(zero_cash);
+        (void)ReferenceMarket::from_state(zero_cash);
+
+        auto invalid = initial;
+        invalid.rate_time = initial.source_timestamp + 1;
+        bool rejected = false;
+        try {
+            (void)Actor::from_state(invalid);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        require(rejected, "future historical rate_time was accepted");
+    }
+
     // Contract-derived VirtualPool route surface: both directions commit their
     // required native legs, while a forced final-output failure rolls back the
     // complete pool and YB state.

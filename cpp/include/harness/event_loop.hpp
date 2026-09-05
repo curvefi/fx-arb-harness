@@ -135,15 +135,19 @@ EventLoopResult<T> run_event_loop_impl(
     if constexpr (EnableYb) {
         if constexpr (std::is_floating_point_v<T>) {
             if (yb_mode == YbMode::Active2l) {
-                yb->actor = Yb2LActor<T>::fresh_2l(
-                    pool, dcfg.apy, yb_releverage_fee, result.t_start,
-                    cfg.yb_cash_multiplier
-                );
+                yb->actor = cfg.yb_initial_state
+                    ? Yb2LActor<T>::from_state(*cfg.yb_initial_state)
+                    : Yb2LActor<T>::fresh_2l(
+                        pool, dcfg.apy, yb_releverage_fee, result.t_start,
+                        cfg.yb_cash_multiplier
+                    );
             } else if (yb_mode == YbMode::Reference2l) {
-                yb->reference_market = YbReference2LMarket<T>::fresh_2l(
-                    pool, dcfg.apy, yb_releverage_fee, result.t_start,
-                    cfg.yb_cash_multiplier
-                );
+                yb->reference_market = cfg.yb_initial_state
+                    ? YbReference2LMarket<T>::from_state(*cfg.yb_initial_state)
+                    : YbReference2LMarket<T>::fresh_2l(
+                        pool, dcfg.apy, yb_releverage_fee, result.t_start,
+                        cfg.yb_cash_multiplier
+                    );
             }
         } else {
             throw std::invalid_argument(
@@ -248,11 +252,40 @@ EventLoopResult<T> run_event_loop_impl(
     };
 
     auto apply_user_swap = [&](std::size_t, uint64_t ts, T cex_price) {
-        if (try_user_swap(pool, ucfg, ts, cex_price)) {
-            invalidate_edge_inputs();
-            if (enable_slippage_probes) {
-                sample_slippage_probes(ts, cex_price);
-            }
+        const T ps_before = pool.cached_price_scale;
+        T oracle_before{};
+        T xcp_profit_before{};
+        T vp_before{};
+        T p_pool_before{};
+        uint64_t last_ts_before{0};
+        T lp_before{};
+        const bool log_actions = action_logger.enabled();
+        if (log_actions) {
+            oracle_before = pool.cached_price_oracle;
+            xcp_profit_before = pool.xcp_profit;
+            vp_before = pool.get_vp_boosted();
+            p_pool_before = pool.get_p();
+            last_ts_before = pool.last_timestamp;
+            lp_before = pool.last_prices;
+        }
+        const auto fill = try_user_swap(pool, ucfg, ts, cex_price);
+        if (!fill) return;
+
+        invalidate_edge_inputs();
+        if (differs_rel(pool.cached_price_scale, ps_before)) {
+            ++m.n_rebalances;
+        }
+        if (enable_slippage_probes) {
+            sample_slippage_probes(ts, cex_price);
+        }
+        if (log_actions) {
+            action_logger.log_exchange(
+                ts, static_cast<int>(fill->i), static_cast<int>(fill->j),
+                fill->dx, fill->dy_after_fee, fill->fee_tokens, T(0),
+                cex_price, p_pool_before, oracle_before, ps_before,
+                last_ts_before, lp_before, xcp_profit_before, vp_before,
+                pool, true
+            );
         }
     };
 

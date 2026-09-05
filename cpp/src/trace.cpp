@@ -91,7 +91,11 @@ json::object action_to_json(const arb::harness::Action<RealT>& action) {
             o["dx"] = static_cast<double>(act.dx);
             o["dy_after_fee"] = static_cast<double>(act.dy_after_fee);
             o["fee_tokens"] = static_cast<double>(act.fee_tokens);
-            o["profit_coin0"] = static_cast<double>(act.profit_coin0);
+            if (act.synthetic_user) {
+                o["actor"] = "user";
+            } else {
+                o["profit_coin0"] = static_cast<double>(act.profit_coin0);
+            }
             o["p_cex"] = static_cast<double>(act.p_cex);
             o["p_pool_before"] = static_cast<double>(act.p_pool_before);
             o["p_pool_after"] = static_cast<double>(act.p_pool_after);

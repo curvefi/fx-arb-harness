@@ -84,7 +84,8 @@ They are loaded once at admission.
   "enable_slippage_probes": false,
   "yb_mode": "off",
   "yb_releverage_fee": 0.012,
-  "yb_cash_multiplier": 1.0
+  "yb_cash_multiplier": 1.0,
+  "yb_initial_state": null
 }
 ```
 
@@ -103,8 +104,27 @@ both metric profiles and remains the reference cursor.
 `yb_mode` is `off`, `active_2l`, or `reference_2l`.
 The enabled modes use `yb_releverage_fee` and `yb_cash_multiplier`, and evaluate
 after every causal event. Summary valuation is hourly for GM accounting and once
-at the final endpoint for raw APY. `reference_2l` is a floating candidate lane
-with synthetic fresh-L2 state, not a historical LT replay.
+at the final endpoint for raw APY.
+
+`yb_initial_state` optionally replaces synthetic fresh-2L initialization. It is
+a complete object with provenance fields `source_block`, `source_timestamp`, and
+`block_hash`; common fields `leverage`, `fee`, `collateral`, `debt`, `rate`,
+`rate_mul`, `rate_time`, `minted`, `redeemed`, `stable_balance`,
+`lt_stable_balance`, and `killed`; and reference fields `flash_max_loan`,
+`stable_aggregator`, `rounding_discount`, and `lt_donation_discount`. Quantities
+are human-unit finite binary64 values. `debt` and `rate_mul` are the stored AMM
+values at `rate_time`, rather than projected getters. When the checkpoint is
+applied, its source block and timestamp must equal the native pool
+`historical_state`; `rate_time` may not be later than the source timestamp.
+Leverage is fixed at 2 and safety ratios are derived from it. Stable cash and
+flash capacity may be zero.
+
+For enabled modes, the historical `fee` is authoritative. An explicitly supplied
+conflicting `yb_releverage_fee`, including a candidate override, is rejected; an
+omitted raw-protocol fee inherits the checkpoint value. `yb_cash_multiplier` and
+donation-APY rate derivation apply only to fresh initialization. In `off` mode a
+retained state object is validated but ignored. Reference external inputs seed
+only the initial state; without a chronological update tape this is represented state replay, not full E0b parity.
 
 ```json
 {
@@ -188,6 +208,12 @@ in `hello` are enforced before the simulation.
 `observation.kind` is `summary` or `full_trace`. `trace_interval` is a positive
 integer and `trace_actions` controls the optional action sidecar. Observation
 changes capture only, not the economic simulation.
+Successful synthetic user swaps appear in that sidecar as `type="exchange"`
+with `actor="user"`; their `dx`, `dy_after_fee`, and `fee_tokens` are the values
+returned by the committed pool exchange. Failed attempts emit no action. Existing
+exchange entries without `actor` are arbitrage fills and retain `profit_coin0`.
+Summary `trades`, notional, LP-fee, and arbitrage-PnL metrics remain arbitrage-only;
+`n_rebalances` counts price-scale movement from both arbitrage and user fills.
 
 ```json
 {
@@ -206,9 +232,9 @@ same length and order. Object and array forms carry identical values.
 
 With `full_trace`, successful results return an
 `artifacts` object containing `trace_path`, optional `actions_path`, and
-`effective_inputs`. The latter is a finite numeric map of the resolved pool
-and run controls used to initialize the replay; candidate policy parameters
-remain in the candidate payload.
+`effective_inputs`. It contains resolved pool and run controls; an applied YB
+checkpoint appears as nested `run.yb_initial_state`, including its provenance.
+Candidate policy parameters remain in the candidate payload.
 
 ### Close, shutdown, and errors
 

@@ -31,6 +31,7 @@ from .models import (
     SessionClosedFrame,
     SessionReadyFrame,
     ShutdownFrame,
+    YbInitialState,
 )
 
 logger = logging.getLogger("curve_fx_harness_client")
@@ -262,8 +263,9 @@ class EvaluatorClient:
         event_cursor: str = "scalar",
         metric_profile: str = "full_summary",
         yb_mode: str = "off",
-        yb_releverage_fee: float = 0.012,
+        yb_releverage_fee: Optional[float] = None,
         yb_cash_multiplier: float = 1.0,
+        yb_initial_state: Optional[Union[YbInitialState, Dict[str, Any]]] = None,
     ) -> SessionReadyFrame:
         """Open an immutable evaluation session from direct scenario inputs.
 
@@ -317,6 +319,7 @@ class EvaluatorClient:
                 yb_mode=yb_mode,
                 yb_releverage_fee=yb_releverage_fee,
                 yb_cash_multiplier=yb_cash_multiplier,
+                yb_initial_state=yb_initial_state,
             )
 
             resp_data = self._transact(frame.model_dump(exclude_none=True))

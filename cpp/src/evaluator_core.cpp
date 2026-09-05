@@ -319,6 +319,7 @@ void execute_scenario_job(
                 ? *pool_override->yb_releverage_fee
                 : session_cfg.yb_releverage_fee;
         run_cfg.yb_cash_multiplier = session_cfg.yb_cash_multiplier;
+        run_cfg.yb_initial_state = session_cfg.yb_initial_state;
 
         std::vector<arb::harness::Action<RealT>>* actions_ptr = nullptr;
         std::vector<arb::harness::DetailedEntry<RealT>>* detailed_ptr = nullptr;
@@ -353,8 +354,12 @@ void execute_scenario_job(
                 static_cast<double>(costs.gas_coin0);
             effective["pool.run.yb_releverage_fee"] =
                 static_cast<double>(run_cfg.yb_releverage_fee);
-            effective["run.yb_cash_multiplier"] =
-                static_cast<double>(run_cfg.yb_cash_multiplier);
+            if (run_cfg.yb_initial_state && run_cfg.yb_mode != arb::harness::YbMode::Off) {
+                effective["run.yb_initial_state"] =
+                    arb::harness::yb_initial_state_json(*run_cfg.yb_initial_state);
+            } else {
+                effective["run.yb_cash_multiplier"] = static_cast<double>(run_cfg.yb_cash_multiplier);
+            }
 
             trace_lease.emplace(TraceArena::global_instance().acquire());
             run_cfg.detailed_log = true;

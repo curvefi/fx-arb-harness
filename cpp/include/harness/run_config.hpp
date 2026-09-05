@@ -3,6 +3,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+
+#include "harness/yb_initial_state.hpp"
 
 namespace arb {
 namespace harness {
@@ -44,6 +47,7 @@ struct RunConfig {
     YbMode yb_mode{YbMode::Off};
     T yb_releverage_fee{T(0.012)};
     T yb_cash_multiplier{T(1)};
+    std::optional<YbInitialState<T>> yb_initial_state;
 
     // Slippage probe sampling
     bool enable_slippage_probes{false};

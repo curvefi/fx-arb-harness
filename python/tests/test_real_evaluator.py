@@ -369,6 +369,7 @@ def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
             observation=ObservationSpec(
                 kind="full_trace",
                 trace_interval=1,
+                trace_actions=True,
                 artifact_dir="user-sidecar",
             ),
         )
@@ -378,11 +379,52 @@ def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
             (tmp_path / user_result.artifacts.trace_path).read_text(encoding="utf-8")
         )
         by_time = {row["t"]: row for row in user_trace}
+        assert user_trace[-1]["n_rebalances"] > 0
         before = by_time[1_700_000_175]
         after = by_time[1_700_000_185]
         fair_tvl = before["token0"] + after["p_cex"] * before["token1"]
         expected_dx = fair_tvl * 0.01 * 180 / 86_400
         assert after["token0"] - before["token0"] == pytest.approx(expected_dx)
+        user_actions = [row for row in json.loads(
+            (tmp_path / user_result.artifacts.actions_path).read_text(encoding="utf-8")
+        ) if row.get("actor") == "user"]
+        assert user_actions
+        first_user = user_actions[0]
+        assert (first_user["type"], first_user["i"], first_user["j"]) == ("exchange", 0, 1)
+        assert first_user["dx"] == pytest.approx(expected_dx)
+        assert before["token1"] - after["token1"] == pytest.approx(
+            first_user["dy_after_fee"]
+        )
+        assert first_user["dy_after_fee"] > 0
+        assert first_user["fee_tokens"] > 0
+        assert "profit_coin0" not in first_user
+
+    with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
+        _open(
+            client,
+            template,
+            candles,
+            "user-rejected",
+            price_feed_path=price_feed,
+            dustswap_freq_s=0,
+            user_swap_freq_s=180,
+            user_swap_size_frac=0.01,
+            user_swap_thresh=0.0,
+        )
+        rejected = _evaluate_once(
+            client,
+            policy_params,
+            candidate_id="user-rejected",
+            observation=ObservationSpec(
+                kind="full_trace", trace_interval=1, trace_actions=True,
+                artifact_dir="user-rejected-sidecar",
+            ),
+        )
+        assert rejected.artifacts is not None
+        rejected_actions = json.loads(
+            (tmp_path / rejected.artifacts.actions_path).read_text(encoding="utf-8")
+        )
+        assert not [row for row in rejected_actions if row.get("actor") == "user"]
 
     for mode in ("active_2l", "reference_2l"):
         with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:

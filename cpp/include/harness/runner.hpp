@@ -177,6 +177,24 @@ PoolResult<T> run_single_pool(
         if (init_ts == 0) {
             init_ts = 1700000000ULL;
         }
+        if (cfg.yb_mode != YbMode::Off && cfg.yb_initial_state) {
+            const auto& yb_state = *cfg.yb_initial_state;
+            if (!restore_historical ||
+                pool_init.historical_state.source_block != yb_state.source_block ||
+                pool_init.historical_state.source_timestamp != yb_state.source_timestamp) {
+                throw std::invalid_argument(
+                    "yb_initial_state must match the native historical checkpoint"
+                );
+            }
+            if (yb_state.source_timestamp > init_ts) {
+                throw std::invalid_argument("run start precedes yb_initial_state checkpoint");
+            }
+            if (cfg.yb_releverage_fee != yb_state.fee) {
+                throw std::invalid_argument(
+                    "yb_releverage_fee conflicts with yb_initial_state fee"
+                );
+            }
+        }
         if (
             restore_historical &&
             init_ts < pool_init.historical_state.source_timestamp

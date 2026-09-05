@@ -75,8 +75,6 @@ void ScenarioStore<T>::load(
 
     Scenario<T> scenario;
     scenario.id = scenario_id;
-    scenario.candle_path = market_path;
-    scenario.price_feed_path = price_feed_path;
     scenario.candles = std::move(candles);
     scenario.events = arb::EventSoA::from_events(events);
     scenario.base_pool = base_pool;

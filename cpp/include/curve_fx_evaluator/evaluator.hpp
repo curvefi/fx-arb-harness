@@ -42,8 +42,6 @@ struct ScenarioLoadOptions {
 template <typename T = RealT>
 struct Scenario {
     std::string id;
-    std::string candle_path;
-    std::string price_feed_path;
     std::vector<arb::Candle> candles;
     arb::EventSoA events;
     arb::pools::PoolInit<T> base_pool;
@@ -68,8 +66,8 @@ struct SessionConfig {
     // lane), or "reference_2l" (contract-derived candidate lane).
     std::string yb_mode{"off"};
     T yb_releverage_fee{static_cast<T>(0.012)};
-
     T yb_cash_multiplier{static_cast<T>(1.0)};
+    std::optional<arb::harness::YbInitialState<T>> yb_initial_state;
 
 };
 
@@ -82,7 +80,6 @@ struct ObservationSpec {
     ObservationKind kind{ObservationKind::Summary};
     size_t trace_interval{1};
     bool trace_actions{false};
-    std::string artifact_dir;
 };
 
 template <typename T = RealT>

@@ -508,7 +508,7 @@ private:
                 "dustswap_freq_s", "user_swap_freq_s",
                 "user_swap_size_frac", "user_swap_thresh",
                 "enable_slippage_probes", "yb_releverage_fee",
-                "yb_cash_multiplier", "yb_mode", "event_cursor",
+                "yb_cash_multiplier", "yb_initial_state", "yb_mode", "event_cursor",
                 "metric_profile"
             })) {
             write_frame(std::cout, make_error_frame(
@@ -674,9 +674,36 @@ private:
                     "grid_core requires yb_mode='off' and slippage disabled"));
                 return;
             }
-            cfg.yb_releverage_fee = static_cast<RealT>(arb::get_double_opt(req, "yb_releverage_fee", 0.012));
+            const auto* yb_releverage_fee_value =
+                req.if_contains("yb_releverage_fee");
+            const bool yb_releverage_fee_explicit =
+                yb_releverage_fee_value != nullptr &&
+                !yb_releverage_fee_value->is_null();
+            cfg.yb_releverage_fee = static_cast<RealT>(
+                arb::get_double_opt(req, "yb_releverage_fee", 0.012));
             cfg.yb_cash_multiplier = static_cast<RealT>(
                 arb::get_double_opt(req, "yb_cash_multiplier", 1.0));
+            if (const auto* initial = req.if_contains("yb_initial_state");
+                initial != nullptr && !initial->is_null()) {
+                cfg.yb_initial_state = arb::harness::parse_yb_initial_state<RealT>(*initial);
+                if (cfg.yb_mode != "off") {
+                    const auto& historical = store->scenario().base_pool.historical_state;
+                    if (!historical.enabled ||
+                        historical.source_block != cfg.yb_initial_state->source_block ||
+                        historical.source_timestamp != cfg.yb_initial_state->source_timestamp) {
+                        throw std::invalid_argument(
+                            "yb_initial_state must match the native historical checkpoint"
+                        );
+                    }
+                    if (yb_releverage_fee_explicit &&
+                        cfg.yb_releverage_fee != cfg.yb_initial_state->fee) {
+                        throw std::invalid_argument(
+                            "yb_releverage_fee conflicts with yb_initial_state fee"
+                        );
+                    }
+                    cfg.yb_releverage_fee = cfg.yb_initial_state->fee;
+                }
+            }
 
             ActiveSession sess;
             sess.session_id = session_id;

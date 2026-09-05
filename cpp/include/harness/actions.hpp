@@ -40,6 +40,7 @@ struct TickAction {
 // Exchange action
 template <typename T>
 struct ExchangeAction {
+    bool synthetic_user{false};
     uint64_t ts{0};
     int i{0};
     int j{0};

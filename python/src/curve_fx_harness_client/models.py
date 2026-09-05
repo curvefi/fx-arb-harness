@@ -58,6 +58,28 @@ class HelloFrame(ProtocolModel):
     limits: Limits = Field(default_factory=Limits)
 
 
+class YbInitialState(ProtocolModel):
+    source_block: int = Field(gt=0, le=2**64 - 1)
+    source_timestamp: int = Field(gt=0, le=2**64 - 1)
+    block_hash: str = Field(pattern=r"^0x[0-9a-fA-F]{64}$")
+    leverage: FiniteFloat
+    fee: FiniteFloat
+    collateral: FiniteFloat
+    debt: FiniteFloat
+    rate: FiniteFloat
+    rate_mul: FiniteFloat
+    rate_time: int = Field(gt=0, le=2**64 - 1)
+    minted: FiniteFloat
+    redeemed: FiniteFloat
+    stable_balance: FiniteFloat
+    lt_stable_balance: FiniteFloat
+    flash_max_loan: FiniteFloat
+    stable_aggregator: FiniteFloat
+    rounding_discount: FiniteFloat
+    lt_donation_discount: FiniteFloat
+    killed: bool
+
+
 class OpenSessionFrame(ProtocolModel):
     protocol: Literal["curve_fx_eval"] = "curve_fx_eval"
     type: Literal["open_session"] = "open_session"
@@ -82,8 +104,9 @@ class OpenSessionFrame(ProtocolModel):
     event_cursor: Literal["scalar", "exact_skip"] = "scalar"
     metric_profile: Literal["full_summary", "grid_core"] = "full_summary"
     yb_mode: Literal["off", "active_2l", "reference_2l"] = "off"
-    yb_releverage_fee: FiniteFloat = 0.012
+    yb_releverage_fee: Optional[FiniteFloat] = None
     yb_cash_multiplier: FiniteFloat = 1.0
+    yb_initial_state: Optional[YbInitialState] = None
 
 
 class ScenarioInfo(ProtocolModel):
@@ -161,7 +184,9 @@ class EvaluateBatchFrame(ProtocolModel):
 class ArtifactRef(ProtocolModel):
     trace_path: Optional[str] = None
     actions_path: Optional[str] = None
-    effective_inputs: Optional[Dict[str, Union[bool, FiniteFloat]]] = None
+    effective_inputs: Optional[
+        Dict[str, Union[bool, FiniteFloat, YbInitialState]]
+    ] = None
 
 
 class CandidateResult(ProtocolModel):

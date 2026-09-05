@@ -80,9 +80,10 @@ public:
                       T profit_coin0, T p_cex, T p_pool_before,
                       T oracle_before, T ps_before, uint64_t last_ts_before, T lp_before,
                       T xcp_profit_before, T vp_before,
-                      const Pool& pool) {
+                      const Pool& pool, bool synthetic_user = false) {
         if (!enabled()) return;
         ExchangeAction<T> act;
+        act.synthetic_user = synthetic_user;
         act.ts = ts;
         act.i = i;
         act.j = j;

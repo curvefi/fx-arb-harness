@@ -18,6 +18,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "harness/yb_initial_state.hpp"
 #include "pools/twocrypto_fx/twocrypto.hpp"
 
 namespace arb::harness {
@@ -149,6 +150,44 @@ public:
         state.rounding_discount = precision / T(100000000);
         state.lt_donation_discount = precision / T(100);
         return YbReference2LMarket(std::move(state));
+    }
+
+    static YbReference2LMarket from_state(const YbInitialState<T>& initial) {
+        validate_yb_initial_state(initial);
+        const T one = PoolTraits::PRECISION();
+        const T denominator = T(2) * initial.leverage - one;
+        State state;
+        state.leverage = initial.leverage;
+        state.lev_ratio = initial.leverage * initial.leverage * one /
+            (denominator * denominator);
+        state.min_safe_debt_ratio = one * one * one /
+            (T(4) * initial.leverage * initial.leverage);
+        state.max_safe_debt_ratio = denominator * denominator * one /
+            (T(4) * initial.leverage * initial.leverage) -
+            one * one * one / (T(8) * initial.leverage * initial.leverage);
+        state.fee = initial.fee;
+        state.collateral = initial.collateral;
+        state.debt = initial.debt;
+        state.rate = initial.rate;
+        state.rate_mul = initial.rate_mul;
+        state.rate_time = initial.rate_time;
+        state.minted = initial.minted;
+        state.redeemed = initial.redeemed;
+        state.stable_balance = initial.stable_balance;
+        state.flash_max_loan = initial.flash_max_loan;
+        state.stable_aggregator = initial.stable_aggregator;
+        state.rounding_discount = initial.rounding_discount;
+        state.lt_donation_discount = initial.lt_donation_discount;
+        state.lt_stable_balance = initial.lt_stable_balance;
+        state.killed = initial.killed;
+        YbReference2LMarket market(std::move(state));
+        const T debt_at_checkpoint = market.projected_debt(initial.source_timestamp);
+        market.initial_unsettled_interest_ = std::max(
+            T(0), debt_at_checkpoint + market.state_.redeemed - market.state_.minted
+        ) + market.state_.lt_stable_balance;
+        // Exclude the stored rate_time-to-checkpoint interval from simulated accrual.
+        market.accrued_interest_total_ = market.state_.debt - debt_at_checkpoint;
+        return market;
     }
 
     bool enabled() const { return enabled_; }

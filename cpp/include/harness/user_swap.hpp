@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cmath>
+#include <optional>
 
 #include "pools/twocrypto_fx/helpers.hpp"
 
@@ -32,25 +33,34 @@ struct UserSwapCfg {
     }
 };
 
+template <typename T>
+struct UserSwapFill {
+    size_t i{0};
+    size_t j{0};
+    T dx{T(0)};
+    T dy_after_fee{T(0)};
+    T fee_tokens{T(0)};
+};
+
 // Try to perform a synthetic user swap if due.
 // Alternates direction each swap, only executes if fee-inclusive execution is
 // no worse than CEX by cfg.thresh.
-// Returns true if swap was executed.
+// Returns the actual committed fill, or nullopt when no swap was executed.
 template <typename T, typename Pool>
-bool try_user_swap(
+std::optional<UserSwapFill<T>> try_user_swap(
     Pool& pool,
     UserSwapCfg<T>& cfg,
     uint64_t ev_ts,
     T p_cex
 ) {
-    if (!cfg.enabled()) return false;
-    if (cfg.next_ts == 0 || ev_ts < cfg.next_ts) return false;
+    if (!cfg.enabled()) return std::nullopt;
+    if (cfg.next_ts == 0 || ev_ts < cfg.next_ts) return std::nullopt;
 
     // Advance schedule regardless of whether swap succeeds
     cfg.next_ts += cfg.freq_s;
 
     // Validate CEX price
-    if (!(p_cex > T(0))) return false;
+    if (!(p_cex > T(0))) return std::nullopt;
 
     // Determine swap direction and equal coin0-value amount. Scaling the
     // daily utilization by the cadence makes 1.0 mean 100% fair-TVL turnover
@@ -59,11 +69,11 @@ bool try_user_swap(
     const size_t j_to = i_from ^ 1;
 
     const T bal_from = pool.balances[i_from];
-    if (!(bal_from > T(0))) return false;
+    if (!(bal_from > T(0))) return std::nullopt;
 
     T daily_tvl_frac = cfg.size_frac;
     if (daily_tvl_frac > T(1)) daily_tvl_frac = T(1);
-    if (!(daily_tvl_frac > T(0))) return false;
+    if (!(daily_tvl_frac > T(0))) return std::nullopt;
 
     constexpr long double SECONDS_PER_DAY = 86400.0L;
     const T fair_tvl = pool.balances[0] + p_cex * pool.balances[1];
@@ -72,31 +82,33 @@ bool try_user_swap(
     );
     const T notional_coin0 = fair_tvl * daily_tvl_frac * cadence_days;
     const T dx = i_from == 0 ? notional_coin0 : notional_coin0 / p_cex;
-    if (!(dx > T(0))) return false;
+    if (!(dx > T(0))) return std::nullopt;
 
     auto [dy_after_fee, sim_fee] = pools::twocrypto_fx::simulate_exchange_once(
         pool, i_from, j_to, dx);
     (void)sim_fee;
-    if (!(dy_after_fee > T(0))) return false;
+    if (!(dy_after_fee > T(0))) return std::nullopt;
 
     if (i_from == 0) {
         // User buys risky asset with stable coin. Lower effective price is better.
         const T effective_ask = dx / dy_after_fee;
-        if (!(effective_ask <= p_cex * (T(1) + cfg.thresh))) return false;
+        if (!(effective_ask <= p_cex * (T(1) + cfg.thresh))) return std::nullopt;
     } else {
         // User sells risky asset for stable coin. Higher effective price is better.
         const T effective_bid = dy_after_fee / dx;
-        if (!(effective_bid >= p_cex * (T(1) - cfg.thresh))) return false;
+        if (!(effective_bid >= p_cex * (T(1) - cfg.thresh))) return std::nullopt;
     }
 
     // The pool SDK makes exchange atomic across trailing tweak failures.
     try {
-        (void)pool.exchange(static_cast<T>(i_from), static_cast<T>(j_to), dx, T(0));
+        const auto result = pool.exchange(
+            static_cast<T>(i_from), static_cast<T>(j_to), dx, T(0)
+        );
         cfg.next_dir ^= 1;  // alternate direction for next swap
-        return true;
+        return UserSwapFill<T>{i_from, j_to, dx, result[0], result[1]};
 
     } catch (...) {
-        return false;
+        return std::nullopt;
     }
 }
 
