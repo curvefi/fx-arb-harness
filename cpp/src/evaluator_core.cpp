@@ -281,6 +281,21 @@ void execute_scenario_job(
         run_cfg.user_swap_freq_s = session_cfg.user_swap_freq_s;
         run_cfg.user_swap_size_frac = session_cfg.user_swap_size_frac;
         run_cfg.user_swap_thresh = session_cfg.user_swap_thresh;
+        run_cfg.cex_depth = scen.cex_depth ? &*scen.cex_depth : nullptr;
+        run_cfg.observed_state = scen.observed_state ? &*scen.observed_state : nullptr;
+        run_cfg.equalization_delay_s = session_cfg.equalization_delay_s;
+        run_cfg.reset_threshold_bps = session_cfg.reset_threshold_bps;
+        run_cfg.observation_interval_s = session_cfg.observation_interval_s;
+        if (session_cfg.state_reconciliation_mode == "on_price_scale_detach")
+            run_cfg.state_reconciliation_mode = arb::harness::StateReconciliationMode::OnPriceScaleDetach;
+        else if (session_cfg.state_reconciliation_mode != "off")
+            throw std::invalid_argument("unknown state_reconciliation_mode");
+        run_cfg.cex_depth_max_age_s = session_cfg.cex_depth_max_age_s;
+        if (session_cfg.actor_timing_mode == "minute_sequential") {
+            run_cfg.actor_timing_mode = arb::harness::ActorTimingMode::MinuteSequential;
+        } else if (session_cfg.actor_timing_mode != "legacy_event") {
+            throw std::invalid_argument("unknown actor_timing_mode");
+        }
         run_cfg.enable_slippage_probes = session_cfg.enable_slippage_probes;
         if (session_cfg.event_cursor == "exact_skip") {
             run_cfg.event_cursor = arb::harness::EventCursor::ExactSkip;
@@ -319,6 +334,7 @@ void execute_scenario_job(
                 ? *pool_override->yb_releverage_fee
                 : session_cfg.yb_releverage_fee;
         run_cfg.yb_cash_multiplier = session_cfg.yb_cash_multiplier;
+        run_cfg.yb_min_net_profit_coin0 = session_cfg.yb_min_net_profit_coin0;
         run_cfg.yb_initial_state = session_cfg.yb_initial_state;
 
         std::vector<arb::harness::Action<RealT>>* actions_ptr = nullptr;
@@ -352,6 +368,9 @@ void execute_scenario_job(
                 static_cast<double>(costs.arb_fee_bps);
             effective["pool.costs.gas_coin0"] =
                 static_cast<double>(costs.gas_coin0);
+            effective["run.yb_min_net_profit_coin0"] = static_cast<double>(run_cfg.yb_min_net_profit_coin0);
+            effective["run.reset_threshold_bps"] = static_cast<double>(run_cfg.reset_threshold_bps);
+            effective["run.equalization_delay_s"] = run_cfg.equalization_delay_s;
             effective["pool.run.yb_releverage_fee"] =
                 static_cast<double>(run_cfg.yb_releverage_fee);
             if (run_cfg.yb_initial_state && run_cfg.yb_mode != arb::harness::YbMode::Off) {
@@ -395,7 +414,13 @@ void execute_scenario_job(
         sc_res.success = true;
         auto tw_summary = pool_res.tw_metrics.summarize();
         extract_metrics_from_pool_result(pool_res, tw_summary, sc_res.metrics);
-
+        if (scen.observed_state) {
+            const auto& r = pool_res.reconciliation;
+            sc_res.actor_metrics["state_reconciliation"] = boost::json::object{
+                {"observations", r.observations}, {"episodes", r.episodes}, {"resets", r.resets},
+                {"lp_metrics_comparison_only",r.resets != 0},
+                {"accounting_warning","Copied public state is not simulated profit; LP metrics across resets are comparison-only."}};
+        }
         if (trace_lease.has_value()) {
             sc_res.has_trace = true;
             sc_res.trace_record_count = trace_lease->detailed_entries().size();

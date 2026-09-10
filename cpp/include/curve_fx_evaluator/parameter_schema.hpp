@@ -16,7 +16,7 @@ struct StaticParameterDescriptor {
     std::string_view choices_json{};
 };
 
-inline constexpr std::array<StaticParameterDescriptor, 54> STATIC_PARAMETERS{{
+inline constexpr std::array<StaticParameterDescriptor, 64> STATIC_PARAMETERS{{
     {"pool.tag", "pool_overrides.tag", "string", "identifier", "utf8", "candidate", ""},
     {"pool.initial_liquidity", "pool_overrides.pool.initial_liquidity", "real_pair", "token_amount", "binary64_from_wad_1e18", "candidate", ""},
     {"pool.A", "pool_overrides.pool.A", "real", "pool_raw", "binary64", "candidate", ""},
@@ -49,6 +49,11 @@ inline constexpr std::array<StaticParameterDescriptor, 54> STATIC_PARAMETERS{{
     {"run.scenario_id", "open_session.scenario_id", "string", "identifier", "utf8", "session", ""},
     {"run.market_path", "open_session.market_path", "string", "path", "utf8", "session", ""},
     {"run.price_feed_path", "open_session.price_feed_path", "string", "path", "utf8", "session", ""},
+    {"run.observed_state_path", "open_session.observed_state_path", "string", "path", "utf8", "session", ""},
+    {"run.cex_depth_path", "open_session.cex_depth_path", "string", "path", "utf8", "session", ""},
+    {"run.cex_depth_max_age_s", "open_session.cex_depth_max_age_s", "integer", "seconds", "uint64", "session", "30"},
+    {"run.actor_timing_mode", "open_session.actor_timing_mode", "enum", "actor_timing", "utf8", "session", "\"legacy_event\"", "[\"legacy_event\",\"minute_sequential\"]"},
+    {"run.event_mode", "open_session.event_mode", "enum", "event_generation", "utf8", "session", "\"candle_path\"", "[\"candle_path\",\"depth\"]"},
     {"run.pool_index", "open_session.pool_index", "integer", "index", "uint64", "session", "0"},
     {"run.n_candles", "open_session.n_candles", "integer", "count", "uint64", "session", "0"},
     {"run.start_time", "open_session.start_time", "integer", "unix_seconds", "uint64", "session", "0"},
@@ -66,6 +71,11 @@ inline constexpr std::array<StaticParameterDescriptor, 54> STATIC_PARAMETERS{{
     {"run.yb_mode", "open_session.yb_mode", "enum", "yb_mode", "utf8", "session", "\"off\"", "[\"off\",\"active_2l\",\"reference_2l\"]"},
     {"run.yb_releverage_fee", "open_session.yb_releverage_fee", "real", "fee_fraction", "binary64", "session", "0.012"},
     {"run.yb_cash_multiplier", "open_session.yb_cash_multiplier", "real", "ratio", "binary64", "session", "1.0"},
+    {"run.yb_min_net_profit_coin0", "open_session.yb_min_net_profit_coin0", "real", "coin0", "binary64", "session", "1.0"},
+    {"run.state_reconciliation_mode", "open_session.state_reconciliation_mode", "enum", "state_reconciliation", "utf8", "session", "\"off\"", "[\"off\",\"on_price_scale_detach\"]"},
+    {"run.reset_threshold_bps", "open_session.reset_threshold_bps", "real", "basis_points", "binary64", "session", "100"},
+    {"run.equalization_delay_s", "open_session.equalization_delay_s", "integer", "seconds", "uint64", "session", "60"},
+    {"run.observation_interval_s", "open_session.observation_interval_s", "integer", "seconds", "uint64", "session", "60"},
     {"run.yb_initial_state", "open_session.yb_initial_state", "object", "yb_checkpoint", "json_object_finite_binary64", "session", ""},
     {"run.observation.kind", "evaluate_batch.observation.kind", "enum", "observation_kind", "utf8", "observation", "\"summary\"", "[\"summary\",\"full_trace\"]"},
     {"run.observation.trace_interval", "evaluate_batch.observation.trace_interval", "integer", "events", "uint64", "observation", "1"},

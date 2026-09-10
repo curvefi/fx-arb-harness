@@ -5,9 +5,12 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string>
 #include <type_traits>
+#include <utility>
 
 #include "pools/twocrypto_fx/helpers.hpp"
+#include "trading/cex_depth.hpp"
 #include "trading/costs.hpp"
 
 namespace arb {
@@ -42,7 +45,8 @@ Decision<T> decide_trade(
     T cex_fee_markup,
     const T* p_now_hint = nullptr,
     const T* fee_hint = nullptr,
-    const std::array<T, 2>* xp_hint = nullptr
+    const std::array<T, 2>* xp_hint = nullptr,
+    const CexDepthBook<T>* depth = nullptr
 ) {
     static_assert(std::is_floating_point_v<T>, "decide_trade is floating-only");
 
@@ -63,8 +67,15 @@ Decision<T> decide_trade(
     if (!(p_now > T(0))) return d;
 
     const T one_minus_f0 = std::max(T(1) - fee_pool, T(1e-12));
-    const T p_cex_bid = cex_fee_discount * cex_price;
-    const T p_cex_ask = cex_fee_markup * cex_price;
+    T p_cex_bid = cex_fee_discount * cex_price;
+    T p_cex_ask = cex_fee_markup * cex_price;
+    std::optional<double> top_bid, top_ask;
+    if (depth != nullptr) {
+        top_bid = depth->bid_price();
+        top_ask = depth->ask_price();
+        p_cex_bid = top_bid ? cex_fee_discount * static_cast<T>(*top_bid) : T(0);
+        p_cex_ask = top_ask ? cex_fee_markup * static_cast<T>(*top_ask) : T(0);
+    }
 
     // Per-direction path-floor fee: the lowest fee any size of trade in
     // that direction can pay. For the native fee with the conventional
@@ -98,8 +109,12 @@ Decision<T> decide_trade(
 
     // Required price-move ratios (rho > 1 means a profitable direction
     // exists at that fee level).
-    const T rho_01_floor = std::max(T(1) - gate_fee_01, T(1e-12)) * p_cex_bid / p_now;
-    const T rho_10_floor = std::max(T(1) - gate_fee_10, T(1e-12)) * p_now / p_cex_ask;
+    const T rho_01_floor = depth != nullptr && !top_bid
+        ? T(0)
+        : std::max(T(1) - gate_fee_01, T(1e-12)) * p_cex_bid / p_now;
+    const T rho_10_floor = depth != nullptr && !top_ask
+        ? T(0)
+        : std::max(T(1) - gate_fee_10, T(1e-12)) * p_now / p_cex_ask;
 
     if (rho_01_floor <= T(1) && rho_10_floor <= T(1)) return d;
     int sel_i = -1, sel_j = -1;
@@ -127,6 +142,30 @@ Decision<T> decide_trade(
         }
         dx_hi = std::min(dx_hi, cap);
     }
+    if (depth != nullptr) {
+        if (sel_i == 1) {
+            const auto capacity = depth->ask_capacity();
+            if (!capacity) return d;
+            dx_hi = std::min(dx_hi, *capacity);
+        } else {
+            const auto capacity = depth->bid_capacity();
+            if (!capacity) return d;
+            bool current_bound_fits = false;
+            try {
+                const auto at_bound = fx::simulate_exchange_once(pool, 0, 1, dx_hi);
+                current_bound_fits = depth->sell_base(at_bound.first).has_value();
+            } catch (...) {
+                // Fall through to the bounded inverse or fail closed below.
+            }
+            if (!current_bound_fits && *capacity < pool.balances[1]) {
+                try {
+                    dx_hi = std::min(dx_hi, pool.get_dx(0, 1, *capacity, 5));
+                } catch (const std::exception&) {
+                    return d;
+                }
+            }
+        }
+    }
     if (!(dx_hi > dx_lo)) {
         return d;
     }
@@ -140,10 +179,23 @@ Decision<T> decide_trade(
 
     const T value_coeff = (sel_i == 0) ? cex_price * cex_fee_discount : T(1);
     const T cost_coeff  = (sel_i == 0) ? T(1) : cex_price * cex_fee_markup;
+    const T depth_value_coeff = (sel_i == 0 && top_bid) ? static_cast<T>(*top_bid) * cex_fee_discount : value_coeff;
+    const T depth_cost_coeff = (sel_i == 1 && top_ask) ? static_cast<T>(*top_ask) * cex_fee_markup : cost_coeff;
 
     auto evaluate_candidate = [&](T dx) -> Candidate {
         auto sim = fx::simulate_exchange_once(pool, static_cast<size_t>(sel_i), static_cast<size_t>(sel_j), dx);
-        const T profit = sim.first * value_coeff - dx * cost_coeff - costs.gas_coin0;
+        T profit;
+        if (depth == nullptr) {
+            profit = sim.first * value_coeff - dx * cost_coeff - costs.gas_coin0;
+        } else if (sel_i == 0) {
+            const auto proceeds = depth->sell_base(sim.first);
+            profit = proceeds ? *proceeds * cex_fee_discount - dx - costs.gas_coin0
+                              : -std::numeric_limits<T>::infinity();
+        } else {
+            const auto purchase = depth->buy_base(dx);
+            profit = purchase ? sim.first - *purchase * cex_fee_markup - costs.gas_coin0
+                              : -std::numeric_limits<T>::infinity();
+        }
         return Candidate{dx, sim.first, profit, sim.second};
     };
 
@@ -202,8 +254,9 @@ Decision<T> decide_trade(
     //     seed goes nonpositive, all larger sizes are dominated. The walk
     //     uses fee-free evaluations (one sqrt, no policy call).
     const T floor_fee_sel = (sel_i == 0) ? floor_fee_01 : floor_fee_10;
-    const T floor_value_coeff =
-        std::max(T(1) - floor_fee_sel, T(1e-12)) * value_coeff;
+    const T floor_value_coeff = std::max(T(1) - floor_fee_sel, T(1e-12)) *
+        (depth != nullptr ? depth_value_coeff : value_coeff);
+    const T envelope_cost_coeff = depth != nullptr ? depth_cost_coeff : cost_coeff;
     auto p_floor_at = [&](T dx) -> T {
         dx = std::min(std::max(dx, dx_lo), dx_hi);
         const T b0 = pool.balances[0] + (sel_i == 0 ? dx : T(0));
@@ -217,7 +270,7 @@ Decision<T> decide_trade(
         const T dy_tokens = fx::xp_to_tokens_j(
             pool, static_cast<size_t>(sel_j), xq[static_cast<size_t>(sel_j)] - y,
             pool.cached_price_scale);
-        return dy_tokens * floor_value_coeff - dx * cost_coeff - costs.gas_coin0;
+        return dy_tokens * floor_value_coeff - dx * envelope_cost_coeff - costs.gas_coin0;
     };
 
     T dx_cap = dx_hi;
@@ -275,7 +328,7 @@ Decision<T> decide_trade(
     //     to dx_lo. Rung counts are bounded so the scan plus a minimal
     //     refine always fits the MAX_SIZING_EVALS budget (extreme ranges
     //     get coarser tails).
-    const T low_cover = (native_fee_mode && fee_ordered)
+    const T low_cover = depth != nullptr ? dx_lo : (native_fee_mode && fee_ordered)
         ? std::max(dx_lo, std::min(dx_seed, dx_dip > T(0) ? dx_dip : dx_seed) / T(27))
         : dx_lo;
 
@@ -438,6 +491,7 @@ Decision<T> decide_trade(
         }
     }
 
+    if (!std::isfinite(best.profit)) return d;
     if (!(best.profit > T(0))) {
         d.dx = best.dx;
         d.dy_after_fee = best.dy_after_fee;

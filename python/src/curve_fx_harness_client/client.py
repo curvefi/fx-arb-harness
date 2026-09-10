@@ -246,7 +246,7 @@ class EvaluatorClient:
         session_id: str,
         template_path: Union[str, Path],
         scenario_id: str,
-        market_path: Union[str, Path],
+        market_path: Optional[Union[str, Path]] = None,
         price_feed_path: Optional[Union[str, Path]] = None,
         pool_index: int = 0,
         n_candles: int = 0,
@@ -265,7 +265,18 @@ class EvaluatorClient:
         yb_mode: str = "off",
         yb_releverage_fee: Optional[float] = None,
         yb_cash_multiplier: float = 1.0,
+        yb_min_net_profit_coin0: Optional[float] = None,
         yb_initial_state: Optional[Union[YbInitialState, Dict[str, Any]]] = None,
+        cex_depth_path: Optional[Union[str, Path]] = None,
+        cex_depth_max_age_s: int = 30,
+        observed_state_path: Optional[Union[str, Path]] = None,
+        state_reconciliation_mode: Optional[str] = None,
+        reset_threshold_bps: Optional[float] = None,
+        equalization_delay_s: Optional[int] = None,
+        observation_interval_s: Optional[int] = None,
+        actor_timing_mode: str = "legacy_event",
+        event_mode: str = "candle_path",
+        **removed_options: Any,
     ) -> SessionReadyFrame:
         """Open an immutable evaluation session from direct scenario inputs.
 
@@ -273,35 +284,63 @@ class EvaluatorClient:
         Observer2-equivalent lane), or "reference_2l" (contract-derived
         candidate lane). Enabled modes evaluate after every causal event.
         """
+        # Older optimizer configs still pass these inactive defaults.
+        retired_defaults = {
+            "actor_hedge_mode": "prehedged", "actor_hedge_delay_ns": 0,
+            "equalization_interval_s": 60, "pool_ping_timestamps": [],
+            "yb_oracle_path": None, "actor_timeline_path": None,
+        }
+        for key, value in removed_options.items():
+            if key not in retired_defaults or (value is not None and value != retired_defaults[key]):
+                raise TypeError(f"Unsupported retired session option: {key}")
         with self._lock:
             if self._proc is None:
                 self._start_unlocked()
 
             if self.verify_local_inputs:
                 full_tpl = self.work_dir / template_path
-                full_market = self.work_dir / market_path
 
                 if not full_tpl.exists():
                     raise FileNotFoundError(f"Template file not found: {full_tpl}")
-                if not full_market.exists():
-                    raise FileNotFoundError(f"Market file not found: {full_market}")
+                if market_path is not None and not (self.work_dir / market_path).is_file():
+                    raise FileNotFoundError(f"Market file not found: {market_path}")
                 if price_feed_path is not None:
                     full_price_feed = self.work_dir / price_feed_path
                     if not full_price_feed.exists():
                         raise FileNotFoundError(
                             f"Price-feed file not found: {full_price_feed}"
                         )
-
+                if cex_depth_path is not None:
+                    full_cex_depth = self.work_dir / cex_depth_path
+                    if not full_cex_depth.exists():
+                        raise FileNotFoundError(
+                            f"CEX-depth file not found: {full_cex_depth}"
+                        )
+                if observed_state_path is not None:
+                    full_observed = self.work_dir / observed_state_path
+                    if not full_observed.is_file():
+                        raise FileNotFoundError(f"Observed state file not found: {full_observed}")
             req_id = self._next_request_id("session")
             frame = OpenSessionFrame(
                 request_id=req_id,
                 session_id=session_id,
                 template_path=str(template_path),
                 scenario_id=scenario_id,
-                market_path=str(market_path),
+                market_path=str(market_path) if market_path is not None else None,
                 price_feed_path=(
                     str(price_feed_path) if price_feed_path is not None else None
                 ),
+                cex_depth_path=(
+                    str(cex_depth_path) if cex_depth_path is not None else None
+                ),
+                cex_depth_max_age_s=cex_depth_max_age_s,
+                observed_state_path=str(observed_state_path) if observed_state_path is not None else None,
+                state_reconciliation_mode=state_reconciliation_mode,
+                reset_threshold_bps=reset_threshold_bps,
+                equalization_delay_s=equalization_delay_s,
+                observation_interval_s=observation_interval_s,
+                actor_timing_mode=actor_timing_mode,
+                event_mode=event_mode,
                 pool_index=pool_index,
                 n_candles=n_candles,
                 start_time=start_time,
@@ -319,6 +358,7 @@ class EvaluatorClient:
                 yb_mode=yb_mode,
                 yb_releverage_fee=yb_releverage_fee,
                 yb_cash_multiplier=yb_cash_multiplier,
+                yb_min_net_profit_coin0=yb_min_net_profit_coin0,
                 yb_initial_state=yb_initial_state,
             )
 

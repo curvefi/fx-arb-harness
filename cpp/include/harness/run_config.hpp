@@ -4,8 +4,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
+#include "events/cex_depth.hpp"
 #include "harness/yb_initial_state.hpp"
+#include "harness/state_reconciliation.hpp"
 
 namespace arb {
 namespace harness {
@@ -27,6 +30,8 @@ enum class MetricProfile : uint8_t {
     GridCore,
 };
 
+enum class ActorTimingMode : uint8_t { LegacyEvent = 0, MinuteSequential };
+
 template <typename T>
 struct RunConfig {
     T min_swap_frac{T(1e-6)};
@@ -36,6 +41,14 @@ struct RunConfig {
     uint64_t user_swap_freq_s{0};
     T user_swap_size_frac{T(0.01)};
     T user_swap_thresh{T(0.05)};
+    const events::CexDepthTape* cex_depth{nullptr};
+    const events::ObservedStateTape<T>* observed_state{nullptr};
+    StateReconciliationMode state_reconciliation_mode{StateReconciliationMode::Off};
+    uint64_t equalization_delay_s{60};
+    T reset_threshold_bps{T(100)};
+    uint64_t observation_interval_s{60};
+    uint64_t cex_depth_max_age_s{30};
+    ActorTimingMode actor_timing_mode{ActorTimingMode::LegacyEvent};
     bool save_actions{false};
 
     // Detailed per-event logging
@@ -47,6 +60,7 @@ struct RunConfig {
     YbMode yb_mode{YbMode::Off};
     T yb_releverage_fee{T(0.012)};
     T yb_cash_multiplier{T(1)};
+    T yb_min_net_profit_coin0{T(1)};
     std::optional<YbInitialState<T>> yb_initial_state;
 
     // Slippage probe sampling

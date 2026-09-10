@@ -625,6 +625,7 @@ struct EventLoopResult {
     Metrics<T> metrics{};
     TimeWeightedMetrics<T> tw_metrics{};
     SlippageProbes<T> slippage_probes{};
+    ReconciliationSummary reconciliation{};
 
     uint64_t t_start{0};
     uint64_t t_end{0};

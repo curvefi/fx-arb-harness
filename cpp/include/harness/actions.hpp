@@ -6,9 +6,25 @@
 #include <cstdint>
 #include <variant>
 #include <vector>
+#include <string>
+
 
 namespace arb {
 namespace harness {
+
+struct ReconciliationSummary {
+    uint64_t observations{}, episodes{}, resets{};
+};
+template<class T> struct StateReconciliationAction {
+    std::string phase;
+    uint64_t wall_ns{}, source_block{}, source_timestamp{}, available_ns{};
+    uint64_t detection_ns{}, deadline_ns{}, apply_ns{}, segment{};
+    bool state_changed{false};
+    std::array<T, 2> balances_before{}, balances_after{};
+    T scale_before{}, scale_after{}, debt_before{}, debt_after{};
+    T collateral_before{}, collateral_after{}, cash_before{}, cash_after{};
+    T vp_before{}, vp_after{}, xcp_before{}, xcp_after{};
+};
 
 // Donation action
 template <typename T>
@@ -66,10 +82,25 @@ struct ExchangeAction {
     T balance_indicator{0};
 };
 
+// direction 0 consumes coin0 and returns coin1; direction 1 consumes coin1
+// and returns coin0. Profit, donation, and flash_amount are coin0 quantities.
+template <typename T>
+struct YbRouteAction {
+    uint64_t ts{0};
+    size_t direction{0};
+    T input{0};
+    T output{0};
+    T profit_coin0{0};
+    T lp_amount{0};
+    T donation{0};
+    T flash_amount{0};
+};
+
 // Variant for all action types
 template <typename T>
 using Action = std::variant<
-    DonationAction<T>, TickAction<T>, ExchangeAction<T>
+    DonationAction<T>, TickAction<T>, ExchangeAction<T>, YbRouteAction<T>,
+    StateReconciliationAction<T>
 >;
 
 } // namespace harness

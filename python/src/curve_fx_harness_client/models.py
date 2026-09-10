@@ -87,8 +87,17 @@ class OpenSessionFrame(ProtocolModel):
     session_id: str
     template_path: str
     scenario_id: str
-    market_path: str
+    market_path: Optional[str] = None
     price_feed_path: Optional[str] = None
+    cex_depth_path: Optional[str] = None
+    cex_depth_max_age_s: int = Field(default=30, ge=0, le=2**64 - 1)
+    observed_state_path: Optional[str] = None
+    state_reconciliation_mode: Optional[Literal["off", "on_price_scale_detach"]] = None
+    reset_threshold_bps: Optional[FiniteFloat] = Field(default=None, gt=0)
+    equalization_delay_s: Optional[int] = Field(default=None, ge=0, le=2**64 - 1)
+    observation_interval_s: Optional[int] = Field(default=None, gt=0, le=2**64 - 1)
+    actor_timing_mode: Literal["legacy_event", "minute_sequential"] = "legacy_event"
+    event_mode: Literal["candle_path", "depth"] = "candle_path"
     pool_index: int = 0
     n_candles: int = 0
     start_time: int = 0
@@ -106,6 +115,7 @@ class OpenSessionFrame(ProtocolModel):
     yb_mode: Literal["off", "active_2l", "reference_2l"] = "off"
     yb_releverage_fee: Optional[FiniteFloat] = None
     yb_cash_multiplier: FiniteFloat = 1.0
+    yb_min_net_profit_coin0: Optional[FiniteFloat] = Field(default=None, ge=0)
     yb_initial_state: Optional[YbInitialState] = None
 
 
@@ -195,6 +205,7 @@ class CandidateResult(ProtocolModel):
     status: Literal["ok", "failed", "cancelled"] = "ok"
     error: Optional[str] = None
     metrics: Dict[str, Any] = Field(default_factory=dict)
+    actor_metrics: Optional[Dict[str, Any]] = None
     artifacts: Optional[ArtifactRef] = None
 
 

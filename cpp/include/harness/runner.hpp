@@ -22,6 +22,7 @@
 #include "harness/run_config.hpp"
 #include "harness/event_loop.hpp"
 #include "pools/pool_init.hpp"
+#include "pools/restore_public.hpp"
 #include "pools/twocrypto_fx/twocrypto.hpp"
 #include "trading/costs.hpp"
 
@@ -80,6 +81,7 @@ struct PoolResult {
 
     // Slippage probes
     SlippageProbes<T> slippage_probes{};
+    ReconciliationSummary reconciliation{};
 
     // Start/end timestamps
     uint64_t t_start{0};
@@ -206,32 +208,7 @@ PoolResult<T> run_single_pool(
         pool.set_block_timestamp(init_ts);
 
         if (restore_historical) {
-            const auto& state = pool_init.historical_state;
-            pool.balances = state.balances;
-            pool.admin_balances = state.admin_balances;
-            pool.last_admin_fee_claim_timestamp =
-                state.last_admin_fee_claim_timestamp;
-            pool.D = state.D;
-            pool.totalSupply = state.total_supply;
-            pool.cached_price_scale = state.price_scale;
-            pool.cached_price_oracle = state.price_oracle;
-            pool.last_prices = state.last_prices;
-            pool.last_timestamp = state.last_timestamp;
-            pool.virtual_price = state.virtual_price;
-            pool.xcp_profit = state.xcp_profit;
-            pool.lp_xcp_profit = state.lp_xcp_profit;
-            pool.donation_shares = state.donation_shares;
-            pool.last_donation_release_ts = state.last_donation_release_ts;
-            pool.donation_protection_expiry_ts = state.donation_protection_expiry_ts;
-            pool.donation_protection_period = state.donation_protection_period;
-            pool.donation_protection_lp_threshold = state.donation_protection_lp_threshold;
-            pool.donation_protection_extension_remainder =
-                state.donation_protection_extension_remainder;
-            pool.donation_shares_max_ratio = state.donation_shares_max_ratio;
-            pool.cached_ema_dt = 0;
-            pool.cached_ema_alpha = T(0);
-            pool.cached_ema_alpha_valid = false;
-            pool.initialize_policy_state_from_pool();
+            pools::restore_public_state(pool, pool_init.historical_state);
         } else {
             T liq0 = pool_init.initial_liq[0];
             T liq1 = pool_init.initial_liq[1];
@@ -308,6 +285,7 @@ PoolResult<T> run_single_pool(
         result.metrics = loop_result.metrics;
         result.tw_metrics = loop_result.tw_metrics;
         result.slippage_probes = loop_result.slippage_probes;
+        result.reconciliation = loop_result.reconciliation;
         result.t_start = loop_result.t_start;
         result.t_end = loop_result.t_end;
         result.tvl_start = loop_result.tvl_start;

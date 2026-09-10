@@ -10,7 +10,7 @@
 
 ## Build prerequisites and independent setup
 
-Requirements: Python 3.12 with uv, CMake 3.14+, a C++17 compiler, Boost with the JSON component, and Threads. Build/install `twocrypto-cpp` first and point CMake at its install prefix; a sibling source checkout is only an explicit development prerequisite, never a runtime path.
+Requirements: Python 3.12 with uv, CMake 3.14+, a C++17 compiler, Boost with the JSON component, MiniZip headers/library (`minizip/unzip.h`, `libminizip`), and Threads. Build/install `twocrypto-cpp` first and point CMake at its install prefix; a sibling source checkout is only an explicit development prerequisite, never a runtime path.
 
 From the pool repository:
 
@@ -112,3 +112,16 @@ The harness owns price-feed parsers, `EventSoA`, arbitrage/user flow, donations,
 Inputs are ordinary paths supplied by the optimizer TOML. Acquisition of private or Git-LFS data is user-owned; do not assume redistribution or license rights. Do not copy historical binaries, generated runs, or obsolete checkout paths into a build.
 
 Candle input is a JSON array of six numeric OHLCV fields per row. Invalid rows fail the load; timestamps accept seconds or milliseconds, and the configured clipping remains applied. Each result contains one candidate's metrics directly. Terminal APYs measure growth relative to the pool state at the start of the simulation window, including historical checkpoints.
+
+Depth inputs use the canonical numeric NPZ archive; v1 archives remain readable.
+Use `event_mode="depth"` with `cex_depth_path` and `observation_interval_s` to
+run directly from the book, omitting `market_path`. Candle runs continue to use
+`event_mode="candle_path"` and `market_path`. Optional traces and summaries are
+available for both. See [the protocol](protocol/protocol_spec.md#open_session)
+for the array contract and non-overwriting JSONL conversion command.
+
+For the depth clock, set `actor_timing_mode="minute_sequential"` and choose
+`yb_mode="reference_2l"` or `"active_2l"`. The observation interval is configurable;
+the mode name does not force 60 seconds. Reference mode executes finite-depth
+hedges; active mode retains its midpoint-based YB model. Resets require reference
+mode. Native CEX fees/gas are not forwarded to either YB actor.

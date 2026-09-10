@@ -10,6 +10,7 @@
 #include "harness/yb_2l.hpp"
 #include "harness/yb_reference_2l.hpp"
 #include "pools/twocrypto_fx/twocrypto.hpp"
+#include "trading/cex_depth.hpp"
 
 namespace fx = arb::pools::twocrypto_fx;
 namespace harness = arb::harness;
@@ -218,6 +219,99 @@ int main() {
             failed_market.state().stable_balance == state_before.stable_balance,
             "reference_2l rejected route must roll back YB state"
         );
+    }
+
+    {
+        auto pool = make_pool();
+        auto market = ReferenceMarket::fresh_2l(pool, 0.0145, 0.012, TS, 3.0);
+        harness::YbReference2LCosts<double> costs; costs.execution_bps = {1, 1}; costs.transaction_coin0 = 1;
+        const arb::trading::CexDepthSnapshot snapshot{1, {{10000., 1000.}}, {{20000., 1000.}}};
+        const arb::trading::CexDepthBook<double> book(&snapshot);
+        auto quote = [&] { return market.best_route_for_direction(pool, 15000., TS, costs, true, 1, 1e-7, .02, &book); };
+        const auto original = quote(); costs.min_net_profit_coin0 = 1;
+        const auto explicit_default = quote();
+        require(original.committed && original.input == explicit_default.input && original.profit_coin0 == explicit_default.profit_coin0, "default margin changed quote");
+        costs.transaction_coin0 += original.profit_coin0 - 0.5;
+        const auto blocked = quote(); costs.min_net_profit_coin0 = 0;
+        const auto admitted = quote();
+        require(!blocked.committed && admitted.committed && admitted.profit_coin0 > 0 && admitted.profit_coin0 < 1 &&
+            blocked.input == admitted.input && blocked.output == admitted.output && blocked.profit_coin0 == admitted.profit_coin0,
+            "margin changed sizing/economics or did not admit positive net");
+        costs.min_net_profit_coin0 = admitted.profit_coin0;
+        require(!quote().committed, "profit equal to floor was admitted");
+        costs.min_net_profit_coin0 = 0; costs.transaction_coin0 += admitted.profit_coin0;
+        require(!quote().committed && quote().profit_coin0 <= 0, "zero floor admitted nonpositive profit");
+        for (double bad : {-1., std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+            costs.min_net_profit_coin0 = bad; bool rejected = false;
+            try { quote(); } catch (const std::invalid_argument&) { rejected = true; }
+            require(rejected, "invalid profit floor accepted");
+        }
+    }
+
+    // Reference routes share the already-depleted native book, price both
+    // directions from executable cash, and commit it with pool/YB state.
+    for (size_t direction = 0; direction < 2; ++direction) {
+        Pool pool = make_pool();
+        auto market = ReferenceMarket::fresh_2l(pool, 0.0145, 0.012, TS, 3.0);
+        harness::YbReference2LCosts<double> costs;
+        costs.market_basis_bps = 25.0;
+        costs.execution_bps[direction] = 10.0;
+        costs.transaction_coin0 = 0.25;
+        costs.leg_coin0[direction] = 0.5;
+        const arb::trading::CexDepthSnapshot snapshot = direction == 0
+            ? arb::trading::CexDepthSnapshot{
+                1, {{200'000.0, 1'000.0}}, {{300'000.0, 1'000.0}}}
+            : arb::trading::CexDepthSnapshot{
+                1, {{10'000.0, 1'000.0}}, {{20'000.0, 1.0}, {30'000.0, 1'000.0}}};
+        arb::trading::CexDepthBook<double> book(&snapshot);
+        if (direction == 1) {
+            require(book.consume_buy(1.0), "prior native ask consumption failed");
+        }
+        const auto before = book;
+        const auto result = market.execute_best(
+            pool, direction == 0 ? 250'000.0 : 20'000.0,
+            TS + 86400, costs, true, &book);
+        require(result.committed && result.direction == direction,
+                "depth-priced reference route did not commit expected direction");
+        const auto gross = direction == 0
+            ? before.sell_base(result.output)
+            : before.buy_base(result.input);
+        require(gross.has_value(), "committed reference hedge was not fillable");
+        const double adjusted = *gross * 1.0025;
+        const double expected = direction == 0
+            ? adjusted * 0.999 - result.input - 0.75
+            : result.output - adjusted * 1.001 - 0.75;
+        require(std::fabs(result.profit_coin0 - expected) <
+                    1e-10 * std::max(1.0, std::fabs(expected)),
+                "reference profit did not match depth cashflow and costs");
+        const double consumed = direction == 0 ? result.output : result.input;
+        const auto capacity_before = direction == 0
+            ? before.bid_capacity() : before.ask_capacity();
+        const auto capacity_after = direction == 0
+            ? book.bid_capacity() : book.ask_capacity();
+        require(capacity_before && capacity_after &&
+                    std::fabs((*capacity_before - *capacity_after) - consumed) < 1e-10,
+                "committed reference route did not consume the shared book");
+    }
+
+    {
+        Pool pool = make_pool();
+        const Pool pool_before = pool;
+        auto market = ReferenceMarket::fresh_2l(pool, 0.0145, 0.012, TS, 3.0);
+        const auto state_before = market.state();
+        const arb::trading::CexDepthSnapshot snapshot{
+            1, {{20'000.0, 0.001}}, {{30'000.0, 0.001}}};
+        arb::trading::CexDepthBook<double> book(&snapshot);
+        require(book.consume_sell(0.001) && book.consume_buy(0.001),
+                "failed to prepare exhausted reference book");
+        const auto result = market.execute_best(
+            pool, 100'000.0, TS + 86400,
+            harness::YbReference2LCosts<double>{}, true, &book);
+        require(!result.committed && same_pool_state(pool, pool_before) &&
+                    market.state().debt == state_before.debt &&
+                    market.state().stable_balance == state_before.stable_balance &&
+                    !book.bid_capacity() && !book.ask_capacity(),
+                "unfillable reference route mutated pool, market, or book");
     }
 
     bool checked = false;

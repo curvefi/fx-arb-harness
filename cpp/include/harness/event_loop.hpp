@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "core/common.hpp"
+#include "events/cex_depth.hpp"
 #include "events/types.hpp"
 #include "harness/metrics.hpp"
 #include "harness/actions.hpp"
@@ -142,6 +143,7 @@ EventLoopResult<T> run_event_loop_impl(
                         cfg.yb_cash_multiplier
                     );
             } else if (yb_mode == YbMode::Reference2l) {
+                yb->reference_costs.min_net_profit_coin0 = cfg.yb_min_net_profit_coin0;
                 yb->reference_market = cfg.yb_initial_state
                     ? YbReference2LMarket<T>::from_state(*cfg.yb_initial_state)
                     : YbReference2LMarket<T>::fresh_2l(
@@ -163,6 +165,15 @@ EventLoopResult<T> run_event_loop_impl(
     const T fee_cex = costs.arb_fee_bps / T(10000);
     const T cex_fee_discount = T(1) - fee_cex;
     const T cex_fee_markup = T(1) + fee_cex;
+    std::optional<events::CexDepthCursor<T>> depth_cursor;
+    if (cfg.cex_depth != nullptr) {
+        depth_cursor.emplace(*cfg.cex_depth, cfg.cex_depth_max_age_s);
+    }
+    const bool minute_sequential = cfg.actor_timing_mode == ActorTimingMode::MinuteSequential;
+    std::optional<StateReconciliation<T>> minute_reconciliation;
+    if (minute_sequential && cfg.observed_state)
+        minute_reconciliation.emplace(*cfg.observed_state, cfg.state_reconciliation_mode,
+            cfg.reset_threshold_bps, cfg.equalization_delay_s);
 
     auto sample_slippage_probes = [&](uint64_t ts, T p_cex) {
         if (!enable_slippage_probes || !(p_cex > T(0))) return;
@@ -289,9 +300,15 @@ EventLoopResult<T> run_event_loop_impl(
         }
     };
 
-    auto execute_arb = [&](size_t ev_idx, uint64_t ev_ts, T cex_price) -> bool {
+    auto execute_arb = [&] (
+        size_t ev_idx,
+        uint64_t ev_ts,
+        T cex_price,
+        trading::CexDepthBook<T>* depth
+    ) -> bool {
         refresh_geometry();
-        if (!(omf_floor * (cex_fee_discount * cex_price) > edge_p_now) &&
+        if (depth == nullptr &&
+            !(omf_floor * (cex_fee_discount * cex_price) > edge_p_now) &&
             !(edge_floor_scaled_p > cex_fee_markup * cex_price)) {
             return false;
         }
@@ -309,13 +326,22 @@ EventLoopResult<T> run_event_loop_impl(
             volume_cap,
             min_swap_frac, max_swap_frac,
             cex_fee_discount, cex_fee_markup,
-            &edge_p_now, &edge_fee, &edge_xp
+            &edge_p_now, &edge_fee, &edge_xp, depth
         );
         if (!dec.do_trade && dec.profit < T(0)) {
             m.arb_guarded_loss_coin0 += -dec.profit;
         }
         if (!dec.do_trade) {
             return false;
+        }
+
+        std::optional<trading::CexDepthBook<T>> depth_after;
+        if (depth != nullptr) {
+            depth_after.emplace(*depth);
+            const bool hedge_available = dec.i == 0
+                ? depth_after->consume_sell(dec.dy_after_fee)
+                : depth_after->consume_buy(dec.dx);
+            if (!hedge_available) return false;
         }
 
         try {
@@ -344,6 +370,7 @@ EventLoopResult<T> run_event_loop_impl(
                 dec.dy_after_fee,
                 dec.fee_tokens
             );
+            if (depth_after) *depth = std::move(*depth_after);
 
             const T dy_after_fee = res[0];
             const T fee_tokens = res[1];
@@ -422,6 +449,7 @@ EventLoopResult<T> run_event_loop_impl(
         cfg.event_cursor == EventCursor::ExactSkip &&
         !EnableYb && !detailed_on && !action_logger.enabled() &&
         !enable_slippage_probes && !user_swap_on &&
+        cfg.cex_depth == nullptr &&
         events.price_blocks.ready_for(n_events);
 
     const auto event_passes_floor_gate = [&](double raw_price) {
@@ -495,6 +523,12 @@ EventLoopResult<T> run_event_loop_impl(
         return next;
     };
     const auto next_event_index = [&](size_t start) {
+        if (minute_sequential) {
+            while (start < n_events &&
+                   (events.ts[start] - events.ts[first_event_idx]) % cfg.observation_interval_s != 0)
+                ++start;
+            return start;
+        }
         if (!exact_skip_on || start >= n_events) return start;
 
         const uint64_t mandatory_ts = next_mandatory_ts();
@@ -589,19 +623,21 @@ EventLoopResult<T> run_event_loop_impl(
     const auto run_yb_reference_once = [&] (
         uint64_t ev_ts,
         const T& cex_price,
-        bool& did_any_trade
+        bool& did_any_trade,
+        trading::CexDepthBook<T>* depth
     ) {
         auto& yb_reference_market = yb->reference_market;
         const auto& yb_reference_costs = yb->reference_costs;
-        if (!yb_reference_on) return;
+        if (!yb_reference_on || (cfg.cex_depth != nullptr && depth == nullptr)) return;
         if constexpr (std::is_floating_point_v<T>) {
             const T price_scale_before = pool.cached_price_scale;
             auto route = yb_reference_market.execute_best(
-                pool, cex_price, ev_ts, yb_reference_costs, true
+                pool, cex_price, ev_ts, yb_reference_costs, true, depth
             );
             if (!route.committed) return;
 
             ++m.yb_2l_fires;
+            action_logger.log_yb_route(ev_ts, route);
 
             const T before_donation = route.direction == 1
                 ? route.price_scale_after_add : price_scale_before;
@@ -679,9 +715,39 @@ EventLoopResult<T> run_event_loop_impl(
     size_t ev_idx = first_event_idx;
     while (ev_idx < n_events) {
         const uint64_t ev_ts = events.ts[ev_idx];
-
         pool.set_block_timestamp(ev_ts);
-        const T cex_price = static_cast<T>(events.p_cex[ev_idx]);
+        bool minute_draining = false;
+        if constexpr (EnableYb) {
+            if (minute_reconciliation) {
+                if (ev_ts > UINT64_MAX / 1'000'000'000ULL)
+                    throw std::overflow_error("minute timestamp overflows nanoseconds");
+                const auto log = [&](StateReconciliationAction<T> action) {
+                    action_logger.log_reconciliation(std::move(action));
+                };
+                const uint64_t wall_ns = ev_ts * 1'000'000'000ULL;
+                minute_reconciliation->advance(wall_ns);
+                if (minute_reconciliation->apply_if_ready(wall_ns, pool,
+                        yb->reference_market, log)) {
+                    pool.set_block_timestamp(ev_ts);
+                    invalidate_edge_inputs();
+                }
+                minute_draining = minute_reconciliation->draining();
+            }
+        }
+        const T candle_price = static_cast<T>(events.p_cex[ev_idx]);
+        std::optional<T> depth_mid;
+        trading::CexDepthBook<T>* depth_book = nullptr;
+        if (depth_cursor) {
+            depth_mid = depth_cursor->advance(ev_ts);
+            if (depth_mid) depth_book = &depth_cursor->book();
+        }
+        std::optional<trading::CexDepthBook<T>> native_minute_book, vp_minute_book;
+        if (minute_sequential && depth_book != nullptr) {
+            native_minute_book = *depth_book;
+            vp_minute_book = *depth_book;
+            depth_book = &*native_minute_book;
+        }
+        const T cex_price = depth_mid.value_or(candle_price);
         if (have_price_feed) {
             pool.refresh_policy_context(
                 static_cast<T>(events.p_price_feed[ev_idx]),
@@ -702,12 +768,16 @@ EventLoopResult<T> run_event_loop_impl(
             continue;
         }
 
-        bool did_any_trade = execute_arb(ev_idx, ev_ts, cex_price);
+        bool did_any_trade = minute_draining || (cfg.cex_depth != nullptr && depth_book == nullptr)
+            ? false
+            : execute_arb(ev_idx, ev_ts, cex_price, depth_book);
         if constexpr (EnableYb) {
-            if (yb_2l_on) {
+            if (yb_2l_on && !minute_draining && (cfg.cex_depth == nullptr || depth_book != nullptr)) {
                 run_yb_2l_once(ev_ts, cex_price, did_any_trade);
-            } else if (yb_reference_on) {
-                run_yb_reference_once(ev_ts, cex_price, did_any_trade);
+            } else if (yb_reference_on && !minute_draining) {
+                run_yb_reference_once(
+                    ev_ts, cex_price, did_any_trade,
+                    vp_minute_book ? &*vp_minute_book : depth_book);
             }
         }
         if (user_swap_on && ucfg.next_ts != 0 && ev_ts >= ucfg.next_ts) {
@@ -717,6 +787,12 @@ EventLoopResult<T> run_event_loop_impl(
         if (!did_any_trade && icfg.due(pool.last_timestamp, ev_ts)) {
             did_idle_tick = apply_idle_tick(ev_idx, ev_ts, cex_price);
             did_any_trade = did_idle_tick;
+        }
+        if (minute_reconciliation) {
+            minute_reconciliation->check_price_scale_detachment(pool.cached_price_scale,
+                ev_ts * 1'000'000'000ULL, [&](StateReconciliationAction<T> action) {
+                    action_logger.log_reconciliation(std::move(action));
+                });
         }
         bool detailed_row_logged = false;
         if (detailed_on) {
@@ -759,7 +835,6 @@ EventLoopResult<T> run_event_loop_impl(
         sample_net_apy(ev_ts);
         ev_idx = next_event_index(ev_idx + 1);
     }
-
     result.apy_net_gm = apy_net_gm.value();
     result.apy_net_robust_90d = apy_net_robust_90d.value();
     if constexpr (EnableYb) {
@@ -793,6 +868,7 @@ EventLoopResult<T> run_event_loop_impl(
             static_cast<uint64_t>(yb->apy_gm.n_floored_windows);
         result.yb_releverage_gm_floor_share = yb->apy_gm.floor_share();
     }
+    if (minute_reconciliation) result.reconciliation = minute_reconciliation->summary;
     return result;
 }
 
@@ -810,6 +886,32 @@ EventLoopResult<T> run_event_loop(
     std::vector<Action<T>>* out_actions = nullptr,
     std::vector<DetailedEntry<T>>* out_detailed_entries = nullptr
 ) {
+    if (!std::isfinite(cfg.yb_min_net_profit_coin0) || cfg.yb_min_net_profit_coin0 < T(0))
+        throw std::invalid_argument("yb_min_net_profit_coin0 must be finite and nonnegative");
+    const bool minute_sequential = cfg.actor_timing_mode == ActorTimingMode::MinuteSequential;
+    if (minute_sequential) {
+        if (!cfg.observation_interval_s)
+            throw std::invalid_argument("observation_interval_s must be positive");
+        if (!cfg.cex_depth || (cfg.yb_mode != YbMode::Reference2l && cfg.yb_mode != YbMode::Active2l) ||
+            cfg.event_cursor != EventCursor::Scalar || cfg.metric_profile != MetricProfile::FullSummary ||
+            cfg.dustswap_freq_s || cfg.user_swap_freq_s || icfg.freq_s || ucfg.freq_s ||
+            costs.use_volume_cap || (cfg.state_reconciliation_mode != StateReconciliationMode::Off &&
+                cfg.state_reconciliation_mode != StateReconciliationMode::OnPriceScaleDetach))
+            throw std::invalid_argument("minute_sequential requires depth, active_2l or reference_2l, scalar full_summary, no synthetic swaps or volume cap, and off/on_price_scale_detach reconciliation");
+        const uint64_t source_interval = events.size() > 1 ? events.ts[1] - events.ts[0] : cfg.observation_interval_s;
+        if (!source_interval || cfg.observation_interval_s % source_interval != 0)
+            throw std::invalid_argument("observation_interval_s must be a multiple of the source observation interval");
+        for (size_t i = 1; i < events.size(); ++i)
+            if (events.ts[i] <= events.ts[i-1] || events.ts[i] - events.ts[i-1] != source_interval)
+                throw std::invalid_argument("sequential actors require uniformly spaced observations");
+    }
+    if (cfg.observed_state || cfg.state_reconciliation_mode != StateReconciliationMode::Off) {
+        if (!cfg.observed_state || !minute_sequential || cfg.yb_mode != YbMode::Reference2l ||
+            pool.policy.kind != pools::twocrypto_fx::PolicyKind::None ||
+            cfg.equalization_delay_s > UINT64_MAX / 1'000'000'000ULL ||
+            !std::isfinite(cfg.reset_threshold_bps) || cfg.reset_threshold_bps <= T(0))
+            throw std::invalid_argument("observed state requires sequential reference_2l, no policy, and valid reset controls");
+    }
     if (cfg.yb_mode == YbMode::Off) {
         if (cfg.metric_profile == MetricProfile::GridCore) {
             return run_event_loop_impl<false, true>(

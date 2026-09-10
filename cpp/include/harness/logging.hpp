@@ -54,6 +54,25 @@ public:
         out_actions_->push_back(std::move(act));
     }
 
+    template <typename Route>
+    void log_yb_route(uint64_t ts, const Route& route) {
+        if (!enabled()) return;
+        YbRouteAction<T> act;
+        act.ts = ts;
+        act.direction = route.direction;
+        act.input = route.input;
+        act.output = route.output;
+        act.profit_coin0 = route.profit_coin0;
+        act.lp_amount = route.lp_amount;
+        act.donation = route.donation;
+        act.flash_amount = route.flash_amount;
+        out_actions_->push_back(std::move(act));
+    }
+
+    void log_reconciliation(StateReconciliationAction<T> action) {
+        if (enabled()) out_actions_->push_back(std::move(action));
+    }
+
     // Log a tick action (idle tick with no trade)
     template <typename Pool>
     void log_tick(uint64_t ts, T p_cex,

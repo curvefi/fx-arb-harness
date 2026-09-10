@@ -20,6 +20,7 @@
 
 #include "harness/yb_initial_state.hpp"
 #include "pools/twocrypto_fx/twocrypto.hpp"
+#include "trading/cex_depth.hpp"
 
 namespace arb::harness {
 
@@ -55,6 +56,7 @@ struct YbReference2LCosts {
     T market_basis_bps{};
     std::array<T, 2> execution_bps{T(0), T(0)};
     T notional_cap_coin0{};
+    T min_net_profit_coin0{T(YB_REFERENCE_2L_MIN_PROFIT_COIN0)};
 };
 
 template <typename T>
@@ -193,6 +195,20 @@ public:
     bool enabled() const { return enabled_; }
     const State& state() const { return state_; }
 
+    void restore_public_state(const YbInitialState<T>& initial, uint64_t application_ts) {
+        if (application_ts < initial.source_timestamp)
+            throw std::invalid_argument("YB restore precedes checkpoint publication");
+        const auto counters = projected_interest_summary(application_ts);
+        auto replacement = from_state(initial);
+        // Compare both stocks at application time without changing stored clocks.
+        const T accrued_shift = counters.accrued
+            - replacement.projected_interest_summary(application_ts).accrued;
+        replacement.accrued_interest_total_ += accrued_shift;
+        replacement.donated_interest_total_ = counters.donated;
+        replacement.initial_unsettled_interest_ += counters.donated - accrued_shift;
+        *this = std::move(replacement);
+    }
+
     template <typename Pool>
     T lp_oracle(const Pool& pool) const {
         const T sqrt_scale = std::sqrt(pool.cached_price_scale * one());
@@ -256,12 +272,15 @@ public:
         bool charge_transaction_cost,
         size_t direction,
         T min_fraction = T(1e-7),
-        T max_fraction = T(0.02)
+        T max_fraction = T(0.02),
+        const trading::CexDepthBook<T>* depth = nullptr
     ) const {
         static_assert(
             std::is_floating_point_v<T>,
             "reference_2l route sizing is floating-only"
         );
+        if (!std::isfinite(costs.min_net_profit_coin0) || costs.min_net_profit_coin0 < T(0))
+            throw std::invalid_argument("YB minimum net profit must be finite and nonnegative");
         Result best;
         best.rejection = "nonpositive net route";
         if (!enabled_ || !(cex_price > T(0)) || direction > 1) return best;
@@ -285,6 +304,15 @@ public:
                     cap_bound = true;
                 }
             }
+            bool depth_bound = false;
+            if (depth != nullptr && direction == 1) {
+                const auto capacity = depth->ask_capacity();
+                if (!capacity) continue;
+                if (amount >= *capacity) {
+                    amount = *capacity;
+                    depth_bound = true;
+                }
+            }
 
             Pool trial_pool = pool;
             YbReference2LMarket trial_market = *this;
@@ -298,18 +326,30 @@ public:
             const T execution = costs.execution_bps[direction] / T(10000);
             const T fixed_cost = costs.leg_coin0[direction]
                 + (charge_transaction_cost ? costs.transaction_coin0 : T(0));
-            trial.profit_coin0 = direction == 0
-                ? trial.output * cex_coin0_per_coin1 * (T(1) - execution)
-                    - amount - fixed_cost
-                : trial.output - amount * cex_coin0_per_coin1
-                    * (T(1) + execution) - fixed_cost;
+            if (depth == nullptr) {
+                trial.profit_coin0 = direction == 0
+                    ? trial.output * cex_coin0_per_coin1 * (T(1) - execution)
+                        - amount - fixed_cost
+                    : trial.output - amount * cex_coin0_per_coin1
+                        * (T(1) + execution) - fixed_cost;
+            } else {
+                const auto gross = direction == 0
+                    ? depth->sell_base(trial.output)
+                    : depth->buy_base(amount);
+                if (!gross) continue;
+                const T basis_adjusted = *gross
+                    * (T(1) + costs.market_basis_bps / T(10000));
+                trial.profit_coin0 = direction == 0
+                    ? basis_adjusted * (T(1) - execution) - amount - fixed_cost
+                    : trial.output - basis_adjusted * (T(1) + execution) - fixed_cost;
+            }
             if (!have_trial || trial.profit_coin0 > best.profit_coin0) {
                 best = std::move(trial);
                 have_trial = true;
             }
-            if (cap_bound) break;
+            if (cap_bound || depth_bound) break;
         }
-        if (!(best.profit_coin0 > T(YB_REFERENCE_2L_MIN_PROFIT_COIN0))) {
+        if (!(best.profit_coin0 > costs.min_net_profit_coin0)) {
             best.committed = false;
             best.rejection = "nonpositive net route";
         }
@@ -322,20 +362,52 @@ public:
         const T& cex_price,
         uint64_t timestamp,
         const Costs& costs,
-        bool charge_transaction_cost = true
+        bool charge_transaction_cost = true,
+        trading::CexDepthBook<T>* depth = nullptr
     ) {
         auto best = best_route_for_direction(
-            pool, cex_price, timestamp, costs, charge_transaction_cost, 0
+            pool, cex_price, timestamp, costs, charge_transaction_cost, 0,
+            T(1e-7), T(0.02), depth
         );
         auto other = best_route_for_direction(
-            pool, cex_price, timestamp, costs, charge_transaction_cost, 1
+            pool, cex_price, timestamp, costs, charge_transaction_cost, 1,
+            T(1e-7), T(0.02), depth
         );
         if (other.profit_coin0 > best.profit_coin0) best = std::move(other);
         if (!best.committed) return best;
 
-        auto result = apply_atomic(
-            pool, best.direction, best.input, T(0), timestamp
-        );
+        Result result;
+        if (depth == nullptr) {
+            result = apply_atomic(
+                pool, best.direction, best.input, T(0), timestamp
+            );
+        } else {
+            trading::CexDepthBook<T> depth_after = *depth;
+            const bool hedge_available = best.direction == 0
+                ? depth_after.consume_sell(best.output)
+                : depth_after.consume_buy(best.input);
+            if (!hedge_available) {
+                best.committed = false;
+                best.profit_coin0 = T(0);
+                best.rejection = "CEX hedge unavailable at commit";
+                return best;
+            }
+            Pool candidate_pool = pool;
+            YbReference2LMarket candidate_market = *this;
+            result = try_apply_in_place(
+                candidate_market, candidate_pool, best.direction,
+                best.input, T(0), timestamp
+            );
+            if (!result.committed || result.input != best.input ||
+                result.output != best.output) {
+                result.committed = false;
+                result.rejection = "CEX hedge no longer matches route";
+                return result;
+            }
+            pool = std::move(candidate_pool);
+            *this = std::move(candidate_market);
+            *depth = std::move(depth_after);
+        }
         result.profit_coin0 = best.profit_coin0;
         result.search_fraction = best.search_fraction;
         result.search_bound_max = best.search_bound_max;

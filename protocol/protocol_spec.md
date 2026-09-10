@@ -31,7 +31,8 @@ evaluator process is required for another session.
     "ipo_enabled": false,
     "native_tuning": false
   },
-  "capabilities": ["summary", "full_trace", "atomic_sidecars", "registered_grid_ranges"],
+  "capabilities": ["summary", "full_trace", "atomic_sidecars",
+                   "registered_grid_ranges", "state_reconciliation"],
   "yb_modes": ["off", "active_2l", "reference_2l"],
   "metric_schema": "twocrypto-summary-v1",
   "metric_fields": [
@@ -71,8 +72,11 @@ They are loaded once at admission.
   "session_id": "session-1",
   "template_path": "templates/pool.json",
   "scenario_id": "eurusd-2024",
-  "market_path": "data/eurusd.json",
   "price_feed_path": "data/eurusd-reference-prices.csv",
+  "cex_depth_path": "data/eurusd-depth.npz",
+  "cex_depth_max_age_s": 30,
+  "actor_timing_mode": "legacy_event",
+  "event_mode": "depth",
   "pool_index": 0,
   "n_candles": 0,
   "start_time": 0,
@@ -92,19 +96,157 @@ They are loaded once at admission.
 The remaining optional session controls are `user_swap_freq_s`,
 `user_swap_size_frac`, `user_swap_thresh`, `event_cursor`, `metric_profile`,
 and `enable_slippage_probes`. Slippage probes are off unless explicitly enabled.
+`event_mode="candle_path"` retains the two synthetic `ts-5`/`ts+5` events per
+candle and requires `market_path`. `event_mode="depth"` requires `cex_depth_path`
+and omits `market_path`; `candle_filter` must be zero. Its regular clock starts at
+the later of `start_time` and the first whole second at or after the first book
+publication. Events repeat every `observation_interval_s` (default 60), through
+the earlier of `end_time` (if supplied) and the first whole second at or after
+the final publication. `n_candles` caps observation count in this mode; at most
+2678400 observations may be admitted. Prices are the latest published book
+midpoint, carried across gaps, with zero synthetic volume. Execution still
+requires a fresh book. The trace adapter uses internal flat rows, with no
+companion OHLC file. An empty requested window is rejected.
 `user_swap_size_frac` is the daily fair-TVL utilization fraction: each scheduled
 order has coin0-equivalent notional `fair_tvl * user_swap_size_frac *
 user_swap_freq_s / 86400`, converted into the alternating input coin at the
 current external price. Thus `1.0` means 100% attempted fair-TVL turnover per
 day, not 100% of one reserve per swap.
-Arbitrage sizing and execution are always evaluated. Model weak or absent
-arbitrage economically with `pool.costs.arb_fee_bps`, gas, and volume caps.
+Native arbitrage sizing and execution are always evaluated. Model weak or absent
+native arbitrage economically with `pool.costs.arb_fee_bps`, gas, and volume caps.
+These native execution costs are not charged to either YB actor; protocol/YB
+fees remain part of their existing models.
 `event_cursor=exact_skip` requires `metric_profile=grid_core`. Scalar supports
 both metric profiles and remains the reference cursor.
 `yb_mode` is `off`, `active_2l`, or `reference_2l`.
 The enabled modes use `yb_releverage_fee` and `yb_cash_multiplier`, and evaluate
 after every causal event. Summary valuation is hourly for GM accounting and once
 at the final endpoint for raw APY.
+
+`cex_depth_path` accepts only `.npz`. The canonical v2 archive has exactly these
+C-order numeric arrays:
+
+| Array | Type and shape | Meaning |
+| --- | --- | --- |
+| `format_version` | little-endian uint32 scalar | `2` |
+| `depth` | little-endian float64 `[N,2,K,2]` | bid/ask, price/incremental coin1 quantity |
+| `timestamps` | little-endian int64 `[N]` | positive, strictly increasing publication UTC nanoseconds |
+| `counts` | little-endian uint32 `[N,2]` | active levels per side, from 1 through K |
+| `interpolation` | uint8 `[N]` | 0 step, 1 linear, per snapshot |
+
+Publication intervals may be irregular. K is 1–4096, N is at most 267840,
+and `depth` is at most 17141760 float64 elements (137134080 bytes).
+Inactive padding must be zero. Prices are positive and ordered, bids descending
+and asks ascending; the best bid cannot exceed the best ask. Quantities are
+positive except zero-quantity interior linear knots. Locked books are supported.
+The reader also accepts existing v1 archives unchanged: K=16, uint8 counts,
+exact 10-second clock, strictly uncrossed books, implicit step interpolation.
+The producer writes v2. ZIP/DEFLATE and CRCs use MiniZip; object/pickle arrays,
+unknown members, and duplicate members are rejected. No currency conversion
+is performed: price is coin0 per coin1. Units and reconstruction provenance
+belong in the associated manifest.
+
+JSONL is an upstream conversion/inspection format. From `curve-fx-optimization`,
+convert to a **new** destination with:
+
+```sh
+uv run python -m fxopt.depth_archive source.jsonl book.npz --quantity-base BTC --price-quote USDT
+```
+
+This preserves publication times, float64 values, active levels, and per-row
+step/linear semantics without resampling. It writes `book.npz.json` with units
+and a source hash; other source metadata remains in the preserved JSONL and
+its original manifests. Conversion does not certify causal reconstruction.
+Existing sources, archives, and output paths are never overwritten by this
+converter. Large sources must be split into archives within the stated limits.
+Python can inspect the same NPZ using `np.load(..., allow_pickle=False)`.
+
+The loop selects only
+the latest snapshot published by the event timestamp, uses its top-of-book
+midpoint as the market mark, and shares depletion across native actions until
+a newer snapshot arrives. `cex_depth_max_age_s` is a non-negative uint64
+(default 30); zero accepts only an exact publication-time match. Future,
+missing, stale, or exhausted depth prevents external execution without an
+infinite-liquidity fallback. Synthetic user flow never consumes the tape, and
+the independent policy price feed is unchanged. Depth supports all three YB
+modes. In `legacy_event`, `reference_2l` shares the depleted book after native
+execution. `active_2l` retains its established midpoint-based LP model: finite
+depth constrains native arbitrage, but the active actor does not execute or
+consume a CEX depth hedge. It requires a fresh book when depth is configured.
+Configured `exact_skip` uses the scalar cursor so snapshots cannot be skipped.
+
+The per-row `interpolation` array selects step or linear depth.
+Pairs remain `[price, incremental_quantity]`; cumulative knot quantities are
+their prefix sums. The first level retains its exact constant best price.
+Subsequent levels interpolate marginal price linearly from the previous knot's
+price to the current price across that level's quantity. Quotes integrate this
+line, including partial fills, and both native and VP sizing use the same quote
+implementation. Zero-quantity interior knots represent price gaps and add no
+liquidity. The first quantity must be positive. Queries past total capacity fail.
+Thus knots at +200 bp/100 BTC and +500 bp/200 BTC imply +350 bp at 150 BTC;
+the total cost is the integral, not 150 BTC multiplied by that marginal price.
+
+`actor_timing_mode="minute_sequential"` runs exactly one native arbitrage
+decision followed by one selected YB decision (`reference_2l` or `active_2l`)
+at each selected observation.
+`observation_interval_s` defaults to 60 and accepts any positive integer number
+of seconds, independently of publication cadence. Observations use the depth
+clock described above; each observation admits actors and may produce a trace
+row. Books are selected causally at both observation and execution time.
+At each selected time, the newest causal depth is used; this setting changes
+actor cadence, not the underlying tape or a replenishment-rate model.
+Either actor may decline an unprofitable trade. Both YB modes see the native
+trade's updated pool state. With `reference_2l`, native and VP each quote and
+execute against independent copies of the current snapshot, freshly copied
+at every observation. Native consumption does not reduce VP or subsequent
+observation depth. With `active_2l`, only native arbitrage consumes a copy;
+YB keeps its midpoint-based model. Missing or stale depth disables both actors.
+Pool and YB state carry across observations; book snapshots are not interpolated
+in time.
+Use `event_mode="depth"`, `event_cursor="scalar"`,
+`metric_profile="full_summary"`, `dustswap_freq_s=0`, `user_swap_freq_s=0`,
+`yb_mode="reference_2l"` or `"active_2l"`, finite depth and no volume cap.
+Execution is immediate at each selected observation timestamp.
+
+`observed_state_path` optionally supplies complete coupled pool/YB checkpoints
+for `minute_sequential` with `yb_mode="reference_2l"` and no pool policy.
+Observed checkpoints and resets are not supported by `active_2l`. JSONL rows strictly increase by
+source block and availability. Required fields are
+`available_ns=(source_timestamp+1)*1e9`, `source_block`, `source_timestamp`,
+`observed_through_timestamp=source_timestamp`, `pool_init` (standard inner pool
+object with complete historical state in WAD units), `yb_initial_state`
+(existing human-unit schema), and constant `coverage_start_timestamp` and
+`coverage_end_timestamp`. Native/YB provenance must match the row. Additional
+fields in older checkpoint files are ignored.
+
+`state_reconciliation_mode` supports `off` (default) and `on_price_scale_detach`.
+After both actors, the latter checks absolute simulated minus latest published
+onchain `price_scale`, divided by the onchain scale. At or above
+`reset_threshold_bps` (finite positive, default 100), it pauses both actors and
+latches a deadline at detection plus `equalization_delay_s` (nonnegative, default
+60). Later price recovery or observations do not extend or cancel that request.
+At the first selected observation at or after the deadline, before either actor,
+it copies the latest causally available coupled checkpoint and resumes trading.
+The delay may be zero; because detection follows execution, application still
+occurs at the next selected observation. `off` loads observations without resets.
+
+Restoration includes native stored clocks, EMA inputs, donation/admin state and
+configuration, and YB debt/rate/cash/collateral/stable-aggregator state. Stored
+clocks come from the checkpoint; execution time advances to the current observation.
+Equal public state closes the request without a copy. YB simulated interest
+counters retain their accrued/donated history with a rebased public stock.
+`state_reconciliation` trace actions use `request`, `apply`, and `equal`, with
+detection/deadline/application times, checkpoint provenance, reset segment, and
+before/after corrections. `actor_metrics.state_reconciliation` contains only
+observation, episode, and reset counts plus the accounting qualification.
+Pool/LP/YB valuation metrics across copied boundaries are comparison-only:
+copied public state is not simulated profit.
+
+`yb_min_net_profit_coin0` is a finite nonnegative session setting, default 1.0.
+Only `reference_2l` admission uses it: candidate profit after all existing external
+charges must strictly exceed this extra coin0 margin. Zero permits strictly
+positive net profit. It changes neither transaction gas, protocol/AMM fees, sizing,
+nor accounting. Full-trace effective inputs expose `run.yb_min_net_profit_coin0`.
 
 `yb_initial_state` optionally replaces synthetic fresh-2L initialization. It is
 a complete object with provenance fields `source_block`, `source_timestamp`, and
@@ -138,9 +280,11 @@ only the initial state; without a chronological update tape this is represented 
 }
 ```
 
-`scenario_id`, `market_path`, and `template_path` are required;
-`price_feed_path` is optional. The response keeps `scenarios` as an array so
-clients can consume its event and candle counts uniformly.
+`scenario_id` and `template_path` are required. `candle_path` requires
+`market_path`; `depth` requires `cex_depth_path` and omits `market_path`.
+`price_feed_path` and `observed_state_path` are optional subject to the mode
+constraints above. The response contains one `scenario` object with event and
+candle/observation counts.
 
 ### `evaluate_batch`
 

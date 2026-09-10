@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from curve_fx_harness_client import CandidateSpec, EvaluatorClient
+from curve_fx_harness_client.exceptions import RemoteEvaluatorError
 from curve_fx_harness_client.models import ObservationSpec
 
 
@@ -219,6 +220,51 @@ def test_identity_policy_admission_and_batch(
         assert result.metrics
     finally:
         client.shutdown()
+
+
+def test_session_rejects_malformed_execution_options(tmp_path: Path) -> None:
+    assert EVALUATOR is not None
+    template, candles = _write_inputs(tmp_path)
+    with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
+        for key, value in (
+            ("state_reconciliation_mode", True), ("actor_timing_mode", True),
+            ("cex_depth_path", 42), ("observed_state_path", None),
+        ):
+            # Exercise the raw public protocol, bypassing Pydantic coercion.
+            with pytest.raises(RemoteEvaluatorError, match=f"{key} must be a string") as exc:
+                client._transact({
+                    "protocol": "curve_fx_eval", "type": "open_session",
+                    "request_id": key, "session_id": "invalid-options",
+                    "template_path": str(template), "market_path": str(candles),
+                    "scenario_id": "protocol-contract", key: value,
+                })
+            assert exc.value.error_code == "INVALID_ARGUMENT"
+        _open(client, template, candles, "valid-after-rejection")
+
+
+def test_depth_clock_and_trace_need_no_companion_market(tmp_path: Path) -> None:
+    template, _ = _write_inputs(tmp_path, flat=True)
+    depth = Path(__file__).parents[2]/"cpp/tests/fixtures/depth-v2.npz"
+    for mode, interval in (("off", 60), ("reference_2l", 30), ("active_2l", 60)):
+        with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
+            client.open_session(f"depth-{mode}", template, "depth-clock", cex_depth_path=depth,
+                                event_mode="depth", observation_interval_s=interval, dustswap_freq_s=0,
+                                cex_depth_max_age_s=30, yb_mode=mode,
+                                actor_timing_mode="legacy_event" if mode == "off" else "minute_sequential")
+            result = _evaluate_once(client, _policy_defaults(_description()), candidate_id=mode,
+                                    observation=ObservationSpec(kind="full_trace", trace_interval=1,
+                                                                artifact_dir=f"trace-{mode}"))
+            assert result.status == "ok" and result.artifacts is not None
+            trace = json.loads((tmp_path/result.artifacts.trace_path).read_text())
+            times = list(range(1_700_000_001, 1_700_000_122, interval))
+            assert [row["t"] for row in trace] == times
+            assert [row["p_cex"] for row in trace] == pytest.approx([
+                1. if ts < 1_700_000_013 else 1.02 if ts < 1_700_000_121 else 1.1 for ts in times])
+    for override in ({"market_path": str(tmp_path/"candles.json")}, {"cex_depth_path": str(tmp_path/"candles.json")}):
+        with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
+            with pytest.raises(RemoteEvaluatorError, match="depth"):
+                client.open_session("invalid-depth", template, "depth-clock", event_mode="depth",
+                                    **(dict(cex_depth_path=depth) | override))
 
 
 def test_profiles_and_registered_range_match_public_results(tmp_path: Path) -> None:

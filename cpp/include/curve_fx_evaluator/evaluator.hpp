@@ -17,6 +17,7 @@
 #include "curve_fx_evaluator/trace.hpp"
 #include "curve_fx_evaluator/types.hpp"
 #include "events/loader.hpp"
+#include "events/cex_depth.hpp"
 #include "events/types.hpp"
 #include "harness/actions.hpp"
 #include "harness/detailed_output.hpp"
@@ -37,6 +38,8 @@ struct ScenarioLoadOptions {
     uint64_t start_ts{0};
     uint64_t end_ts{0};
     double candle_filter_pct{0.0};
+    std::string event_mode{"candle_path"};
+    uint64_t observation_interval_s{60};
 };
 
 template <typename T = RealT>
@@ -44,6 +47,8 @@ struct Scenario {
     std::string id;
     std::vector<arb::Candle> candles;
     arb::EventSoA events;
+    std::optional<arb::events::CexDepthTape> cex_depth;
+    std::optional<arb::events::ObservedStateTape<T>> observed_state;
     arb::pools::PoolInit<T> base_pool;
     arb::trading::Costs<T> base_costs;
     uint64_t start_ts{0};
@@ -61,12 +66,19 @@ struct SessionConfig {
     bool enable_slippage_probes{false};
     std::string event_cursor{"scalar"};
     std::string metric_profile{"full_summary"};
+    uint64_t cex_depth_max_age_s{30};
+    std::string state_reconciliation_mode{"off"};
+    uint64_t equalization_delay_s{60};
+    T reset_threshold_bps{T(100)};
+    uint64_t observation_interval_s{60};
+    std::string actor_timing_mode{"legacy_event"};
 
     // YieldBasis mode: "off", "active_2l" (established Observer2-equivalent
     // lane), or "reference_2l" (contract-derived candidate lane).
     std::string yb_mode{"off"};
     T yb_releverage_fee{static_cast<T>(0.012)};
     T yb_cash_multiplier{static_cast<T>(1.0)};
+    T yb_min_net_profit_coin0{static_cast<T>(1.0)};
     std::optional<arb::harness::YbInitialState<T>> yb_initial_state;
 
 };
@@ -101,6 +113,7 @@ struct CandidateEvaluationResult {
     std::string trace_json;
     std::string actions_json;
     boost::json::object effective_inputs;
+    boost::json::object actor_metrics;
     uint64_t trace_record_count{0};
     uint64_t action_count{0};
 };
@@ -123,7 +136,9 @@ public:
         const std::string& scenario_id,
         const std::string& market_path,
         const std::string& price_feed_path,
-        const ScenarioLoadOptions& opts
+        const std::string& cex_depth_path,
+        const ScenarioLoadOptions& opts,
+        const std::string& observed_state_path = ""
     );
 
     const Scenario<T>& scenario() const {

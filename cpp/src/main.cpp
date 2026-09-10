@@ -307,6 +307,7 @@ json::object make_hello_frame() {
     caps.push_back("full_trace");
     caps.push_back("atomic_sidecars");
     caps.push_back("registered_grid_ranges");
+    caps.push_back("state_reconciliation");
     hello["capabilities"] = caps;
 
     json::array yb_modes;
@@ -503,12 +504,17 @@ private:
         if (const auto field = unknown_field(req, {
                 "protocol", "type", "request_id", "session_id",
                 "template_path", "scenario_id", "market_path", "price_feed_path",
+                "cex_depth_path", "cex_depth_max_age_s",
+                "actor_timing_mode",
+                "observed_state_path", "state_reconciliation_mode",
+                "reset_threshold_bps", "equalization_delay_s", "observation_interval_s",
+                "event_mode",
                 "pool_index", "n_candles", "start_time",
                 "end_time", "candle_filter", "min_swap", "max_swap",
                 "dustswap_freq_s", "user_swap_freq_s",
                 "user_swap_size_frac", "user_swap_thresh",
                 "enable_slippage_probes", "yb_releverage_fee",
-                "yb_cash_multiplier", "yb_initial_state", "yb_mode", "event_cursor",
+                "yb_cash_multiplier", "yb_min_net_profit_coin0", "yb_initial_state", "yb_mode", "event_cursor",
                 "metric_profile"
             })) {
             write_frame(std::cout, make_error_frame(
@@ -528,15 +534,25 @@ private:
             return;
         }
 
+        for (const auto* key : {"observed_state_path", "cex_depth_path", "market_path",
+                                "state_reconciliation_mode", "actor_timing_mode"}) {
+            if (const auto* value = req.if_contains(key); value && !value->is_string()) {
+                write_frame(std::cout, make_error_frame(req_id, "session", "INVALID_ARGUMENT",
+                    std::string(key) + " must be a string"));
+                return;
+            }
+        }
         const std::string tpl_path = arb::get_string_opt(req, "template_path", "");
         const std::string scenario_id = arb::get_string_opt(req, "scenario_id", "");
         const std::string market_path = arb::get_string_opt(req, "market_path", "");
         const std::string price_feed_path = arb::get_string_opt(req, "price_feed_path", "");
+        const std::string observed_state_path = arb::get_string_opt(req, "observed_state_path", "");
+        const std::string cex_depth_path = arb::get_string_opt(req, "cex_depth_path", "");
 
-        if (tpl_path.empty() || scenario_id.empty() || market_path.empty()) {
+        if (tpl_path.empty() || scenario_id.empty()) {
             write_frame(std::cout, make_error_frame(
                 req_id, "session", "INVALID_ARGUMENT",
-                "template_path, scenario_id, and market_path are required"));
+                "template_path and scenario_id are required"));
             return;
         }
 
@@ -544,7 +560,7 @@ private:
             write_frame(std::cout, make_error_frame(req_id, "session", "FILE_NOT_FOUND", "Template file not found: " + tpl_path));
             return;
         }
-        if (!fs::exists(market_path) || fs::is_directory(market_path)) {
+        if (!market_path.empty() && (!fs::exists(market_path) || fs::is_directory(market_path))) {
             write_frame(std::cout, make_error_frame(req_id, "session", "FILE_NOT_FOUND", "Market file not found: " + market_path));
             return;
         }
@@ -553,12 +569,26 @@ private:
             write_frame(std::cout, make_error_frame(req_id, "session", "FILE_NOT_FOUND", "Price-feed file not found: " + price_feed_path));
             return;
         }
+        if (!observed_state_path.empty() && !fs::is_regular_file(observed_state_path)) {
+            write_frame(std::cout, make_error_frame(req_id, "session", "FILE_NOT_FOUND",
+                "Observed state file not found: " + observed_state_path));
+            return;
+        }
+        if (!cex_depth_path.empty() &&
+            (!fs::exists(cex_depth_path) || fs::is_directory(cex_depth_path))) {
+            write_frame(std::cout, make_error_frame(
+                req_id, "session", "FILE_NOT_FOUND",
+                "CEX depth file not found: " + cex_depth_path));
+            return;
+        }
         size_t pool_index = 0;
         size_t max_candles = 0;
         uint64_t start_ts = 0;
         uint64_t end_ts = 0;
         uint64_t dustswap_freq_s = 0;
         uint64_t user_swap_freq_s = 0;
+        uint64_t equalization_delay_s = 60;
+        uint64_t cex_depth_max_age_s = 30;
         const auto parse_integer = [&](const char* key, auto fallback, auto& out) {
             if (arb::parse_bounded_uint_field(req, key, fallback, out)) return true;
             write_frame(std::cout, make_error_frame(
@@ -571,7 +601,9 @@ private:
             !parse_integer("start_time", uint64_t{0}, start_ts) ||
             !parse_integer("end_time", uint64_t{0}, end_ts) ||
             !parse_integer("dustswap_freq_s", uint64_t{3600}, dustswap_freq_s) ||
-            !parse_integer("user_swap_freq_s", uint64_t{0}, user_swap_freq_s)) {
+            !parse_integer("user_swap_freq_s", uint64_t{0}, user_swap_freq_s) ||
+            !parse_integer("equalization_delay_s", uint64_t{60}, equalization_delay_s) ||
+            !parse_integer("cex_depth_max_age_s", uint64_t{30}, cex_depth_max_age_s)) {
             return;
         }
 
@@ -583,10 +615,28 @@ private:
             opts.start_ts = start_ts;
             opts.end_ts = end_ts;
             opts.candle_filter_pct = arb::get_double_opt(req, "candle_filter", 0.0);
+            if (const auto* mode = req.if_contains("event_mode");
+                mode != nullptr && !mode->is_string()) {
+                throw std::invalid_argument("event_mode must be a string");
+            }
+            opts.event_mode = arb::get_string_opt(req, "event_mode", "candle_path");
+            if (opts.event_mode != "candle_path" && opts.event_mode != "depth") {
+                throw std::invalid_argument(
+                    "event_mode must be 'candle_path' or 'depth'");
+            }
 
+            if (const auto* interval = req.if_contains("observation_interval_s")) {
+                if (!(interval->is_uint64() || (interval->is_int64() && interval->as_int64() > 0)))
+                    throw std::invalid_argument("observation_interval_s must be a positive uint64");
+                opts.observation_interval_s = interval->is_uint64() ? interval->as_uint64() : uint64_t(interval->as_int64());
+                if (!opts.observation_interval_s)
+                    throw std::invalid_argument("observation_interval_s must be positive");
+            }
             std::cerr << "[evaluator] Loading scenario '" << scenario_id
                       << "' from " << market_path << " with template: " << tpl_path << "\n";
-            store->load(tpl_path, scenario_id, market_path, price_feed_path, opts);
+            store->load(
+                tpl_path, scenario_id, market_path, price_feed_path,
+                cex_depth_path, opts, observed_state_path);
 
             curve_fx::evaluator::SessionConfig<RealT> cfg{};
             cfg.min_swap_frac = static_cast<RealT>(arb::get_double_opt(req, "min_swap", 1e-6));
@@ -596,6 +646,23 @@ private:
             cfg.user_swap_freq_s = user_swap_freq_s;
             cfg.user_swap_size_frac = static_cast<RealT>(arb::get_double_opt(req, "user_swap_size_frac", 0.01));
             cfg.user_swap_thresh = static_cast<RealT>(arb::get_double_opt(req, "user_swap_thresh", 0.05));
+            cfg.cex_depth_max_age_s = cex_depth_max_age_s;
+            cfg.equalization_delay_s = equalization_delay_s;
+            if (const auto* threshold = req.if_contains("reset_threshold_bps");
+                threshold && !threshold->is_number())
+                throw std::invalid_argument("reset_threshold_bps must be numeric");
+            cfg.reset_threshold_bps = static_cast<RealT>(arb::get_double_opt(req, "reset_threshold_bps", 100.0));
+            if (!std::isfinite(cfg.reset_threshold_bps) || cfg.reset_threshold_bps <= 0)
+                throw std::invalid_argument("reset_threshold_bps must be finite and positive");
+            cfg.observation_interval_s = opts.observation_interval_s;
+            cfg.state_reconciliation_mode = arb::get_string_opt(req, "state_reconciliation_mode", "off");
+            if (cfg.state_reconciliation_mode != "off" && cfg.state_reconciliation_mode != "on_price_scale_detach")
+                throw std::invalid_argument("invalid state_reconciliation_mode");
+            cfg.actor_timing_mode = arb::get_string_opt(
+                req, "actor_timing_mode", "legacy_event");
+            if (cfg.actor_timing_mode != "legacy_event" &&
+                cfg.actor_timing_mode != "minute_sequential")
+                throw std::invalid_argument("invalid actor_timing_mode");
             cfg.enable_slippage_probes =
                 req.if_contains("enable_slippage_probes") &&
                 req.at("enable_slippage_probes").as_bool();
@@ -665,6 +732,17 @@ private:
                 }
             }
             cfg.yb_mode = yb_mode;
+            if (cfg.actor_timing_mode == "minute_sequential" &&
+                (cex_depth_path.empty() || (cfg.yb_mode != "reference_2l" && cfg.yb_mode != "active_2l") ||
+                 opts.event_mode != "depth" || cfg.dustswap_freq_s || cfg.user_swap_freq_s ||
+                 cfg.event_cursor != "scalar" || cfg.metric_profile != "full_summary" ||
+                 (cfg.state_reconciliation_mode != "off" && cfg.state_reconciliation_mode != "on_price_scale_detach")))
+                throw std::invalid_argument("invalid minute_sequential configuration");
+            if (!observed_state_path.empty() || cfg.state_reconciliation_mode != "off") {
+                if (observed_state_path.empty() || cfg.actor_timing_mode != "minute_sequential" ||
+                    cfg.yb_mode != "reference_2l" || equalization_delay_s > UINT64_MAX / 1'000'000'000ULL)
+                    throw std::invalid_argument("invalid observed state reconciliation configuration");
+            }
             if (
                 cfg.metric_profile == "grid_core" &&
                 (cfg.yb_mode != "off" || cfg.enable_slippage_probes)
@@ -681,6 +759,10 @@ private:
                 !yb_releverage_fee_value->is_null();
             cfg.yb_releverage_fee = static_cast<RealT>(
                 arb::get_double_opt(req, "yb_releverage_fee", 0.012));
+            if (const auto* floor = req.if_contains("yb_min_net_profit_coin0"))
+                cfg.yb_min_net_profit_coin0 = static_cast<RealT>(arb::parse_input_double(*floor));
+            if (!std::isfinite(cfg.yb_min_net_profit_coin0) || cfg.yb_min_net_profit_coin0 < RealT(0))
+                throw std::invalid_argument("yb_min_net_profit_coin0 must be finite and nonnegative");
             cfg.yb_cash_multiplier = static_cast<RealT>(
                 arb::get_double_opt(req, "yb_cash_multiplier", 1.0));
             if (const auto* initial = req.if_contains("yb_initial_state");
@@ -1196,6 +1278,9 @@ private:
 
             if (!res.success) {
                 r["error"] = res.error_message;
+            }
+            if (!res.actor_metrics.empty()) {
+                r["actor_metrics"] = res.actor_metrics;
             }
 
             // Raw metrics dictionary in canonical field order.
