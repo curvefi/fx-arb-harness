@@ -146,11 +146,11 @@ unknown members, and duplicate members are rejected. No currency conversion
 is performed: price is coin0 per coin1. Units and reconstruction provenance
 belong in the associated manifest.
 
-JSONL is an upstream conversion/inspection format. From `curve-fx-optimization`,
+JSONL is an upstream conversion/inspection format. From the sibling `data/cryptolake` project,
 convert to a **new** destination with:
 
 ```sh
-uv run python -m fxopt.depth_archive source.jsonl book.npz --quantity-base BTC --price-quote USDT
+uv run python -m cryptolake.depth_archive source.jsonl book.npz --quantity-base BTC --price-quote USDT
 ```
 
 This preserves publication times, float64 values, active levels, and per-row

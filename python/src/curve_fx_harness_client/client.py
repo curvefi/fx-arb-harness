@@ -362,7 +362,16 @@ class EvaluatorClient:
                 yb_initial_state=yb_initial_state,
             )
 
-            resp_data = self._transact(frame.model_dump(exclude_none=True))
+            request = frame.model_dump(exclude_none=True)
+            # Pinned candle evaluators predate these optional extensions.
+            # Omission keeps their original semantics; active controls stay explicit.
+            if frame.cex_depth_path is None:
+                request.pop("cex_depth_max_age_s")
+            if frame.actor_timing_mode == "legacy_event":
+                request.pop("actor_timing_mode")
+            if frame.event_mode == "candle_path":
+                request.pop("event_mode")
+            resp_data = self._transact(request)
             session_ready = SessionReadyFrame.model_validate(resp_data)
             self._current_session_id = session_id
             logger.info("Session '%s' ready with scenario %s", session_id, session_ready.scenario.id)
