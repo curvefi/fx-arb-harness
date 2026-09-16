@@ -66,6 +66,20 @@ Decision<T> decide_trade(
     }
     if (!(p_now > T(0))) return d;
 
+    // A context bound only rejects impossible opportunities. Retain the
+    // existing global-bound sizing path for admitted swaps, so a stronger
+    // policy hint does not perturb their ladder or refinement decisions.
+    const T global_floor = pool.fee_lower_bound();
+    const T context_floor_01 = pool.context_fee_lower_bound(0);
+    const T context_floor_10 = pool.context_fee_lower_bound(1);
+    if (context_floor_01 > global_floor || context_floor_10 > global_floor) {
+        const T bid = depth ? static_cast<T>(depth->bid_price().value_or(0.0)) : cex_price;
+        const T ask = depth ? static_cast<T>(depth->ask_price().value_or(0.0)) : cex_price;
+        if (!(std::max(T(1) - context_floor_01, T(1e-12)) * (cex_fee_discount * bid) > p_now) &&
+            !(ask > T(0) && std::max(T(1) - context_floor_10, T(1e-12)) * p_now > cex_fee_markup * ask))
+            return d;
+    }
+
     const T one_minus_f0 = std::max(T(1) - fee_pool, T(1e-12));
     T p_cex_bid = cex_fee_discount * cex_price;
     T p_cex_ask = cex_fee_markup * cex_price;
@@ -85,7 +99,7 @@ Decision<T> decide_trade(
     // FALLS away from balance, so the spot fee is not a floor in either
     // direction and both sides use the global floor. Policy fees use the
     // config-derived floor both ways.
-    const T fee_floor = pool.fee_lower_bound();
+    const T fee_floor = global_floor;
     // Callers may provide the exact xp value cached with p_now/fee. The cache
     // is invalidated after every pool mutation, so this avoids only a duplicate
     // pure conversion and does not change the sizing surface.

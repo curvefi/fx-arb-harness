@@ -474,6 +474,7 @@ struct PoolOverride {
     PoolInit<T> pool{};
     arb::trading::Costs<T> costs{};
     std::optional<T> yb_releverage_fee{};
+    std::optional<T> arb_report_rate{};
     uint32_t pool_fields{0};
     uint32_t cost_fields{0};
 
@@ -515,6 +516,7 @@ struct PoolOverride {
         patch.apply(pool, costs);
         pool_fields |= patch.pool_fields;
         cost_fields |= patch.cost_fields;
+        if (patch.arb_report_rate.has_value()) arb_report_rate = patch.arb_report_rate;
         if (patch.yb_releverage_fee.has_value()) {
             yb_releverage_fee = patch.yb_releverage_fee;
         }
@@ -573,7 +575,14 @@ PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
             throw std::runtime_error("candidate run override must be an object");
         }
         const auto& ro = run->as_object();
-        reject_unknown_fields(ro, {"yb_releverage_fee"}, "candidate run override");
+        reject_unknown_fields(ro, {"yb_releverage_fee", "arb_report_rate"}, "candidate run override");
+        if (auto* rate = ro.if_contains("arb_report_rate"); rate != nullptr) {
+            const T value = parse_plain_real<T>(*rate);
+            if (!(value >= T(0) && value <= T(1))) {
+                throw std::runtime_error("arb_report_rate must be in [0, 1]");
+            }
+            out.arb_report_rate = value;
+        }
         if (auto* fee = ro.if_contains("yb_releverage_fee"); fee != nullptr) {
             const T value = parse_plain_real<T>(*fee);
             if (value < T(0) || value > T(1)) {

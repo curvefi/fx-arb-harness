@@ -16,7 +16,8 @@ struct StaticParameterDescriptor {
     std::string_view choices_json{};
 };
 
-inline constexpr std::array<StaticParameterDescriptor, 64> STATIC_PARAMETERS{{
+inline constexpr std::array<StaticParameterDescriptor, 65> STATIC_PARAMETERS{{
+    {"pool.run.arb_report_rate", "pool_overrides.run.arb_report_rate", "real", "probability", "binary64", "candidate", "1.0"},
     {"pool.tag", "pool_overrides.tag", "string", "identifier", "utf8", "candidate", ""},
     {"pool.initial_liquidity", "pool_overrides.pool.initial_liquidity", "real_pair", "token_amount", "binary64_from_wad_1e18", "candidate", ""},
     {"pool.A", "pool_overrides.pool.A", "real", "pool_raw", "binary64", "candidate", ""},

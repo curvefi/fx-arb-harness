@@ -316,7 +316,6 @@ public:
 
     bool materialize_ranges(
         const boost::json::array& ranges,
-        size_t max_candidates,
         std::vector<EvaluationCandidate<T>>& candidates,
         std::string& error
     ) const {
@@ -339,9 +338,8 @@ public:
             if (!detail::unsigned_json(item.as_array()[0], start) ||
                 !detail::unsigned_json(item.as_array()[1], length) || length == 0 ||
                 start >= total_ || length > total_ - start ||
-                (!first && start < previous_stop) ||
-                length > max_candidates || count > max_candidates - length) {
-                error = "grid ranges must be ordered, disjoint, in range, and within the batch limit";
+                (!first && start < previous_stop)) {
+                error = "grid ranges must be ordered, disjoint, and in range";
                 return false;
             }
             parsed.emplace_back(start, length);

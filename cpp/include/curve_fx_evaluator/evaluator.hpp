@@ -40,6 +40,7 @@ struct ScenarioLoadOptions {
     double candle_filter_pct{0.0};
     std::string event_mode{"candle_path"};
     uint64_t observation_interval_s{60};
+    uint64_t cex_depth_max_age_s{30};
 };
 
 template <typename T = RealT>
@@ -48,6 +49,7 @@ struct Scenario {
     std::vector<arb::Candle> candles;
     arb::EventSoA events;
     std::optional<arb::events::CexDepthTape> cex_depth;
+    bool candle_fallback{false};
     std::optional<arb::events::ObservedStateTape<T>> observed_state;
     arb::pools::PoolInit<T> base_pool;
     arb::trading::Costs<T> base_costs;
@@ -64,18 +66,18 @@ struct SessionConfig {
     T user_swap_size_frac{static_cast<T>(0.01)};
     T user_swap_thresh{static_cast<T>(0.05)};
     bool enable_slippage_probes{false};
-    std::string event_cursor{"scalar"};
-    std::string metric_profile{"full_summary"};
+    arb::harness::EventCursor event_cursor{arb::harness::EventCursor::Scalar};
+    arb::harness::MetricProfile metric_profile{arb::harness::MetricProfile::FullSummary};
     uint64_t cex_depth_max_age_s{30};
-    std::string state_reconciliation_mode{"off"};
+    arb::harness::StateReconciliationMode state_reconciliation_mode{arb::harness::StateReconciliationMode::Off};
     uint64_t equalization_delay_s{60};
     T reset_threshold_bps{T(100)};
     uint64_t observation_interval_s{60};
-    std::string actor_timing_mode{"legacy_event"};
+    arb::harness::ActorTimingMode actor_timing_mode{arb::harness::ActorTimingMode::LegacyEvent};
 
     // YieldBasis mode: "off", "active_2l" (established Observer2-equivalent
     // lane), or "reference_2l" (contract-derived candidate lane).
-    std::string yb_mode{"off"};
+    arb::harness::YbMode yb_mode{arb::harness::YbMode::Off};
     T yb_releverage_fee{static_cast<T>(0.012)};
     T yb_cash_multiplier{static_cast<T>(1.0)};
     T yb_min_net_profit_coin0{static_cast<T>(1.0)};

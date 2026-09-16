@@ -2,7 +2,7 @@
 
 The evaluator is a line-delimited JSON (NDJSON) subprocess. Every frame is one
 UTF-8 JSON object followed by `\n`; stdout is protocol-only and diagnostics go
-to stderr. The maximum frame size is 4 MiB. There is no protocol version field:
+to stderr. There is no fixed frame-size cap or protocol version field:
 the literal `protocol` value is `curve_fx_eval` in every frame.
 
 ## Lifecycle
@@ -48,11 +48,7 @@ evaluator process is required for another session.
     "total_notional_coin0", "lp_fee_coin0", "arb_pnl_coin0",
     "fee_capture_rate", "donations", "donation_coin0_total", "tvl_growth"
   ],
-  "limits": {"max_frame_bytes": 4194304,
-             "max_candidates_per_batch": 4096,
-             "max_metric_values_per_batch": 131072,
-             "max_materialized_batch_bytes": 67108864,
-             "max_inflight_batches": 1}
+  "limits": {"max_inflight_batches": 1}
 }
 ```
 
@@ -102,11 +98,32 @@ and omits `market_path`; `candle_filter` must be zero. Its regular clock starts 
 the later of `start_time` and the first whole second at or after the first book
 publication. Events repeat every `observation_interval_s` (default 60), through
 the earlier of `end_time` (if supplied) and the first whole second at or after
-the final publication. `n_candles` caps observation count in this mode; at most
-2678400 observations may be admitted. Prices are the latest published book
+the final publication. `n_candles` optionally caps observation count in this mode.
+Observation indices must fit the uint32 event index.
+Prices are the latest published book
 midpoint, carried across gaps, with zero synthetic volume. Execution still
 requires a fresh book. The trace adapter uses internal flat rows, with no
 companion OHLC file. An empty requested window is rejected.
+
+`event_mode="mixed_depth"` requires both `cex_depth_path` and `market_path`,
+with `actor_timing_mode="legacy_event"`. It loads and filters candles exactly
+as `candle_path` does; `n_candles` caps those input candles. Their constructed
+event range bounds the mixed run. Within that range, the depth clock starts
+at the later of `start_time`, the first candle event, and the first whole second
+at or after the first publication, then advances by `observation_interval_s`.
+It emits depth events only while the newest published book satisfies
+`cex_depth_max_age_s`; candle events are retained only where that same book is
+absent or stale. At a shared timestamp, fresh depth wins. The clock keeps its
+phase across gaps, and candle fallback uses the original OHLC path, price and
+volume. Pool, YB, donation and actor state continue across every switch.
+Trace candles include the input candles plus flat rows for selected depth
+observations; session start/end report the selected event range.
+
+For example, a 10-second observation interval and 60-second maximum age can
+hold actual 1-minute snapshots between publications. Consumption persists
+until the next published snapshot; observation ticks do not refill liquidity.
+This does not reconstruct missing books or infer additional depth from candles.
+
 `user_swap_size_frac` is the daily fair-TVL utilization fraction: each scheduled
 order has coin0-equivalent notional `fair_tvl * user_swap_size_frac *
 user_swap_freq_s / 86400`, converted into the alternating input coin at the
@@ -134,13 +151,14 @@ C-order numeric arrays:
 | `counts` | little-endian uint32 `[N,2]` | active levels per side, from 1 through K |
 | `interpolation` | uint8 `[N]` | 0 step, 1 linear, per snapshot |
 
-Publication intervals may be irregular. K is 1–4096, N is at most 267840,
-and `depth` is at most 17141760 float64 elements (137134080 bytes).
+Publication intervals may be irregular. K is 1–4096; N has no fixed cap.
+Array shapes must match the stored byte counts. Available memory determines
+the practical archive size.
 Inactive padding must be zero. Prices are positive and ordered, bids descending
 and asks ascending; the best bid cannot exceed the best ask. Quantities are
 positive except zero-quantity interior linear knots. Locked books are supported.
-The reader also accepts existing v1 archives unchanged: K=16, uint8 counts,
-exact 10-second clock, strictly uncrossed books, implicit step interpolation.
+The reader also accepts v1 archives: K=16, uint8 counts, exact 10-second clock, strictly uncrossed books,
+implicit step interpolation.
 The producer writes v2. ZIP/DEFLATE and CRCs use MiniZip; object/pickle arrays,
 unknown members, and duplicate members are rejected. No currency conversion
 is performed: price is coin0 per coin1. Units and reconstruction provenance
@@ -158,7 +176,8 @@ step/linear semantics without resampling. It writes `book.npz.json` with units
 and a source hash; other source metadata remains in the preserved JSONL and
 its original manifests. Conversion does not certify causal reconstruction.
 Existing sources, archives, and output paths are never overwritten by this
-converter. Large sources must be split into archives within the stated limits.
+converter. Its separate producer limits may require splitting large sources;
+see that project's README.
 Python can inspect the same NPZ using `np.load(..., allow_pickle=False)`.
 
 The loop selects only
@@ -166,13 +185,15 @@ the latest snapshot published by the event timestamp, uses its top-of-book
 midpoint as the market mark, and shares depletion across native actions until
 a newer snapshot arrives. `cex_depth_max_age_s` is a non-negative uint64
 (default 30); zero accepts only an exact publication-time match. Future,
-missing, stale, or exhausted depth prevents external execution without an
-infinite-liquidity fallback. Synthetic user flow never consumes the tape, and
+missing or stale depth prevents external execution unless `mixed_depth` is
+selected. Exhausted fresh depth never enables candle fallback. Synthetic user
+flow never consumes the tape, and
 the independent policy price feed is unchanged. Depth supports all three YB
 modes. In `legacy_event`, `reference_2l` shares the depleted book after native
 execution. `active_2l` retains its established midpoint-based LP model: finite
 depth constrains native arbitrage, but the active actor does not execute or
-consume a CEX depth hedge. It requires a fresh book when depth is configured.
+consume a CEX depth hedge. It requires a fresh book when depth is configured,
+except during the explicit candle fallback in `mixed_depth`.
 Configured `exact_skip` uses the scalar cursor so snapshots cannot be skipped.
 
 The per-row `interpolation` array selects step or linear depth.
@@ -281,7 +302,8 @@ only the initial state; without a chronological update tape this is represented 
 ```
 
 `scenario_id` and `template_path` are required. `candle_path` requires
-`market_path`; `depth` requires `cex_depth_path` and omits `market_path`.
+`market_path`; `depth` requires `cex_depth_path` and omits `market_path`;
+`mixed_depth` requires both.
 `price_feed_path` and `observed_state_path` are optional subject to the mode
 constraints above. The response contains one `scenario` object with event and
 candle/observation counts.
@@ -293,6 +315,39 @@ candle/observation counts.
 of the canonical fields advertised by `hello`; array format requires it.
 Candidates carry a unique `ordinal`, a unique `candidate_id`, finite binary64
 `policy_params`, and optional `pool_overrides`. Results are sorted by ordinal.
+
+For swap-report policies, `pool_overrides.run.arb_report_rate` is a finite
+probability in `[0,1]`, default `1`. Its grid axis is `pool.run.arb_report_rate`.
+One fixed SplitMix64 draw keyed by original event ordinal selects report/no-report
+before arb sizing; all probes and execution share that choice. Draws are shared
+across candidates and independent of batch order, workers, and prior trades.
+This is a per-opportunity probability, not a target fraction of executed swaps.
+Reports use the attached causal price-feed sample when supplied, otherwise the
+current execution-market price (depth midpoint or candle event price). They are
+cleared after the arb attempt and cannot be reused by YB, user swaps, or idle ticks.
+An attached stale sample remains stale; no current timestamp is fabricated.
+Policies without `USES_SWAP_REPORTS` retain their existing feed behavior.
+
+`reporting_fair_fee` parameters are `[base_fee, capture, fallback_fee]`, all
+fractions. Fresh same-timestamp reports charge `min(max(base_fee, capture * edge), fallback_fee)`,
+where `edge = max(value_out - value_in, 0) / value_out` on pre-fee swap legs
+valued in coin0. Missing/stale reports and non-swap fee queries use `fallback_fee`.
+All fees retain the pool's 0.1 bp minimum, including a zero configured base fee.
+The policy returns zero for its price-scale target, retaining the native MA.
+
+The optional compiled-policy `context_fee_floor` hook can reject an arb
+opportunity before sizing. It must bound all sizes in the specified direction
+under the current report context; it does not replace the global sizing bound.
+Consequently `arb_guarded_loss_coin0`, a diagnostic sum of rejected trial losses,
+can decrease when a stronger context bound avoids those trials. It is not a
+realized loss or a simulation cashflow.
+
+Depth snapshots are validated once when constructing their immutable tape.
+Per-snapshot f64 and long-double cumulative costs and capacities are shared by
+candidates. Untouched books reuse those costs with the original accumulation
+order; partially consumed books retain direct level-by-level integration.
+Public standalone book resets still validate their input. Report refreshes
+invalidate fee quotes, while only pool mutations invalidate pool geometry.
 
 ```json
 {
@@ -346,8 +401,8 @@ object value applies each of its dotted keys, allowing linked axes such as a
 flat fee. Empty `axes`, `axis_order`, and `shape` together describe the one
 defaults-only candidate. Ranges expand to unique global grid positions and produce
 IDs `p00000000`, `p00000001`, and so on. Results preserve request order using
-those global ordinals. The input-frame, candidate-count, and metric-cell limits
-in `hello` are enforced before the simulation.
+those global ordinals. Batch size is chosen by the caller; the evaluator has
+no fixed candidate-count, metric-cell, or materialized-byte cap.
 
 `observation.kind` is `summary` or `full_trace`. `trace_interval` is a positive
 integer and `trace_actions` controls the optional action sidecar. Observation

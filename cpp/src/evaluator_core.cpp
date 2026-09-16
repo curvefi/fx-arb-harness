@@ -281,54 +281,21 @@ void execute_scenario_job(
         run_cfg.user_swap_freq_s = session_cfg.user_swap_freq_s;
         run_cfg.user_swap_size_frac = session_cfg.user_swap_size_frac;
         run_cfg.user_swap_thresh = session_cfg.user_swap_thresh;
+        run_cfg.arb_report_rate = pool_override != nullptr
+            ? pool_override->arb_report_rate.value_or(RealT(1)) : RealT(1);
         run_cfg.cex_depth = scen.cex_depth ? &*scen.cex_depth : nullptr;
+        run_cfg.candle_fallback = scen.candle_fallback;
         run_cfg.observed_state = scen.observed_state ? &*scen.observed_state : nullptr;
         run_cfg.equalization_delay_s = session_cfg.equalization_delay_s;
         run_cfg.reset_threshold_bps = session_cfg.reset_threshold_bps;
         run_cfg.observation_interval_s = session_cfg.observation_interval_s;
-        if (session_cfg.state_reconciliation_mode == "on_price_scale_detach")
-            run_cfg.state_reconciliation_mode = arb::harness::StateReconciliationMode::OnPriceScaleDetach;
-        else if (session_cfg.state_reconciliation_mode != "off")
-            throw std::invalid_argument("unknown state_reconciliation_mode");
         run_cfg.cex_depth_max_age_s = session_cfg.cex_depth_max_age_s;
-        if (session_cfg.actor_timing_mode == "minute_sequential") {
-            run_cfg.actor_timing_mode = arb::harness::ActorTimingMode::MinuteSequential;
-        } else if (session_cfg.actor_timing_mode != "legacy_event") {
-            throw std::invalid_argument("unknown actor_timing_mode");
-        }
         run_cfg.enable_slippage_probes = session_cfg.enable_slippage_probes;
-        if (session_cfg.event_cursor == "exact_skip") {
-            run_cfg.event_cursor = arb::harness::EventCursor::ExactSkip;
-        } else if (session_cfg.event_cursor == "scalar") {
-            run_cfg.event_cursor = arb::harness::EventCursor::Scalar;
-        } else {
-            throw std::invalid_argument(
-                "unknown event_cursor '" + session_cfg.event_cursor +
-                "' (expected 'scalar' or 'exact_skip')"
-            );
-        }
-        if (session_cfg.metric_profile == "grid_core") {
-            run_cfg.metric_profile = arb::harness::MetricProfile::GridCore;
-        } else if (session_cfg.metric_profile == "full_summary") {
-            run_cfg.metric_profile = arb::harness::MetricProfile::FullSummary;
-        } else {
-            throw std::invalid_argument(
-                "unknown metric_profile '" + session_cfg.metric_profile +
-                "' (expected 'full_summary' or 'grid_core')"
-            );
-        }
-        if (session_cfg.yb_mode == "active_2l") {
-            run_cfg.yb_mode = arb::harness::YbMode::Active2l;
-        } else if (session_cfg.yb_mode == "reference_2l") {
-            run_cfg.yb_mode = arb::harness::YbMode::Reference2l;
-        } else if (session_cfg.yb_mode == "off") {
-            run_cfg.yb_mode = arb::harness::YbMode::Off;
-        } else {
-            throw std::invalid_argument(
-                "unknown yb_mode '" + session_cfg.yb_mode +
-                "' (expected 'off', 'active_2l', or 'reference_2l')"
-            );
-        }
+        run_cfg.state_reconciliation_mode = session_cfg.state_reconciliation_mode;
+        run_cfg.actor_timing_mode = session_cfg.actor_timing_mode;
+        run_cfg.event_cursor = session_cfg.event_cursor;
+        run_cfg.metric_profile = session_cfg.metric_profile;
+        run_cfg.yb_mode = session_cfg.yb_mode;
         run_cfg.yb_releverage_fee =
             pool_override != nullptr && pool_override->yb_releverage_fee.has_value()
                 ? *pool_override->yb_releverage_fee
@@ -373,6 +340,8 @@ void execute_scenario_job(
             effective["run.equalization_delay_s"] = run_cfg.equalization_delay_s;
             effective["pool.run.yb_releverage_fee"] =
                 static_cast<double>(run_cfg.yb_releverage_fee);
+            effective["pool.run.arb_report_rate"] =
+                static_cast<double>(run_cfg.arb_report_rate);
             if (run_cfg.yb_initial_state && run_cfg.yb_mode != arb::harness::YbMode::Off) {
                 effective["run.yb_initial_state"] =
                     arb::harness::yb_initial_state_json(*run_cfg.yb_initial_state);
@@ -445,14 +414,6 @@ void execute_scenario_job(
 void configure_worker_count(size_t count) {
     if (count == 0) {
         throw std::invalid_argument("worker count must be positive");
-    }
-    const size_t hardware = std::thread::hardware_concurrency();
-    if (hardware != 0 && count > hardware) {
-        throw std::invalid_argument(
-            "worker count " + std::to_string(count) +
-            " exceeds detected hardware concurrency " +
-            std::to_string(hardware)
-        );
     }
     if (worker_pool_initialized && count != process_worker_count) {
         throw std::logic_error("worker pool is already initialized");

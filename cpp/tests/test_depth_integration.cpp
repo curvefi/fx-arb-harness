@@ -260,6 +260,68 @@ void runtime_cadence_matches_explicit_subsampling() {
     }
 }
 
+void mixed_events_select_candles_only_when_depth_is_unavailable() {
+    const std::vector<arb::Candle> source{{10,100,120,80,100,8},
+        {30,100,120,80,100,8}, {50,100,120,80,100,8}, {70,100,120,80,100,8}};
+    const Tape tape({{10'500'000'000ULL, {{99,1}}, {{101,1}}},
+                     {60'000'000'000ULL, {{109,1}}, {{111,1}}}});
+    auto candles = source;
+    // Clock 11,21,...; the first book expires at 30.5, the second at 80.
+    const auto mixed = arb::gen_mixed_depth_events(candles, tape, 10, 20);
+    std::vector<uint64_t> times;
+    for (const auto& event : mixed) times.push_back(event.ts);
+    require(times == std::vector<uint64_t>({5,11,21,35,45,55,61,71}),
+            "mixed clock used future/stale depth or dropped candle fallback");
+    require(mixed[0].p_cex == 120 && mixed[0].volume == 4 &&
+                mixed[1].p_cex == 100 && mixed[1].volume == 0 &&
+                candles[mixed[1].candle_idx].close == 100,
+            "mixed event price, volume or trace source changed");
+    const Tape boundary({{5'000'000'000ULL, {{99,1}}, {{101,1}}}});
+    candles = source;
+    const auto exact = arb::gen_mixed_depth_events(candles, boundary, 10, 20);
+    times.clear();
+    for (const auto& event : exact) times.push_back(event.ts);
+    require(times == std::vector<uint64_t>({5,15,25,35,45,55,65,75}) &&
+                exact[2].volume == 0 && exact[3].volume == 4,
+            "freshness equality or depth/candle tie rule changed");
+}
+
+void mixed_fallback_retains_candle_execution_and_shared_depth() {
+    for (auto mode : {arb::harness::YbMode::Off, arb::harness::YbMode::Active2l,
+                      arb::harness::YbMode::Reference2l}) {
+        for (int source : {0, 1, 2}) { // Future, stale, and usable books.
+            const uint64_t publication = TS + (source == 0 ? 100 : 0);
+            const Tape tape({Snapshot{publication * 1'000'000'000ULL,
+                {{100'000.,1.}}, {{100'001.,1.}}}});
+            auto flat_pool = make_pool(), mixed_pool = flat_pool;
+            const auto events = arb::EventSoA::from_events({
+                {TS+31,100'000.5,0.,0,1.,0}, {TS+41,100'000.5,0.,0,1.,0}});
+            arb::trading::Costs<double> costs; costs.arb_fee_bps = 0.;
+            arb::harness::DonationCfg<double> donation; donation.apy = .0145;
+            auto mixed_donation = donation;
+            arb::harness::IdleTickCfg<double> idle; idle.freq_s = 0;
+            arb::harness::UserSwapCfg<double> user;
+            arb::harness::RunConfig<double> cfg;
+            cfg.yb_mode = mode; cfg.yb_cash_multiplier = 3.;
+            cfg.cex_depth_max_age_s = source == 2 ? 60 : 30;
+            if (source == 2) cfg.cex_depth = &tape;
+            const auto expected = arb::harness::run_event_loop(
+                flat_pool, events, costs, donation, idle, user, cfg);
+            cfg.cex_depth = &tape; cfg.candle_fallback = true;
+            const auto actual = arb::harness::run_event_loop(
+                mixed_pool, events, costs, mixed_donation, idle, user, cfg);
+            if (mode != arb::harness::YbMode::Off && source != 2)
+                require(actual.yb_releverage_trades > 0, "fallback fixture did not exercise YB execution");
+            require(actual.metrics.trades > 0 && flat_pool.balances == mixed_pool.balances &&
+                        flat_pool.cached_price_scale == mixed_pool.cached_price_scale &&
+                        expected.metrics.arb_pnl_coin0 == actual.metrics.arb_pnl_coin0 &&
+                        expected.yb_releverage_final_growth == actual.yb_releverage_final_growth &&
+                        expected.yb_releverage_trades == actual.yb_releverage_trades,
+                    "mixed execution diverged from its candle or finite-depth baseline");
+        }
+    }
+}
+
 } // namespace
 
 void monthly_numpy_archive_matches_python_fixture() {
@@ -296,5 +358,7 @@ int main() {
     reference_actor_ignores_native_execution_costs();
     minute_arbs_use_independent_depth_and_sequential_pool_state();
     runtime_cadence_matches_explicit_subsampling();
+    mixed_events_select_candles_only_when_depth_is_unavailable();
+    mixed_fallback_retains_candle_execution_and_shared_depth();
     std::cout << "test_depth_integration: PASSED\n";
 }

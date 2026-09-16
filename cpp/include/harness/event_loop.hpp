@@ -33,6 +33,16 @@
 namespace arb {
 namespace harness {
 
+// A fixed SplitMix64 stream indexed by the original event ordinal gives every
+// candidate the same draws, independent of trade count, workers, and skipping.
+inline bool arb_brings_report(size_t event_index, double rate) {
+    uint64_t draw = static_cast<uint64_t>(event_index) + 0x9e3779b97f4a7c15ULL;
+    draw = (draw ^ (draw >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    draw = (draw ^ (draw >> 27)) * 0x94d049bb133111ebULL;
+    draw ^= draw >> 31;
+    return static_cast<double>(draw >> 11) * 0x1.0p-53 < rate;
+}
+
 template <typename T>
 struct YbLoopState {
     using F = MetricF<T>;
@@ -62,6 +72,9 @@ EventLoopResult<T> run_event_loop_impl(
     std::vector<DetailedEntry<T>>* out_detailed_entries = nullptr
 ) {
     const T min_swap_frac = cfg.min_swap_frac;
+    if (!(cfg.arb_report_rate >= T(0) && cfg.arb_report_rate <= T(1))) {
+        throw std::invalid_argument("arb_report_rate must be in [0, 1]");
+    }
     const T max_swap_frac = cfg.max_swap_frac;
     const bool enable_slippage_probes = cfg.enable_slippage_probes;
     const size_t detailed_interval = cfg.detailed_interval;
@@ -169,6 +182,7 @@ EventLoopResult<T> run_event_loop_impl(
     if (cfg.cex_depth != nullptr) {
         depth_cursor.emplace(*cfg.cex_depth, cfg.cex_depth_max_age_s);
     }
+    const bool require_depth = cfg.cex_depth != nullptr && !cfg.candle_fallback;
     const bool minute_sequential = cfg.actor_timing_mode == ActorTimingMode::MinuteSequential;
     std::optional<StateReconciliation<T>> minute_reconciliation;
     if (minute_sequential && cfg.observed_state)
@@ -442,6 +456,7 @@ EventLoopResult<T> run_event_loop_impl(
     const bool yb_on = yb_2l_on || yb_reference_on;
     const bool donation_on = dcfg.enabled && !yb_on;
     const bool have_price_feed = !events.p_price_feed.empty();
+    const bool swap_reports = pool.uses_swap_reports();
 
     // Exact skipping is gated by the policy's conservative fee floor.
     const bool exact_skip_on =
@@ -628,7 +643,7 @@ EventLoopResult<T> run_event_loop_impl(
     ) {
         auto& yb_reference_market = yb->reference_market;
         const auto& yb_reference_costs = yb->reference_costs;
-        if (!yb_reference_on || (cfg.cex_depth != nullptr && depth == nullptr)) return;
+        if (!yb_reference_on || (require_depth && depth == nullptr)) return;
         if constexpr (std::is_floating_point_v<T>) {
             const T price_scale_before = pool.cached_price_scale;
             auto route = yb_reference_market.execute_best(
@@ -748,11 +763,12 @@ EventLoopResult<T> run_event_loop_impl(
             depth_book = &*native_minute_book;
         }
         const T cex_price = depth_mid.value_or(candle_price);
-        if (have_price_feed) {
-            pool.refresh_policy_context(
-                static_cast<T>(events.p_price_feed[ev_idx]),
-                events.price_feed_ts[ev_idx]
-            );
+        if (swap_reports) {
+            pool.clear_policy_price_feed();
+            pool.refresh_policy_context();
+        } else if (have_price_feed) {
+            pool.refresh_policy_context(static_cast<T>(events.p_price_feed[ev_idx]),
+                                        events.price_feed_ts[ev_idx]);
         } else {
             pool.refresh_policy_context();
         }
@@ -768,11 +784,26 @@ EventLoopResult<T> run_event_loop_impl(
             continue;
         }
 
-        bool did_any_trade = minute_draining || (cfg.cex_depth != nullptr && depth_book == nullptr)
+        // Commit the report decision before any sizing probe. Missing reports
+        // must not reuse an earlier report, even at the same timestamp.
+        if (swap_reports && arb_brings_report(
+                ev_idx, static_cast<double>(cfg.arb_report_rate))) {
+            pool.refresh_policy_context(
+                have_price_feed ? static_cast<T>(events.p_price_feed[ev_idx]) : cex_price,
+                have_price_feed ? events.price_feed_ts[ev_idx] : ev_ts);
+        }
+        // Reports affect policy quotes, not pool geometry. Actual reserve,
+        // invariant and price-scale mutations invalidate both caches below.
+        if (swap_reports) fee_valid = false;
+        bool did_any_trade = minute_draining || (require_depth && depth_book == nullptr)
             ? false
             : execute_arb(ev_idx, ev_ts, cex_price, depth_book);
+        if (swap_reports) {
+            pool.clear_policy_price_feed();
+            fee_valid = false;
+        }
         if constexpr (EnableYb) {
-            if (yb_2l_on && !minute_draining && (cfg.cex_depth == nullptr || depth_book != nullptr)) {
+            if (yb_2l_on && !minute_draining && (!require_depth || depth_book != nullptr)) {
                 run_yb_2l_once(ev_ts, cex_price, did_any_trade);
             } else if (yb_reference_on && !minute_draining) {
                 run_yb_reference_once(
@@ -892,7 +923,7 @@ EventLoopResult<T> run_event_loop(
     if (minute_sequential) {
         if (!cfg.observation_interval_s)
             throw std::invalid_argument("observation_interval_s must be positive");
-        if (!cfg.cex_depth || (cfg.yb_mode != YbMode::Reference2l && cfg.yb_mode != YbMode::Active2l) ||
+        if (!cfg.cex_depth || cfg.candle_fallback || (cfg.yb_mode != YbMode::Reference2l && cfg.yb_mode != YbMode::Active2l) ||
             cfg.event_cursor != EventCursor::Scalar || cfg.metric_profile != MetricProfile::FullSummary ||
             cfg.dustswap_freq_s || cfg.user_swap_freq_s || icfg.freq_s || ucfg.freq_s ||
             costs.use_volume_cap || (cfg.state_reconciliation_mode != StateReconciliationMode::Off &&

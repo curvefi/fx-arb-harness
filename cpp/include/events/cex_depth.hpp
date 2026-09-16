@@ -20,8 +20,13 @@ public:
         return snapshots_;
     }
 
+    const trading::CexDepthQuoteCache& quote_cache(size_t index) const {
+        return quote_cache_[index];
+    }
+
 private:
     std::vector<trading::CexDepthSnapshot> snapshots_;
+    std::vector<trading::CexDepthQuoteCache> quote_cache_;
 };
 
 CexDepthTape load_cex_depth(const std::string& path);
@@ -46,8 +51,9 @@ public:
         constexpr uint64_t NS_PER_S = 1'000'000'000ULL;
         const auto& snapshots = tape_.snapshots();
         while (next_ < snapshots.size() && snapshots[next_].available_ns <= wall_ns) {
-            current_ = &snapshots[next_++];
-            book_.reset(current_);
+            current_ = &snapshots[next_];
+            book_.reset_validated(current_, &tape_.quote_cache(next_));
+            ++next_;
         }
         if (current_ == nullptr) return std::nullopt;
 

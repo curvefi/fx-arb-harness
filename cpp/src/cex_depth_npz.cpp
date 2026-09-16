@@ -3,6 +3,7 @@
 
 #include <array>
 #include <algorithm>
+#include <charconv>
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -14,7 +15,6 @@
 
 namespace arb::events {
 namespace {
-constexpr size_t MAX_ROWS = 31 * 8640;
 static_assert(sizeof(double) == 8 && std::numeric_limits<double>::is_iec559);
 
 [[noreturn]] void invalid() {
@@ -41,7 +41,7 @@ Array parse(std::vector<unsigned char> bytes) {
     const size_t prefix = bytes[6] == 1 ? 10 : 12;
     if (bytes.size() < prefix) invalid();
     const size_t length = little(bytes.data()+8, prefix-8);
-    if (length > 65536 || length > bytes.size()-prefix) invalid();
+    if (length > bytes.size()-prefix) invalid();
     const std::string header(reinterpret_cast<const char*>(bytes.data()+prefix), length);
     // np.save writes these sorted dictionary fields; no Python evaluation.
     static const std::regex pattern(
@@ -58,9 +58,10 @@ Array parse(std::vector<unsigned char> bytes) {
         if (start == std::string::npos) continue;
         const auto end = part.find_last_not_of(' ');
         part = part.substr(start, end-start+1);
-        if (part.size() > 8 || part.find_first_not_of("0123456789") != std::string::npos) invalid();
-        const auto value = std::stoull(part);
-        if (!value || value > MAX_ROWS || elements > MAX_ROWS*64/value) invalid();
+        size_t value = 0;
+        const auto [parsed_end, error] = std::from_chars(part.data(), part.data()+part.size(), value);
+        if (error != std::errc{} || parsed_end != part.data()+part.size() ||
+                !value || value > bytes.size() || elements > bytes.size()/value) invalid();
         elements *= value;
         result.shape.push_back(value);
         if (result.shape.size() > 4) invalid();
@@ -71,7 +72,8 @@ Array parse(std::vector<unsigned char> bytes) {
     else if (result.dtype == "<u4") width = 4;
     else invalid();
     result.offset = prefix+length;
-    if (elements*width != bytes.size()-result.offset) invalid();
+    if (elements > (bytes.size()-result.offset)/width ||
+            elements*width != bytes.size()-result.offset) invalid();
     result.bytes = std::move(bytes);
     return result;
 }
@@ -83,9 +85,8 @@ CexDepthTape load_cex_depth(const std::string& path) {
     const auto close = [](void* file) { if (file) unzClose(file); };
     std::unique_ptr<void, decltype(close)> file(unzOpen64(path.c_str()), close);
     if (!file) throw std::runtime_error("Cannot open CEX depth NPZ: "+path);
-    const std::map<std::string, size_t> limits = {
-        {"format_version.npy", 4}, {"depth.npy", MAX_ROWS*64*8},
-        {"timestamps.npy", MAX_ROWS*8}, {"counts.npy", MAX_ROWS*2*4}, {"interpolation.npy", MAX_ROWS}};
+    const std::array<std::string, 5> names = {
+        "format_version.npy", "depth.npy", "timestamps.npy", "counts.npy", "interpolation.npy"};
     std::map<std::string, Array> arrays;
     int status = unzGoToFirstFile(file.get());
     while (status == UNZ_OK) {
@@ -95,9 +96,8 @@ CexDepthTape load_cex_depth(const std::string& path) {
                                    nullptr, 0, nullptr, 0) != UNZ_OK
                 || info.size_filename >= name.size() || (info.flag & 1)) invalid();
         const std::string key(name.data());
-        const auto limit = limits.find(key);
-        if (limit == limits.end() || arrays.count(key)
-                || info.uncompressed_size > limit->second+65548
+        if (std::find(names.begin(), names.end(), key) == names.end() || arrays.count(key)
+                || info.uncompressed_size > std::numeric_limits<size_t>::max()
                 || unzOpenCurrentFile(file.get()) != UNZ_OK) invalid();
         std::vector<unsigned char> bytes(static_cast<size_t>(info.uncompressed_size));
         size_t offset = 0;

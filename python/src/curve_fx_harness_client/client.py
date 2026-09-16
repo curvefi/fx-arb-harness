@@ -3,6 +3,7 @@
 import io
 import json
 import logging
+import math
 import orjson
 import selectors
 import subprocess
@@ -48,7 +49,6 @@ class EvaluatorClient:
         expected_policy_abi: Optional[str] = None,
         expected_policy_parameter_count: Optional[int] = None,
         launch_argv: Optional[Sequence[Union[str, Path]]] = None,
-        verify_local_inputs: bool = True,
         timeout: float = 60.0,
     ):
         self.executable_path = str(executable_path)
@@ -63,7 +63,6 @@ class EvaluatorClient:
         )
         if not self.launch_argv:
             raise ValueError("launch_argv cannot be empty")
-        self.verify_local_inputs = verify_local_inputs
         self.timeout = timeout
 
         self._proc: Optional[subprocess.Popen] = None
@@ -297,29 +296,6 @@ class EvaluatorClient:
             if self._proc is None:
                 self._start_unlocked()
 
-            if self.verify_local_inputs:
-                full_tpl = self.work_dir / template_path
-
-                if not full_tpl.exists():
-                    raise FileNotFoundError(f"Template file not found: {full_tpl}")
-                if market_path is not None and not (self.work_dir / market_path).is_file():
-                    raise FileNotFoundError(f"Market file not found: {market_path}")
-                if price_feed_path is not None:
-                    full_price_feed = self.work_dir / price_feed_path
-                    if not full_price_feed.exists():
-                        raise FileNotFoundError(
-                            f"Price-feed file not found: {full_price_feed}"
-                        )
-                if cex_depth_path is not None:
-                    full_cex_depth = self.work_dir / cex_depth_path
-                    if not full_cex_depth.exists():
-                        raise FileNotFoundError(
-                            f"CEX-depth file not found: {full_cex_depth}"
-                        )
-                if observed_state_path is not None:
-                    full_observed = self.work_dir / observed_state_path
-                    if not full_observed.is_file():
-                        raise FileNotFoundError(f"Observed state file not found: {full_observed}")
             req_id = self._next_request_id("session")
             frame = OpenSessionFrame(
                 request_id=req_id,
@@ -538,8 +514,16 @@ class EvaluatorClient:
                 raise ProtocolViolationError("Array batch results must be a list")
             if any(
                 not isinstance(result, dict)
+                or type(result.get("ordinal")) is not int
+                or result["ordinal"] < 0
+                or not isinstance(result.get("candidate_id"), str)
+                or result.get("status") not in {"ok", "failed", "cancelled"}
                 or not isinstance(result.get("metrics"), list)
                 or len(result["metrics"]) != len(response_fields)
+                or any(type(value) not in (int, float) or not math.isfinite(value)
+                       for value in result["metrics"])
+                or (result.get("error") is not None and not isinstance(result["error"], str))
+                or (result.get("artifacts") is not None and not isinstance(result["artifacts"], dict))
                 for result in results
             ):
                 raise ProtocolViolationError("Invalid metric array result")

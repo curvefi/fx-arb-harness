@@ -1,4 +1,7 @@
+import pytest
+
 from curve_fx_harness_client import EvaluatorClient
+from curve_fx_harness_client.exceptions import ProtocolViolationError
 
 
 def test_candle_sessions_omit_inactive_extensions_and_depth_keeps_its_controls(monkeypatch):
@@ -12,7 +15,7 @@ def test_candle_sessions_omit_inactive_extensions_and_depth_keeps_its_controls(m
           "actor_timing_mode": "minute_sequential"}),
     ]
     for options, expected in cases:
-        client = EvaluatorClient(verify_local_inputs=False)
+        client = EvaluatorClient()
         wire = {}
 
         def transact(request):
@@ -30,3 +33,18 @@ def test_candle_sessions_omit_inactive_extensions_and_depth_keeps_its_controls(m
                     ("cex_depth_max_age_s", "actor_timing_mode", "event_mode") if key in wire}
         assert controls == expected
         assert wire["yb_mode"] == "active_2l"
+
+
+def test_array_results_validate_values_at_the_client_boundary(monkeypatch):
+    client = EvaluatorClient()
+    row = {"ordinal": 0, "candidate_id": "p00000000", "status": "ok", "metrics": [1.25]}
+    response = {"type": "batch_result", "session_id": "s", "status": "complete",
+                "metric_fields": ["score"], "results": [row]}
+    monkeypatch.setattr(client, "_transact", lambda request: response)
+    request = dict(session_id="s", grid_id="g", ranges=[(0, 1)],
+                   metric_fields=["score"], metrics_format="array", trusted_candidates=True)
+    assert client.evaluate_batch([], **request)["results"] == [row]
+    for update in ({"metrics": [float("nan")]}, {"ordinal": False}, {"status": "unknown"}):
+        response["results"] = [{**row, **update}]
+        with pytest.raises(ProtocolViolationError, match="Invalid metric array result"):
+            client.evaluate_batch([], **request)

@@ -36,10 +36,10 @@ class EvaluatorIdentity(ProtocolModel):
 
 
 class Limits(ProtocolModel):
-    max_frame_bytes: int = 4194304
-    max_candidates_per_batch: int = 4096
-    max_metric_values_per_batch: int = 131072
-    max_materialized_batch_bytes: int = 67108864
+    max_frame_bytes: Optional[int] = None
+    max_candidates_per_batch: Optional[int] = None
+    max_metric_values_per_batch: Optional[int] = None
+    max_materialized_batch_bytes: Optional[int] = None
     max_inflight_batches: int = 1
 
 
@@ -97,7 +97,7 @@ class OpenSessionFrame(ProtocolModel):
     equalization_delay_s: Optional[int] = Field(default=None, ge=0, le=2**64 - 1)
     observation_interval_s: Optional[int] = Field(default=None, gt=0, le=2**64 - 1)
     actor_timing_mode: Literal["legacy_event", "minute_sequential"] = "legacy_event"
-    event_mode: Literal["candle_path", "depth"] = "candle_path"
+    event_mode: Literal["candle_path", "depth", "mixed_depth"] = "candle_path"
     pool_index: int = 0
     n_candles: int = 0
     start_time: int = 0

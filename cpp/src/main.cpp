@@ -42,6 +42,27 @@
 
 namespace json = boost::json;
 namespace fs = std::filesystem;
+using arb::harness::EventCursor;
+using arb::harness::MetricProfile;
+using arb::harness::YbMode;
+using arb::harness::ActorTimingMode;
+using arb::harness::StateReconciliationMode;
+
+template <typename Enum>
+Enum session_option(
+    const json::object& request, const char* name, Enum fallback,
+    std::initializer_list<std::pair<std::string_view, Enum>> choices
+) {
+    const auto* value = request.if_contains(name);
+    if (!value) return fallback;
+    if (!value->is_string())
+        throw std::invalid_argument(std::string(name) + " must be a string");
+    const auto& text = value->as_string();
+    for (const auto& [label, option] : choices)
+        if (std::string_view(text.data(), text.size()) == label) return option;
+    throw std::invalid_argument(std::string("invalid ") + name);
+}
+
 
 #if defined(ARB_MODE_LD) && defined(ARB_MODE_F64)
 #error "select exactly one evaluator arithmetic mode"
@@ -104,11 +125,6 @@ static constexpr std::string_view SELECTED_POLICY_ID =
 #endif
 
 namespace {
-
-static constexpr size_t MAX_FRAME_BYTES = 4 * 1024 * 1024; // 4 MiB
-static constexpr size_t MAX_CANDIDATES_PER_BATCH = 4 * 1024;
-static constexpr size_t MAX_METRIC_VALUES_PER_BATCH = 128 * 1024;
-static constexpr size_t MAX_MATERIALIZED_BATCH_BYTES = 64 * 1024 * 1024;
 
 static const std::vector<std::string> CANONICAL_METRIC_FIELDS = {
     "vp", "lp_xcp_profit", "apy", "apy_net", "apy_net_gm",
@@ -321,10 +337,6 @@ json::object make_hello_frame() {
     hello["metric_fields"] = metric_schema.at("metric_fields");
 
     json::object limits;
-    limits["max_frame_bytes"] = MAX_FRAME_BYTES;
-    limits["max_candidates_per_batch"] = MAX_CANDIDATES_PER_BATCH;
-    limits["max_metric_values_per_batch"] = MAX_METRIC_VALUES_PER_BATCH;
-    limits["max_materialized_batch_bytes"] = MAX_MATERIALIZED_BATCH_BYTES;
     limits["max_inflight_batches"] = 1;
     hello["limits"] = limits;
 
@@ -427,15 +439,6 @@ public:
         while (std::getline(std::cin, line)) {
             if (line.empty()) continue;
 
-            if (line.size() > MAX_FRAME_BYTES) {
-                write_frame(
-                    std::cout,
-                    make_error_frame("unknown", "protocol", "FRAME_SIZE_EXCEEDED",
-                        "Frame size " + std::to_string(line.size()) + " exceeds limit of " + std::to_string(MAX_FRAME_BYTES) + " bytes")
-                );
-                continue;
-            }
-
             json::value req_val;
             try {
                 req_val = json::parse(line);
@@ -534,8 +537,7 @@ private:
             return;
         }
 
-        for (const auto* key : {"observed_state_path", "cex_depth_path", "market_path",
-                                "state_reconciliation_mode", "actor_timing_mode"}) {
+        for (const auto* key : {"observed_state_path", "cex_depth_path", "market_path"}) {
             if (const auto* value = req.if_contains(key); value && !value->is_string()) {
                 write_frame(std::cout, make_error_frame(req_id, "session", "INVALID_ARGUMENT",
                     std::string(key) + " must be a string"));
@@ -556,31 +558,6 @@ private:
             return;
         }
 
-        if (!fs::exists(tpl_path) || fs::is_directory(tpl_path)) {
-            write_frame(std::cout, make_error_frame(req_id, "session", "FILE_NOT_FOUND", "Template file not found: " + tpl_path));
-            return;
-        }
-        if (!market_path.empty() && (!fs::exists(market_path) || fs::is_directory(market_path))) {
-            write_frame(std::cout, make_error_frame(req_id, "session", "FILE_NOT_FOUND", "Market file not found: " + market_path));
-            return;
-        }
-        if (!price_feed_path.empty() &&
-            (!fs::exists(price_feed_path) || fs::is_directory(price_feed_path))) {
-            write_frame(std::cout, make_error_frame(req_id, "session", "FILE_NOT_FOUND", "Price-feed file not found: " + price_feed_path));
-            return;
-        }
-        if (!observed_state_path.empty() && !fs::is_regular_file(observed_state_path)) {
-            write_frame(std::cout, make_error_frame(req_id, "session", "FILE_NOT_FOUND",
-                "Observed state file not found: " + observed_state_path));
-            return;
-        }
-        if (!cex_depth_path.empty() &&
-            (!fs::exists(cex_depth_path) || fs::is_directory(cex_depth_path))) {
-            write_frame(std::cout, make_error_frame(
-                req_id, "session", "FILE_NOT_FOUND",
-                "CEX depth file not found: " + cex_depth_path));
-            return;
-        }
         size_t pool_index = 0;
         size_t max_candles = 0;
         uint64_t start_ts = 0;
@@ -620,10 +597,11 @@ private:
                 throw std::invalid_argument("event_mode must be a string");
             }
             opts.event_mode = arb::get_string_opt(req, "event_mode", "candle_path");
-            if (opts.event_mode != "candle_path" && opts.event_mode != "depth") {
+            if (opts.event_mode != "candle_path" && opts.event_mode != "depth" && opts.event_mode != "mixed_depth") {
                 throw std::invalid_argument(
-                    "event_mode must be 'candle_path' or 'depth'");
+                    "event_mode must be 'candle_path', 'depth', or 'mixed_depth'");
             }
+            opts.cex_depth_max_age_s = cex_depth_max_age_s;
 
             if (const auto* interval = req.if_contains("observation_interval_s")) {
                 if (!(interval->is_uint64() || (interval->is_int64() && interval->as_int64() > 0)))
@@ -632,12 +610,6 @@ private:
                 if (!opts.observation_interval_s)
                     throw std::invalid_argument("observation_interval_s must be positive");
             }
-            std::cerr << "[evaluator] Loading scenario '" << scenario_id
-                      << "' from " << market_path << " with template: " << tpl_path << "\n";
-            store->load(
-                tpl_path, scenario_id, market_path, price_feed_path,
-                cex_depth_path, opts, observed_state_path);
-
             curve_fx::evaluator::SessionConfig<RealT> cfg{};
             cfg.min_swap_frac = static_cast<RealT>(arb::get_double_opt(req, "min_swap", 1e-6));
             cfg.max_swap_frac = static_cast<RealT>(arb::get_double_opt(req, "max_swap", 1.0));
@@ -655,103 +627,53 @@ private:
             if (!std::isfinite(cfg.reset_threshold_bps) || cfg.reset_threshold_bps <= 0)
                 throw std::invalid_argument("reset_threshold_bps must be finite and positive");
             cfg.observation_interval_s = opts.observation_interval_s;
-            cfg.state_reconciliation_mode = arb::get_string_opt(req, "state_reconciliation_mode", "off");
-            if (cfg.state_reconciliation_mode != "off" && cfg.state_reconciliation_mode != "on_price_scale_detach")
-                throw std::invalid_argument("invalid state_reconciliation_mode");
-            cfg.actor_timing_mode = arb::get_string_opt(
-                req, "actor_timing_mode", "legacy_event");
-            if (cfg.actor_timing_mode != "legacy_event" &&
-                cfg.actor_timing_mode != "minute_sequential")
-                throw std::invalid_argument("invalid actor_timing_mode");
+            cfg.event_cursor = session_option(req, "event_cursor", EventCursor::Scalar,
+                {{"scalar", EventCursor::Scalar}, {"exact_skip", EventCursor::ExactSkip}});
+            cfg.metric_profile = session_option(req, "metric_profile", MetricProfile::FullSummary,
+                {{"full_summary", MetricProfile::FullSummary}, {"grid_core", MetricProfile::GridCore}});
+            cfg.yb_mode = session_option(req, "yb_mode", YbMode::Off,
+                {{"off", YbMode::Off}, {"active_2l", YbMode::Active2l}, {"reference_2l", YbMode::Reference2l}});
+            cfg.actor_timing_mode = session_option(req, "actor_timing_mode", ActorTimingMode::LegacyEvent,
+                {{"legacy_event", ActorTimingMode::LegacyEvent}, {"minute_sequential", ActorTimingMode::MinuteSequential}});
+            cfg.state_reconciliation_mode = session_option(req, "state_reconciliation_mode", StateReconciliationMode::Off,
+                {{"off", StateReconciliationMode::Off}, {"on_price_scale_detach", StateReconciliationMode::OnPriceScaleDetach}});
             cfg.enable_slippage_probes =
                 req.if_contains("enable_slippage_probes") &&
                 req.at("enable_slippage_probes").as_bool();
-            std::string event_cursor = "scalar";
-            if (req.if_contains("event_cursor")) {
-                if (!req.at("event_cursor").is_string()) {
-                    write_frame(std::cout, make_error_frame(
-                        req_id, "protocol", "INVALID_ARGUMENT",
-                        "event_cursor must be a string"));
-                    return;
-                }
-                event_cursor = std::string(req.at("event_cursor").as_string());
-                if (event_cursor != "scalar" && event_cursor != "exact_skip") {
-                    write_frame(std::cout, make_error_frame(
-                        req_id, "protocol", "INVALID_ARGUMENT",
-                        "event_cursor must be 'scalar' or 'exact_skip'"));
-                    return;
-                }
-            }
-            cfg.event_cursor = event_cursor;
-            std::string metric_profile = "full_summary";
-            if (req.if_contains("metric_profile")) {
-                if (!req.at("metric_profile").is_string()) {
-                    write_frame(std::cout, make_error_frame(
-                        req_id, "protocol", "INVALID_ARGUMENT",
-                        "metric_profile must be a string"));
-                    return;
-                }
-                metric_profile = std::string(
-                    req.at("metric_profile").as_string()
-                );
-                if (
-                    metric_profile != "full_summary" &&
-                    metric_profile != "grid_core"
-                ) {
-                    write_frame(std::cout, make_error_frame(
-                        req_id, "protocol", "INVALID_ARGUMENT",
-                        "metric_profile must be 'full_summary' or 'grid_core'"));
-                    return;
-                }
-            }
-            cfg.metric_profile = metric_profile;
             if (
-                cfg.event_cursor == "exact_skip" &&
-                cfg.metric_profile != "grid_core"
+                cfg.event_cursor == EventCursor::ExactSkip &&
+                cfg.metric_profile != MetricProfile::GridCore
             ) {
                 write_frame(std::cout, make_error_frame(
                     req_id, "session", "INVALID_EVENT_CURSOR",
                     "exact_skip requires metric_profile='grid_core'"));
                 return;
             }
-            std::string yb_mode = "off";
-            if (req.if_contains("yb_mode")) {
-                if (!req.at("yb_mode").is_string()) {
-                    write_frame(std::cout, make_error_frame(
-                        req_id, "protocol", "INVALID_ARGUMENT",
-                        "yb_mode must be a string"));
-                    return;
-                }
-                yb_mode = std::string(req.at("yb_mode").as_string());
-                if (yb_mode != "off" && yb_mode != "active_2l" &&
-                    yb_mode != "reference_2l") {
-                    write_frame(std::cout, make_error_frame(
-                        req_id, "protocol", "INVALID_ARGUMENT",
-                        "yb_mode must be one of 'off', 'active_2l', 'reference_2l'"));
-                    return;
-                }
-            }
-            cfg.yb_mode = yb_mode;
-            if (cfg.actor_timing_mode == "minute_sequential" &&
-                (cex_depth_path.empty() || (cfg.yb_mode != "reference_2l" && cfg.yb_mode != "active_2l") ||
+            if (cfg.actor_timing_mode == ActorTimingMode::MinuteSequential &&
+                (cex_depth_path.empty() || (cfg.yb_mode != YbMode::Reference2l && cfg.yb_mode != YbMode::Active2l) ||
                  opts.event_mode != "depth" || cfg.dustswap_freq_s || cfg.user_swap_freq_s ||
-                 cfg.event_cursor != "scalar" || cfg.metric_profile != "full_summary" ||
-                 (cfg.state_reconciliation_mode != "off" && cfg.state_reconciliation_mode != "on_price_scale_detach")))
+                 cfg.event_cursor != EventCursor::Scalar || cfg.metric_profile != MetricProfile::FullSummary))
                 throw std::invalid_argument("invalid minute_sequential configuration");
-            if (!observed_state_path.empty() || cfg.state_reconciliation_mode != "off") {
-                if (observed_state_path.empty() || cfg.actor_timing_mode != "minute_sequential" ||
-                    cfg.yb_mode != "reference_2l" || equalization_delay_s > UINT64_MAX / 1'000'000'000ULL)
+            if (!observed_state_path.empty() || cfg.state_reconciliation_mode != StateReconciliationMode::Off) {
+                if (observed_state_path.empty() || cfg.actor_timing_mode != ActorTimingMode::MinuteSequential ||
+                    cfg.yb_mode != YbMode::Reference2l || equalization_delay_s > UINT64_MAX / 1'000'000'000ULL)
                     throw std::invalid_argument("invalid observed state reconciliation configuration");
             }
             if (
-                cfg.metric_profile == "grid_core" &&
-                (cfg.yb_mode != "off" || cfg.enable_slippage_probes)
+                cfg.metric_profile == MetricProfile::GridCore &&
+                (cfg.yb_mode != YbMode::Off || cfg.enable_slippage_probes)
             ) {
                 write_frame(std::cout, make_error_frame(
                     req_id, "session", "INVALID_METRIC_PROFILE",
                     "grid_core requires yb_mode='off' and slippage disabled"));
                 return;
             }
+            std::cerr << "[evaluator] Loading scenario '" << scenario_id
+                      << "' from " << market_path << " with template: " << tpl_path << "\n";
+            store->load(
+                tpl_path, scenario_id, market_path, price_feed_path,
+                cex_depth_path, opts, observed_state_path);
+
             const auto* yb_releverage_fee_value =
                 req.if_contains("yb_releverage_fee");
             const bool yb_releverage_fee_explicit =
@@ -768,7 +690,7 @@ private:
             if (const auto* initial = req.if_contains("yb_initial_state");
                 initial != nullptr && !initial->is_null()) {
                 cfg.yb_initial_state = arb::harness::parse_yb_initial_state<RealT>(*initial);
-                if (cfg.yb_mode != "off") {
+                if (cfg.yb_mode != YbMode::Off) {
                     const auto& historical = store->scenario().base_pool.historical_state;
                     if (!historical.enabled ||
                         historical.source_block != cfg.yb_initial_state->source_block ||
@@ -805,12 +727,14 @@ private:
             scenario["id"] = sc.id;
             scenario["events_count"] = sc.events.size();
             scenario["candles_count"] = sc.candles.size();
-            scenario["start_ts"] = sc.start_ts;
-            scenario["end_ts"] = sc.candles.empty() ? 0 : sc.candles.back().ts;
+            scenario["start_ts"] = sc.candle_fallback ? sc.events.ts.front() : sc.start_ts;
+            scenario["end_ts"] = sc.candle_fallback ? sc.events.ts.back() : sc.candles.back().ts;
             resp["scenario"] = std::move(scenario);
             write_frame(std::cout, resp);
             std::cerr << "[evaluator] Session '" << session_id << "' initialized.\n";
 
+        } catch (const std::invalid_argument& e) {
+            write_frame(std::cout, make_error_frame(req_id, "session", "INVALID_ARGUMENT", e.what()));
         } catch (const std::exception& e) {
             write_frame(std::cout, make_error_frame(req_id, "session", "SESSION_INIT_FAILED", e.what()));
         }
@@ -964,7 +888,7 @@ private:
                 metric_fields.push_back(name);
             }
         }
-        if (session_->config.metric_profile == "grid_core") {
+        if (session_->config.metric_profile == MetricProfile::GridCore) {
             for (const auto& name : metric_fields) {
                 if (GRID_CORE_METRIC_FIELDS.count(name) == 0) {
                     write_frame(std::cout, make_error_frame(
@@ -994,13 +918,6 @@ private:
                     "candidates must be an array"));
                 return;
             }
-            if (req.at("candidates").as_array().size() >
-                MAX_CANDIDATES_PER_BATCH) {
-                write_frame(std::cout, make_error_frame(
-                    req_id, "candidate", "BATCH_TOO_LARGE",
-                    "candidate batch exceeds the candidate limit"));
-                return;
-            }
             candidate_array = &req.at("candidates").as_array();
         } else {
             if (!req.at("grid_id").is_string() || !req.at("ranges").is_array()) {
@@ -1018,7 +935,7 @@ private:
             }
             std::string error;
             if (!session_->grid->materialize_ranges(
-                    req.at("ranges").as_array(), MAX_CANDIDATES_PER_BATCH,
+                    req.at("ranges").as_array(),
                     grid_candidates, error)) {
                 write_frame(std::cout, make_error_frame(
                     req_id, "candidate", "INVALID_GRID_RANGES", error));
@@ -1035,17 +952,6 @@ private:
                 "candidate batch cannot be empty"));
             return;
         }
-        if (metric_fields.size() >
-            MAX_METRIC_VALUES_PER_BATCH / candidate_count) {
-            write_frame(std::cout, make_error_frame(
-                req_id, "candidate", "BATCH_TOO_LARGE",
-                "candidate count times metric count exceeds the result limit"));
-            return;
-        }
-
-        // Candidate, materialization, and result-cell admission guards bound
-        // allocations that compact ordinal requests can trigger.
-
         // Observation options (trace capture)
         curve_fx::evaluator::ObservationSpec obs_spec{};
         std::string artifact_dir;
@@ -1114,7 +1020,7 @@ private:
 
         }
         if (
-            session_->config.metric_profile == "grid_core" &&
+            session_->config.metric_profile == MetricProfile::GridCore &&
             obs_spec.kind != curve_fx::evaluator::ObservationKind::Summary
         ) {
             write_frame(std::cout, make_error_frame(

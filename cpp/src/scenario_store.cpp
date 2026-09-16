@@ -1,26 +1,12 @@
 #include "curve_fx_evaluator/evaluator.hpp"
 
 #include <algorithm>
-#include <cctype>
-#include <filesystem>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-namespace fs = std::filesystem;
-
 namespace curve_fx::evaluator {
-
-namespace {
-
-bool is_safe_scenario_id(const std::string& value) {
-    if (value.empty()) return false;
-    return std::all_of(value.begin(), value.end(), [](unsigned char c) {
-        return std::isalnum(c) != 0 || c == '-' || c == '_';
-    });
-}
-
-} // namespace
 
 template <typename T>
 void ScenarioStore<T>::load(
@@ -39,9 +25,6 @@ void ScenarioStore<T>::load(
     }
     auto [base_pool, base_costs] = pool_doc.template instantiate<T>(opts.pool_index);
 
-    if (!is_safe_scenario_id(scenario_id)) {
-        throw std::runtime_error("Scenario id contains unsafe characters: " + scenario_id);
-    }
     Scenario<T> scenario;
     if (!cex_depth_path.empty())
         scenario.cex_depth.emplace(arb::events::load_cex_depth(cex_depth_path));
@@ -61,7 +44,9 @@ void ScenarioStore<T>::load(
         if (begin > end) throw std::invalid_argument("No depth observations in requested time range");
         uint64_t count = (end-begin) / opts.observation_interval_s + 1;
         if (opts.max_candles) count = std::min(count, uint64_t(opts.max_candles));
-        if (count > 31*86400) throw std::invalid_argument("Too many depth observations; select a shorter window");
+        // Event candle indices are uint32_t.
+        if (count > uint64_t(std::numeric_limits<uint32_t>::max()) + 1)
+            throw std::invalid_argument("Depth observation indices exceed uint32_t");
         candles.reserve(count);
         events.reserve(count);
         size_t current = 0;
@@ -75,7 +60,10 @@ void ScenarioStore<T>::load(
             // Internal trace rows only: no companion OHLC input or synthetic volume.
             candles.push_back({ts, mid, mid, mid, mid, 0.0});
         }
-    } else if (opts.event_mode == "candle_path") {
+    } else if (opts.event_mode == "candle_path" || opts.event_mode == "mixed_depth") {
+        scenario.candle_fallback = opts.event_mode == "mixed_depth";
+        if (scenario.candle_fallback && (!scenario.cex_depth || market_path.empty()))
+            throw std::invalid_argument("mixed_depth requires cex_depth_path and market_path");
         const double filter_squeeze = opts.candle_filter_pct > 0.0
             ? opts.candle_filter_pct / 100.0 : 0.999;
         candles = arb::load_candles(market_path, opts.max_candles, filter_squeeze, opts.start_ts);
@@ -84,15 +72,14 @@ void ScenarioStore<T>::load(
                 return candle.ts > opts.end_ts;
             }), candles.end());
         if (candles.empty()) throw std::runtime_error("No candles loaded for scenario '" + scenario_id + "'");
-        events = arb::gen_events(candles);
+        events = scenario.candle_fallback
+            ? arb::gen_mixed_depth_events(candles, *scenario.cex_depth,
+                opts.observation_interval_s, opts.cex_depth_max_age_s, opts.start_ts)
+            : arb::gen_events(candles);
     } else {
-        throw std::invalid_argument("event_mode must be 'candle_path' or 'depth'");
+        throw std::invalid_argument("event_mode must be 'candle_path', 'depth', or 'mixed_depth'");
     }
     if (!price_feed_path.empty()) {
-        if (!fs::exists(price_feed_path) || fs::is_directory(price_feed_path)) {
-            throw std::runtime_error(
-                "Price-feed file not found for scenario '" + scenario_id + "': " + price_feed_path);
-        }
         auto feed_points = arb::price_feeds::load_price_feed_csv(price_feed_path);
         arb::price_feeds::attach_price_feed(events, feed_points);
     }

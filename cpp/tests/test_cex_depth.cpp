@@ -7,6 +7,7 @@
 #include "pools/twocrypto_fx/twocrypto.hpp"
 #include "trading/arbitrageur.hpp"
 #include "trading/cex_depth.hpp"
+#include "events/cex_depth.hpp"
 
 namespace {
 
@@ -82,6 +83,43 @@ void linear_depth_integrates_marginal_prices() {
     require(book.consume_buy(100.) && *book.ask_price() == 103. &&
                 std::abs(*book.buy_base(50.)-5175.L) < 1e-10L,
             "zero-volume price gap invented liquidity");
+}
+
+void prepared_tape_quotes_match_piecewise_integrals() {
+    const arb::trading::CexDepthSnapshot data{1'000'000'000ULL,
+        {{100.,10.},{98.,90.},{97.,0.},{95.,100.}},
+        {{100.,10.},{102.,90.},{103.,0.},{105.,100.}},
+        arb::trading::DepthInterpolation::Linear};
+    const arb::events::CexDepthTape tape({data});
+    const auto check = [&](auto zero) {
+        using T = decltype(zero);
+        arb::events::CexDepthCursor<T> cursor(tape, 60);
+        require(cursor.advance(1) == T(100), "prepared tape midpoint changed");
+        auto& book = cursor.book();
+        // Integrate the independently specified linear ask curve in coin0:
+        // first 10 at 100, next 90 ramp 100->102, last 100 ramp 103->105.
+        for (T q : {T(0), T(0.125), T(10), T(10.5), T(99.75), T(100), T(150.25), T(200)}) {
+            const T middle = std::min(T(90), std::max(T(0), q-T(10)));
+            const T last = std::max(T(0), q-T(100));
+            const T expected = std::min(q,T(10))*T(100)
+                + T(100)*middle + middle*middle/T(90)
+                + T(103)*last + last*last/T(100);
+            require(std::abs(*book.buy_base(q)-expected) < T(1e-9), "prepared integral changed");
+        }
+        require(book.consume_buy(T(100)), "prepared book consumption failed");
+        auto copy = book;
+        require(copy.consume_buy(T(50)) && *book.ask_capacity() == T(100), "prepared copy mutated original");
+        require(std::abs(*book.buy_base(T(50))-T(5175)) < T(1e-9), "partial prepared integral changed");
+        require(cursor.advance(2) && *book.ask_capacity() == T(100), "same snapshot replenished consumed depth");
+    };
+    check(double{});
+    check(static_cast<long double>(0));
+    auto invalid = data;
+    invalid.asks[0].quantity = -1;
+    bool rejected = false;
+    try { arb::events::CexDepthTape bad({invalid}); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, "prepared tape accepted invalid market data");
 }
 
 void native_sizer_uses_finite_depth() {
@@ -173,6 +211,7 @@ int main() {
     consume_copy_and_reset();
     invalid_and_closed();
     linear_depth_integrates_marginal_prices();
+    prepared_tape_quotes_match_piecewise_integrals();
     native_sizer_uses_finite_depth();
     std::cout << "test_cex_depth: PASSED\n";
 }

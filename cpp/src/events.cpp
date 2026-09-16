@@ -1,5 +1,6 @@
 // Events module - implementation (non-templated)
 #include "events/loader.hpp"
+#include "events/cex_depth.hpp"
 
 #include <boost/json.hpp>
 #include <boost/json/basic_parser_impl.hpp>
@@ -360,6 +361,48 @@ std::vector<Event> gen_events(const std::vector<Candle>& cs) {
         return a.ts < b.ts;
     });
     return evs;
+}
+
+std::vector<Event> gen_mixed_depth_events(
+    std::vector<Candle>& candles, const events::CexDepthTape& depth,
+    uint64_t observation_interval_s, uint64_t max_age_s, uint64_t start_ts) {
+    if (!observation_interval_s)
+        throw std::invalid_argument("observation_interval_s must be positive");
+    const auto candle_events = gen_events(candles);
+    if (candle_events.empty()) return {};
+    constexpr uint64_t NS = 1'000'000'000ULL;
+    const uint64_t first_ns = depth.snapshots().front().available_ns;
+    uint64_t depth_ts = std::max({start_ts, candle_events.front().ts,
+        first_ns / NS + (first_ns % NS != 0)});
+    const uint64_t end_ts = candle_events.back().ts;
+    bool depth_pending = depth_ts <= end_ts;
+    events::CexDepthCursor<double> cursor(depth, max_age_s);
+    std::vector<Event> mixed;
+    size_t candle_event_idx = 0;
+    while (candle_event_idx < candle_events.size() || depth_pending) {
+        const bool observation = depth_pending &&
+            (candle_event_idx == candle_events.size() ||
+             depth_ts <= candle_events[candle_event_idx].ts);
+        const uint64_t ts = observation ? depth_ts : candle_events[candle_event_idx].ts;
+        // Use the execution cursor's publication and exact age-boundary rules.
+        // An exhausted but fresh book is still depth; it must not gain flat liquidity.
+        const auto mid = cursor.advance(ts);
+        if (observation) {
+            if (mid) {
+                if (candles.size() > std::numeric_limits<uint32_t>::max())
+                    throw std::invalid_argument("Mixed observation indices exceed uint32_t");
+                mixed.push_back({ts, *mid, 0.0, 0, 0.0, static_cast<uint32_t>(candles.size())});
+                candles.push_back({ts, *mid, *mid, *mid, *mid, 0.0});
+            }
+            // Preserve the clock across gaps, without emitting stale depth events.
+            if (observation_interval_s > end_ts - depth_ts) depth_pending = false;
+            else depth_ts += observation_interval_s;
+        } else {
+            if (!mid) mixed.push_back(candle_events[candle_event_idx]);
+            ++candle_event_idx;
+        }
+    }
+    return mixed;
 }
 
 } // namespace arb

@@ -41,7 +41,9 @@ struct RunConfig {
     uint64_t user_swap_freq_s{0};
     T user_swap_size_frac{T(0.01)};
     T user_swap_thresh{T(0.05)};
+    T arb_report_rate{T(1)};
     const events::CexDepthTape* cex_depth{nullptr};
+    bool candle_fallback{false};
     const events::ObservedStateTape<T>* observed_state{nullptr};
     StateReconciliationMode state_reconciliation_mode{StateReconciliationMode::Off};
     uint64_t equalization_delay_s{60};
