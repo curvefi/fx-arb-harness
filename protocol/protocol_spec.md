@@ -208,6 +208,8 @@ not 100% of one reserve per swap.
     above `yb_round_trip_cost_coin0` (default 6: gas plus the searcher's
     retained floor) plus 1 coin0.
   - When no round trip pays, the fee-paying exchange may still act.
+  - The candidate override `pool.run.yb_lt_round_trip` (0 or 1) replaces the
+    session's `yb_arb` per candidate, so both modes can share one grid.
   - `yb_round_trips` counts committed round trips; `yb_releverage_trades`
     counts all fills.
 - Summary valuation is hourly for GM accounting and once at the final endpoint

@@ -16,12 +16,13 @@ struct StaticParameterDescriptor {
     std::string_view choices_json{};
 };
 
-inline constexpr std::array<StaticParameterDescriptor, 66> STATIC_PARAMETERS{{
+inline constexpr std::array<StaticParameterDescriptor, 67> STATIC_PARAMETERS{{
     {"pool.run.arb_report_count", "pool_overrides.run.arb_report_count", "real", "count", "binary64", "candidate", "0.0"},
     {"pool.run.arb_report_random_count", "pool_overrides.run.arb_report_random_count", "real", "count", "binary64", "candidate", "0.0"},
     {"pool.run.arb_report_offset", "pool_overrides.run.arb_report_offset", "real", "observations", "binary64", "candidate", "-1.0"},
     {"pool.run.arb_report_max_age_s", "pool_overrides.run.arb_report_max_age_s", "real", "seconds", "binary64", "candidate", "0.0"},
     {"pool.run.arb_report_rate", "pool_overrides.run.arb_report_rate", "real", "probability", "binary64", "candidate", "1.0"},
+    {"pool.run.yb_lt_round_trip", "pool_overrides.run.yb_lt_round_trip", "real", "flag", "binary64", "candidate", "0.0"},
     {"pool.tag", "pool_overrides.tag", "string", "identifier", "utf8", "candidate", ""},
     {"pool.initial_liquidity", "pool_overrides.pool.initial_liquidity", "real_pair", "token_amount", "binary64_from_wad_1e18", "candidate", ""},
     {"pool.A", "pool_overrides.pool.A", "real", "pool_raw", "binary64", "candidate", ""},

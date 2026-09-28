@@ -485,6 +485,7 @@ struct PoolOverride {
     std::optional<T> arb_report_count{};
     std::optional<T> arb_report_random_count{};
     std::optional<T> arb_report_offset{};
+    std::optional<T> yb_lt_round_trip{};  // 1 selects yb_arb=lt_round_trip, 0 levamm
     uint32_t pool_fields{0};
     uint32_t cost_fields{0};
 
@@ -532,6 +533,7 @@ struct PoolOverride {
         if (patch.arb_report_random_count.has_value()) arb_report_random_count = patch.arb_report_random_count;
         if (patch.arb_report_offset.has_value()) arb_report_offset = patch.arb_report_offset;
         if (patch.arb_report_rate.has_value()) arb_report_rate = patch.arb_report_rate;
+        if (patch.yb_lt_round_trip.has_value()) yb_lt_round_trip = patch.yb_lt_round_trip;
         if (patch.yb_releverage_fee.has_value()) {
             yb_releverage_fee = patch.yb_releverage_fee;
         }
@@ -591,7 +593,13 @@ PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
             throw std::runtime_error("candidate run override must be an object");
         }
         const auto& ro = run->as_object();
-        reject_unknown_fields(ro, {"yb_releverage_fee", "arb_report_rate", "arb_report_max_age_s", "arb_report_count", "arb_report_random_count", "arb_report_offset"}, "candidate run override");
+        reject_unknown_fields(ro, {"yb_releverage_fee", "arb_report_rate", "arb_report_max_age_s", "arb_report_count", "arb_report_random_count", "arb_report_offset", "yb_lt_round_trip"}, "candidate run override");
+        if (auto* flag = ro.if_contains("yb_lt_round_trip"); flag != nullptr) {
+            const T value = parse_plain_real<T>(*flag);
+            if (!(value == T(0) || value == T(1)))
+                throw std::runtime_error("yb_lt_round_trip must be 0 or 1");
+            out.yb_lt_round_trip = value;
+        }
         if (auto* count = ro.if_contains("arb_report_count"); count != nullptr) {
             const T value = parse_plain_real<T>(*count);
             const double number = static_cast<double>(value);

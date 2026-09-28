@@ -323,6 +323,9 @@ void execute_scenario_job(
         run_cfg.yb_cash_multiplier = session_cfg.yb_cash_multiplier;
         run_cfg.yb_min_net_profit_coin0 = session_cfg.yb_min_net_profit_coin0;
         run_cfg.yb_arb = session_cfg.yb_arb;
+        if (pool_override != nullptr && pool_override->yb_lt_round_trip.has_value())
+            run_cfg.yb_arb = *pool_override->yb_lt_round_trip != RealT(0)
+                ? arb::harness::YbArb::LtRoundTrip : arb::harness::YbArb::Levamm;
         run_cfg.yb_round_trip_cost_coin0 = session_cfg.yb_round_trip_cost_coin0;
         run_cfg.yb_initial_state = session_cfg.yb_initial_state;
 
@@ -365,6 +368,8 @@ void execute_scenario_job(
             effective["pool.run.arb_report_random_count"] = static_cast<double>(run_cfg.arb_report_random_count);
             effective["pool.run.arb_report_offset"] = static_cast<double>(run_cfg.arb_report_offset);
             effective["pool.run.arb_report_max_age_s"] = static_cast<double>(run_cfg.arb_report_max_age_s);
+            effective["pool.run.yb_lt_round_trip"] =
+                run_cfg.yb_arb == arb::harness::YbArb::LtRoundTrip ? 1.0 : 0.0;
             effective["pool.run.arb_report_rate"] =
                 static_cast<double>(run_cfg.arb_report_rate);
             if (run_cfg.yb_initial_state && run_cfg.yb_mode != arb::harness::YbMode::Off) {
