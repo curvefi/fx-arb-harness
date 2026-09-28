@@ -30,6 +30,11 @@ enum class MetricProfile : uint8_t {
 };
 
 
+// How YieldBasis rebalancing reaches the LEVAMM: the fee-paying exchange only,
+// or also the fee-free LT deposit + emergency_withdraw round trip that live
+// searchers run (active_2l only).
+enum class YbArb : uint8_t { Levamm = 0, LtRoundTrip };
+
 template <typename T>
 struct RunConfig {
     T min_swap_frac{T(1e-6)};
@@ -60,6 +65,8 @@ struct RunConfig {
     T yb_releverage_fee{T(0.012)};
     T yb_cash_multiplier{T(1)};
     T yb_min_net_profit_coin0{T(1)};
+    YbArb yb_arb{YbArb::Levamm};
+    T yb_round_trip_cost_coin0{T(6)};  // gas plus the searcher's retained floor
     std::optional<YbInitialState<T>> yb_initial_state;
 
     // Slippage probe sampling

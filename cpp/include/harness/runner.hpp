@@ -110,6 +110,7 @@ struct PoolResult {
     std::array<double,3> policy_price_counters{-1,-1,-1};
     double yb_releverage_final_growth{-1.0};
     uint64_t yb_releverage_trades{0};
+    uint64_t yb_round_trips{0};
     uint64_t yb_releverage_gm_windows{0};
     uint64_t yb_releverage_gm_floored_windows{0};
     double yb_releverage_gm_floor_share{-1.0};
@@ -324,6 +325,7 @@ PoolResult<T> run_single_pool(
 #endif
         result.yb_releverage_final_growth = loop_result.yb_releverage_final_growth;
         result.yb_releverage_trades = loop_result.yb_releverage_trades;
+        result.yb_round_trips = loop_result.metrics.yb_round_trips;
         result.yb_releverage_gm_windows = loop_result.yb_releverage_gm_windows;
         result.yb_releverage_gm_floored_windows =
             loop_result.yb_releverage_gm_floored_windows;

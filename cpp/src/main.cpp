@@ -45,6 +45,7 @@ namespace fs = std::filesystem;
 using arb::harness::EventCursor;
 using arb::harness::MetricProfile;
 using arb::harness::YbMode;
+using arb::harness::YbArb;
 
 template <typename Enum>
 Enum session_option(
@@ -141,7 +142,7 @@ static const std::vector<std::string> CANONICAL_METRIC_FIELDS = {
 
     "policy_target_calls", "policy_actuator_holds", "policy_gate_rejections",
     "arb_offered_report_trades", "arb_withheld_report_trades", "yb_final_growth", "yb_fee",
-    "yb_releverage_trades", "yb_gm_windows", "yb_gm_floored_windows", "yb_gm_floor_share",
+    "yb_releverage_trades", "yb_round_trips", "yb_gm_windows", "yb_gm_floored_windows", "yb_gm_floor_share",
     "elapsed_ms", "total_notional_coin0", "lp_fee_coin0", "arb_pnl_coin0",
     "fee_capture_rate", "donations", "donation_coin0_total", "tvl_growth", "pool_nav_vs_hold",
     "early_stop_ts"
@@ -521,6 +522,7 @@ private:
                 "user_swap_size_frac", "user_swap_thresh",
                 "enable_slippage_probes", "yb_releverage_fee",
                 "yb_cash_multiplier", "yb_min_net_profit_coin0", "yb_initial_state", "yb_mode", "event_cursor",
+                "yb_arb", "yb_round_trip_cost_coin0",
                 "metric_profile", "early_stop_max_7d_rel_price_diff"
             })) {
             write_frame(std::cout, make_error_frame(
@@ -634,6 +636,16 @@ private:
                 {{"full_summary", MetricProfile::FullSummary}, {"grid_core", MetricProfile::GridCore}});
             cfg.yb_mode = session_option(req, "yb_mode", YbMode::Off,
                 {{"off", YbMode::Off}, {"active_2l", YbMode::Active2l}, {"reference_2l", YbMode::Reference2l}});
+            cfg.yb_arb = session_option(req, "yb_arb", YbArb::Levamm,
+                {{"levamm", YbArb::Levamm}, {"lt_round_trip", YbArb::LtRoundTrip}});
+            if (cfg.yb_arb == YbArb::LtRoundTrip && cfg.yb_mode != YbMode::Active2l)
+                throw std::invalid_argument("yb_arb='lt_round_trip' requires yb_mode='active_2l'");
+            if (const auto* cost = req.if_contains("yb_round_trip_cost_coin0")) {
+                if (!cost->is_number()) throw std::invalid_argument("yb_round_trip_cost_coin0 must be numeric");
+                cfg.yb_round_trip_cost_coin0 = static_cast<RealT>(arb::parse_input_double(*cost));
+                if (!std::isfinite(cfg.yb_round_trip_cost_coin0) || cfg.yb_round_trip_cost_coin0 < RealT(0))
+                    throw std::invalid_argument("yb_round_trip_cost_coin0 must be finite and nonnegative");
+            }
             cfg.enable_slippage_probes =
                 req.if_contains("enable_slippage_probes") &&
                 req.at("enable_slippage_probes").as_bool();

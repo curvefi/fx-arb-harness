@@ -43,7 +43,7 @@ evaluator process is required for another session.
     "tw_real_slippage_1pct", "tw_real_slippage_5pct",
     "tw_real_slippage_10pct", "trades", "n_rebalances",
     "arb_guarded_loss_coin0", "yb_apy", "yb_apy_gm", "yb_gm30", "yb_gm60", "yb_gm90", "yb_final_growth",
-    "yb_fee", "yb_releverage_trades", "yb_gm_windows",
+    "yb_fee", "yb_releverage_trades", "yb_round_trips", "yb_gm_windows",
     "yb_gm_floored_windows", "yb_gm_floor_share", "elapsed_ms",
     "total_notional_coin0", "lp_fee_coin0", "arb_pnl_coin0",
     "fee_capture_rate", "donations", "donation_coin0_total", "tvl_growth"
@@ -194,6 +194,22 @@ not 100% of one reserve per swap.
 - The enabled modes use `yb_releverage_fee` and `yb_cash_multiplier`, evaluate
   after native arbitrage at every event, and hedge at the event price.
 - Native CEX fees and gas are not charged to either YB actor.
+- `yb_arb` selects how `active_2l` rebalancing reaches the LEVAMM.
+  - `levamm` (default) uses only the fee-paying LEVAMM exchange.
+  - `lt_round_trip` first tries the live searchers' LT `deposit` +
+    `emergency_withdraw` in one transaction. The deposit adds balanced pool
+    liquidity whose cash leg is borrowed from LEVAMM idle cash; the add runs
+    the pool's price update and pays its noise/spam fee. The withdrawal
+    returns the new shares' pro-rata collateral and debt.
+  - LT shares follow the LEVAMM value x0, which is homogeneous of degree one,
+    so the LEVAMM moves along its own curve at the post-add oracle, toward the
+    pool's cash-per-LP ratio, without the exchange fee.
+  - The depositor hedges net coin1 at the external bid/ask and needs profit
+    above `yb_round_trip_cost_coin0` (default 6: gas plus the searcher's
+    retained floor) plus 1 coin0.
+  - When no round trip pays, the fee-paying exchange may still act.
+  - `yb_round_trips` counts committed round trips; `yb_releverage_trades`
+    counts all fills.
 - Summary valuation is hourly for GM accounting and once at the final endpoint
   for raw APY.
 

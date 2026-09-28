@@ -210,6 +210,7 @@ void extract_metrics_from_pool_result(
     m["yb_final_growth"] = res.yb_releverage_final_growth;
     m["yb_fee"] = static_cast<double>(res.yb_releverage_fee);
     m["yb_releverage_trades"] = static_cast<double>(res.yb_releverage_trades);
+    m["yb_round_trips"] = static_cast<double>(res.yb_round_trips);
     m["yb_gm_windows"] = static_cast<double>(res.yb_releverage_gm_windows);
     m["yb_gm_floored_windows"] = static_cast<double>(res.yb_releverage_gm_floored_windows);
     m["yb_gm_floor_share"] = res.yb_releverage_gm_floor_share;
@@ -321,6 +322,8 @@ void execute_scenario_job(
                 : session_cfg.yb_releverage_fee;
         run_cfg.yb_cash_multiplier = session_cfg.yb_cash_multiplier;
         run_cfg.yb_min_net_profit_coin0 = session_cfg.yb_min_net_profit_coin0;
+        run_cfg.yb_arb = session_cfg.yb_arb;
+        run_cfg.yb_round_trip_cost_coin0 = session_cfg.yb_round_trip_cost_coin0;
         run_cfg.yb_initial_state = session_cfg.yb_initial_state;
 
         std::vector<arb::harness::Action<RealT>>* actions_ptr = nullptr;

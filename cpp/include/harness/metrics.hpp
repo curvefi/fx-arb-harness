@@ -65,6 +65,7 @@ struct Metrics {
     std::array<T, 2> donation_amounts_total{T(0), T(0)};
 
     size_t yb_2l_fires{0};
+    size_t yb_round_trips{0};
 };
 
 struct TimeWeightedSummary {

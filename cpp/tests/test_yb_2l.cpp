@@ -380,6 +380,31 @@ int main() {
 
     require(checked, "test inputs must produce a cash3 atomic real-leg fill");
 
+    // LT deposit + emergency_withdraw: inside the LEVAMM fee band only the
+    // fee-free round trip acts, and the LEVAMM keeps exactly the pool's
+    // circulating LP as collateral.
+    bool round_trip_checked = false;
+    for (size_t coin : {0, 1}) for (double swap : {0.02, 0.05, 0.1}) for (double rel : {0.99, 0.995, 1.005, 1.01}) {
+        Pool pool = make_pool();
+        auto actor = Actor::fresh_2l(pool, 0.0145, 0.012, TS, 3.0);
+        pool.exchange(coin, 1 - coin, pool.balances[coin] * swap, 0.0);  // imbalance the deposit ratio
+        const double price = pool.get_p() * rel;
+        Pool fee_pool = pool;
+        auto fee_actor = actor;
+        Actor::Costs costs;
+        if (fee_actor.try_fire(fee_pool, price, TS + 3600, costs).fired) continue;
+        costs.lt_round_trip = true;
+        const auto result = actor.try_fire(pool, price, TS + 3600, costs);
+        if (!result.fired) continue;
+        const double circulating = pool.totalSupply - pool.donation_shares - fx::PoolTraits<double>::MINIMUM_LIQUIDITY();
+        require(result.round_trip && actor.round_trips() == 1 && result.fill_adds == 1 && result.fill_removes == 1 &&
+                    result.net_profit > costs.round_trip_cost_coin0 &&
+                    std::fabs(actor.state().collateral - circulating) <= 1e-9 * circulating,
+                "round trip did not keep LEVAMM collateral equal to the pool's circulating LP");
+        round_trip_checked = true;
+    }
+    require(round_trip_checked, "no fee-band state produced an LT round trip");
+
     std::puts("YieldBasis 2L atomic route checks: OK");
     return 0;
 }

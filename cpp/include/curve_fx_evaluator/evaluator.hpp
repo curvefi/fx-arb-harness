@@ -76,6 +76,8 @@ struct SessionConfig {
     T yb_releverage_fee{static_cast<T>(0.012)};
     T yb_cash_multiplier{static_cast<T>(1.0)};
     T yb_min_net_profit_coin0{static_cast<T>(1.0)};
+    arb::harness::YbArb yb_arb{arb::harness::YbArb::Levamm};
+    T yb_round_trip_cost_coin0{static_cast<T>(6.0)};
     std::optional<arb::harness::YbInitialState<T>> yb_initial_state;
 
 };

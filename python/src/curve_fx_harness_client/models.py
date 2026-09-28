@@ -114,6 +114,8 @@ class OpenSessionFrame(ProtocolModel):
     yb_releverage_fee: Optional[FiniteFloat] = None
     yb_cash_multiplier: FiniteFloat = 1.0
     yb_min_net_profit_coin0: Optional[FiniteFloat] = Field(default=None, ge=0)
+    yb_arb: Literal["levamm", "lt_round_trip"] = "levamm"
+    yb_round_trip_cost_coin0: Optional[FiniteFloat] = Field(default=None, ge=0)
     yb_initial_state: Optional[YbInitialState] = None
     early_stop_max_7d_rel_price_diff: Optional[FiniteFloat] = Field(default=None, ge=0)
 

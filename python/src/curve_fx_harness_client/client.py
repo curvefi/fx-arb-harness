@@ -265,6 +265,8 @@ class EvaluatorClient:
         yb_releverage_fee: Optional[float] = None,
         yb_cash_multiplier: float = 1.0,
         yb_min_net_profit_coin0: Optional[float] = None,
+        yb_arb: str = "levamm",
+        yb_round_trip_cost_coin0: Optional[float] = None,
         yb_initial_state: Optional[Union[YbInitialState, Dict[str, Any]]] = None,
         trade_flow_path: Optional[Union[str, Path]] = None,
         event_mode: str = "candles",
@@ -324,6 +326,8 @@ class EvaluatorClient:
                 yb_releverage_fee=yb_releverage_fee,
                 yb_cash_multiplier=yb_cash_multiplier,
                 yb_min_net_profit_coin0=yb_min_net_profit_coin0,
+                yb_arb=yb_arb,
+                yb_round_trip_cost_coin0=yb_round_trip_cost_coin0,
                 yb_initial_state=yb_initial_state,
                 early_stop_max_7d_rel_price_diff=early_stop_max_7d_rel_price_diff,
             )
@@ -332,6 +336,8 @@ class EvaluatorClient:
             # The default candle mode stays implicit on the wire.
             if frame.event_mode == "candles":
                 request.pop("event_mode")
+            if frame.yb_arb == "levamm":
+                request.pop("yb_arb")
             resp_data = self._transact(request)
             session_ready = SessionReadyFrame.model_validate(resp_data)
             self._current_session_id = session_id

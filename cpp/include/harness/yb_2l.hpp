@@ -53,6 +53,11 @@ struct Yb2LCosts {
     T market_basis_bps{};
     std::array<T, 2> execution_bps{T(0), T(0)};
     T notional_cap_coin0{};
+    // LT deposit + emergency_withdraw rebalancing, tried before the
+    // fee-paying LEVAMM exchange, and its fixed cost (gas plus the
+    // searcher's retained floor after the builder payment).
+    bool lt_round_trip{false};
+    T round_trip_cost_coin0{T(6)};
 };
 
 template <typename T>
@@ -119,6 +124,7 @@ struct Yb2LResult {
     size_t fill_adds{0};
     size_t fill_removes{0};
     size_t fill_add_price_scale_moves{0};
+    bool round_trip{false};
     bool fill_leg_aborted{false};
     bool postadd_aborted{false};
 };
@@ -215,6 +221,7 @@ public:
     bool enabled() const { return enabled_; }
     const State& state() const { return state_; }
     uint64_t fires() const { return fires_; }
+    uint64_t round_trips() const { return round_trips_; }
     const T& shadow_gap_max() const { return shadow_gap_max_; }
     const T& shadow_gap_last() const { return shadow_gap_last_; }
     uint64_t shadow_checks() const { return shadow_checks_; }
@@ -265,7 +272,8 @@ public:
         const auto q = marginal_quote(pool, external_price, timestamp, costs);
         if (q.hard_abstain != Yb2LAbstainReason::None) return false;
         const T raw = q.x / state_.collateral;
-        const T factor = one() - state_.fee;
+        // A round trip pays no exchange fee: its band is the fee-free one.
+        const T factor = costs.lt_round_trip ? one() : one() - state_.fee;
         if (!std::isfinite(raw) || !std::isfinite(q.fair_bid) || !std::isfinite(q.fair_ask)) return true;
         return raw / factor < q.fair_bid || raw * factor > q.fair_ask;
     }
@@ -286,6 +294,10 @@ public:
             timestamp < state_.rate_time) {
             result.abstain = Yb2LAbstainReason::InvalidState;
             return result;
+        }
+        if (costs.lt_round_trip) {
+            if (try_round_trip(pool, external_cex_price, timestamp, costs, result)) return result;
+            result = Yb2LResult<T>{};  // No profitable round trip: the fee-paying route may still act.
         }
 
         Decision decision = compute_decision(
@@ -433,42 +445,9 @@ public:
 
 
         Yb2LActor donation_candidate = *this;
-        donation_candidate.accrue_interest(timestamp);
-        const T donation = donation_candidate.state_.lt_stable_balance;
-        if (donation > T(0)) {
-            result.donation = donation;
-            result.donation_min_mint = (one() - state_.lt_donation_discount)
-                * donation / pool.lp_price_at(timestamp);
-            result.price_scale_before_donation = pool.cached_price_scale;
-            result.virtual_price_before_donation = pool.get_virtual_price();
-            result.xcp_profit_before_donation = pool.xcp_profit;
-            std::string rejection;
-            try {
-                const auto minted = pool.try_add_donation(
-                    {donation, T(0)}, result.donation_min_mint, rejection
-                );
-                if (!minted.has_value()) {
-                    result.donation_reject =
-                        classify_donation_reject(rejection);
-                    rollback_route(false, false);
-                    return result;
-                }
-            } catch (...) {
-                result.donation_reject =
-                    Yb2LDonationReject::TweakThrow;
-                rollback_route(false, false);
-                return result;
-            }
-
-            donation_candidate.state_.lt_stable_balance = T(0);
-            donation_candidate.donated_interest_total_ += donation;
-            result.donation_committed = true;
-            result.price_scale_after_donation = pool.cached_price_scale;
-            result.virtual_price_after_donation = pool.get_virtual_price();
-            result.xcp_profit_after_donation = pool.xcp_profit;
-            result.donation_price_scale_moved =
-                result.price_scale_after_donation !=
-                    result.price_scale_before_donation;
+        if (!donate_interest(pool, timestamp, result, donation_candidate)) {
+            rollback_route(false, false);
+            return result;
         }
 
         if (result.direction == 0) {
@@ -489,7 +468,7 @@ public:
 private:
     struct MarginalQuote {
         Yb2LAbstainReason hard_abstain{Yb2LAbstainReason::None};
-        T oracle{}, debt{}, old_x0{}, x{}, fair_bid{}, fair_ask{}, ask{};
+        T oracle{}, debt{}, old_x0{}, x{}, fair_bid{}, fair_ask{}, bid{}, ask{};
     };
 
     struct FillProposal {
@@ -522,11 +501,13 @@ private:
     struct AddLegResult {
         T minted{};
         bool price_scale_moved{false};
+        std::array<T, 2> amounts{};
     };
 
     State state_{};
     bool enabled_{false};
     uint64_t fires_{0};
+    uint64_t round_trips_{0};
     T initial_unsettled_interest_{};
     T accrued_interest_total_{};
     T donated_interest_total_{};
@@ -563,6 +544,7 @@ private:
             return AddLegResult{
                 minted,
                 pool.cached_price_scale != ps_before,
+                amounts,
             };
         } catch (...) {
             return std::nullopt;
@@ -641,6 +623,7 @@ private:
         decision.x = x;
         decision.fair_bid = fair_lp_bid;
         decision.fair_ask = fair_lp_ask;
+        decision.bid = bid;
         decision.ask = ask;
         return decision;
     }
@@ -700,6 +683,160 @@ private:
             decision.chosen_idx = 1;
         }
         return decision;
+    }
+
+    // Accrue interest into donation_candidate and donate it to the pool. A
+    // rejected donation is reported; the caller rolls its route back.
+    template <typename Pool>
+    bool donate_interest(Pool& pool, uint64_t timestamp, Yb2LResult<T>& result,
+                         Yb2LActor& donation_candidate) const {
+        donation_candidate.accrue_interest(timestamp);
+        const T donation = donation_candidate.state_.lt_stable_balance;
+        if (!(donation > T(0))) return true;
+        result.donation = donation;
+        result.donation_min_mint = (one() - state_.lt_donation_discount)
+            * donation / pool.lp_price_at(timestamp);
+        result.price_scale_before_donation = pool.cached_price_scale;
+        result.virtual_price_before_donation = pool.get_virtual_price();
+        result.xcp_profit_before_donation = pool.xcp_profit;
+        std::string rejection;
+        try {
+            const auto minted = pool.try_add_donation(
+                {donation, T(0)}, result.donation_min_mint, rejection
+            );
+            if (!minted.has_value()) {
+                result.donation_reject = classify_donation_reject(rejection);
+                return false;
+            }
+        } catch (...) {
+            result.donation_reject = Yb2LDonationReject::TweakThrow;
+            return false;
+        }
+        donation_candidate.state_.lt_stable_balance = T(0);
+        donation_candidate.donated_interest_total_ += donation;
+        result.donation_committed = true;
+        result.price_scale_after_donation = pool.cached_price_scale;
+        result.virtual_price_after_donation = pool.get_virtual_price();
+        result.xcp_profit_after_donation = pool.xcp_profit;
+        result.donation_price_scale_moved =
+            result.price_scale_after_donation != result.price_scale_before_donation;
+        return true;
+    }
+
+    // LT deposit + emergency_withdraw in one transaction, as live searchers
+    // run it. The deposit adds balanced pool liquidity whose cash leg is
+    // borrowed from LEVAMM idle cash; the withdrawal returns the new LT
+    // shares' pro-rata collateral and debt. Shares are minted in proportion to
+    // the LEVAMM value x0, which is homogeneous of degree one, so x0 is
+    // preserved at the post-add oracle: the LEVAMM moves along its own curve
+    // toward the pool's cash-per-LP ratio without the exchange fee. The add
+    // runs the pool's price update first, which can itself move the oracle.
+    // The depositor hedges the net coin1 at the external bid/ask.
+    template <typename Pool>
+    bool try_round_trip(Pool& pool, const T& price, uint64_t timestamp,
+                        const Costs& costs, Yb2LResult<T>& result) {
+        const auto quote = marginal_quote(pool, price, timestamp, costs);
+        if (quote.hard_abstain != Yb2LAbstainReason::None) return false;
+        const T supply = pool.totalSupply;
+        const T cash_per_lp = pool.balances[0] / supply;
+        const T coin1_per_lp = pool.balances[1] / supply;
+        const T collateral = state_.collateral, debt = quote.debt;
+        if (!(cash_per_lp > T(0)) || !(coin1_per_lp > T(0))) return false;
+        const T cost = costs.transaction_coin0 + costs.round_trip_cost_coin0;
+        const auto hedge = [&](const T& coin1) { return coin1 * (coin1 > T(0) ? quote.bid : quote.ask); };
+        // The balanced add still pays the pool's noise (and any spam) fee: the
+        // depositor funds lp / (1 - fee) worth of coins, which stays in the
+        // pool and lifts the LP oracle for the pro-rata exit.
+        const T add_fee = expected_p1_add_fee(pool, timestamp);
+        if (!(add_fee < one())) return false;
+        // Depositor profit for depositing `lp` LP, before the add's price update.
+        const auto planned = [&](const T& lp) {
+            const T gross = lp / (one() - add_fee);
+            const T cash_in = cash_per_lp * gross, coin1_in = coin1_per_lp * gross;
+            const T lift = (supply + gross) / (supply + lp);
+            const T oracle = quote.oracle * lift;
+            const auto base = x0(oracle, collateral, debt, false);
+            const auto grown = x0(oracle, collateral + lp, debt + cash_in, true);
+            if (!base || !grown) return -std::numeric_limits<T>::infinity();
+            const T frac = (*grown - *base) / *grown;
+            const T withdrawn = frac * (collateral + lp);
+            const T cash_out = withdrawn * cash_per_lp * lift, coin1_out = withdrawn * coin1_per_lp * lift;
+            return cash_out - frac * (debt + cash_in) + hedge(coin1_out - coin1_in);
+        };
+        const T max_lp = std::min(state_.stable_balance / cash_per_lp, supply);
+        if (!(max_lp > T(0))) return false;
+        // Profit rises toward the fair LP price and falls past it: golden
+        // section over log size.
+        constexpr T GOLDEN = T(0.6180339887498949);
+        T lo = std::log(max_lp) - T(25), hi = std::log(max_lp);
+        T a = hi - GOLDEN * (hi - lo), b = lo + GOLDEN * (hi - lo);
+        T fa = planned(std::exp(a)), fb = planned(std::exp(b));
+        for (int i = 0; i < 60; ++i) {
+            if (fa < fb) { lo = a; a = b; fa = fb; b = lo + GOLDEN * (hi - lo); fb = planned(std::exp(b)); }
+            else { hi = b; b = a; fb = fa; a = hi - GOLDEN * (hi - lo); fa = planned(std::exp(a)); }
+        }
+        T lp = std::exp(fa > fb ? a : b);
+        if (planned(max_lp) > std::max(fa, fb)) lp = max_lp;
+        if (!(planned(lp) - cost > T(YB_2L_MIN_PROFIT_COIN0))) return false;
+
+        const T circulating = pool.totalSupply - pool.donation_shares - PoolTraits::MINIMUM_LIQUIDITY();
+        if (std::fabs(state_.collateral - circulating) > T(1e-2)) return false;
+        Yb2LActor before = *this;
+        PoolTransactionSnapshot<Pool> pool_before(pool);
+        const auto rollback = [&] { pool_before.restore(pool); *this = std::move(before); return false; };
+
+        const auto add = add_liquidity_to_mint(pool, lp);
+        if (!add) return rollback();
+        advance_debt(timestamp);
+        const T borrowed = add->amounts[0];
+        if (borrowed > state_.stable_balance) return rollback();
+        const T oracle = lp_oracle(pool);
+        const auto base = x0(oracle, state_.collateral, state_.debt, false);
+        const auto grown = x0(oracle, state_.collateral + add->minted, state_.debt + borrowed, true);
+        if (!base || !grown) return rollback();
+        const T frac = (*grown - *base) / *grown;
+        const T withdrawn = frac * (state_.collateral + add->minted);
+        const T repaid = frac * (state_.debt + borrowed);
+        std::array<T, 2> coins{};
+        try {
+            coins = pool.remove_liquidity(withdrawn, {T(0), T(0)});
+        } catch (...) {
+            return rollback();
+        }
+        const T profit = coins[0] - repaid + hedge(coins[1] - add->amounts[1]) - cost;
+        if (!(profit > T(YB_2L_MIN_PROFIT_COIN0))) return rollback();
+
+        const T pending = pending_interest();
+        const T collateral_before = state_.collateral, debt_before = state_.debt;
+        state_.collateral = (one() - frac) * (state_.collateral + add->minted) / one();
+        state_.debt = (one() - frac) * (state_.debt + borrowed) / one();
+        state_.stable_balance += repaid - borrowed;
+        state_.redeemed += repaid;
+        state_.minted = state_.debt + state_.redeemed - pending;
+        result.fired = true;
+        result.round_trip = true;
+        result.direction = state_.collateral < collateral_before ? 0 : 1;
+        result.input = std::fabs(debt_before - state_.debt);
+        result.output = std::fabs(collateral_before - state_.collateral);
+        result.net_profit = profit;
+        result.lp_oracle = oracle;
+        result.fill_adds = 1;
+        result.fill_removes = 1;
+        result.fill_add_price_scale_moves = add->price_scale_moved;
+        result.levamm_price_before = quote.x / collateral;
+        result.levamm_price_after = (*base - state_.debt) / state_.collateral;
+        ++fires_;
+        ++round_trips_;
+        Yb2LActor donation_candidate = *this;
+        if (!donate_interest(pool, timestamp, result, donation_candidate)) {
+            const auto reject = result.donation_reject;
+            rollback();
+            result = Yb2LResult<T>{};
+            result.donation_reject = reject;
+            return false;
+        }
+        *this = std::move(donation_candidate);
+        return true;
     }
 
     explicit Yb2LActor(State state)

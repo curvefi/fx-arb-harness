@@ -16,7 +16,7 @@ struct StaticParameterDescriptor {
     std::string_view choices_json{};
 };
 
-inline constexpr std::array<StaticParameterDescriptor, 64> STATIC_PARAMETERS{{
+inline constexpr std::array<StaticParameterDescriptor, 66> STATIC_PARAMETERS{{
     {"pool.run.arb_report_count", "pool_overrides.run.arb_report_count", "real", "count", "binary64", "candidate", "0.0"},
     {"pool.run.arb_report_random_count", "pool_overrides.run.arb_report_random_count", "real", "count", "binary64", "candidate", "0.0"},
     {"pool.run.arb_report_offset", "pool_overrides.run.arb_report_offset", "real", "observations", "binary64", "candidate", "-1.0"},
@@ -76,6 +76,8 @@ inline constexpr std::array<StaticParameterDescriptor, 64> STATIC_PARAMETERS{{
     {"run.yb_releverage_fee", "open_session.yb_releverage_fee", "real", "fee_fraction", "binary64", "session", "0.012"},
     {"run.yb_cash_multiplier", "open_session.yb_cash_multiplier", "real", "ratio", "binary64", "session", "1.0"},
     {"run.yb_min_net_profit_coin0", "open_session.yb_min_net_profit_coin0", "real", "coin0", "binary64", "session", "1.0"},
+    {"run.yb_arb", "open_session.yb_arb", "enum", "yb_arb", "utf8", "session", "\"levamm\"", "[\"levamm\",\"lt_round_trip\"]"},
+    {"run.yb_round_trip_cost_coin0", "open_session.yb_round_trip_cost_coin0", "real", "coin0", "binary64", "session", "6.0"},
     {"run.yb_initial_state", "open_session.yb_initial_state", "object", "yb_checkpoint", "json_object_finite_binary64", "session", ""},
     {"run.observation.kind", "evaluate_batch.observation.kind", "enum", "observation_kind", "utf8", "observation", "\"summary\"", "[\"summary\",\"full_trace\"]"},
     {"run.observation.trace_interval", "evaluate_batch.observation.trace_interval", "integer", "events", "uint64", "observation", "1"},

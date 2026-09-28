@@ -203,6 +203,8 @@ EventLoopResult<T> run_event_loop_impl(
     if constexpr (EnableYb) {
         if constexpr (std::is_floating_point_v<T>) {
             if (yb_mode == YbMode::Active2l) {
+                yb->actor_costs.lt_round_trip = cfg.yb_arb == YbArb::LtRoundTrip;
+                yb->actor_costs.round_trip_cost_coin0 = cfg.yb_round_trip_cost_coin0;
                 yb->actor = cfg.yb_initial_state
                     ? Yb2LActor<T>::from_state(*cfg.yb_initial_state)
                     : Yb2LActor<T>::fresh_2l(
@@ -714,6 +716,7 @@ EventLoopResult<T> run_event_loop_impl(
             if (!actor_result.fired) return;
 
             ++m.yb_2l_fires;
+            m.yb_round_trips += actor_result.round_trip;
             did_any_trade = true;
             m.n_rebalances += actor_result.fill_add_price_scale_moves;
             if (actor_result.fill_adds > 0 ||
@@ -1020,6 +1023,10 @@ EventLoopResult<T> run_event_loop(
     if (!cfg.trade_flow || events.flow_bin.size() != events.size() ||
         events.fill_bid.size() != events.size() || events.fill_ask.size() != events.size())
         throw std::invalid_argument("the event loop requires indexed trade-flow events");
+    if (cfg.yb_arb == YbArb::LtRoundTrip && cfg.yb_mode != YbMode::Active2l)
+        throw std::invalid_argument("yb_arb='lt_round_trip' requires yb_mode='active_2l'");
+    if (!std::isfinite(static_cast<double>(cfg.yb_round_trip_cost_coin0)) || cfg.yb_round_trip_cost_coin0 < T(0))
+        throw std::invalid_argument("yb_round_trip_cost_coin0 must be finite and nonnegative");
     if (cfg.event_cursor == EventCursor::FastSkip &&
         (cfg.metric_profile != MetricProfile::FullSummary || cfg.yb_mode == YbMode::Reference2l))
         throw std::invalid_argument("fast_skip requires full_summary and YB off or active_2l");
