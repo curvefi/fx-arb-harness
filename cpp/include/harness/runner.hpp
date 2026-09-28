@@ -81,11 +81,11 @@ struct PoolResult {
 
     // Slippage probes
     SlippageProbes<T> slippage_probes{};
-    ReconciliationSummary reconciliation{};
 
     // Start/end timestamps
     uint64_t t_start{0};
     uint64_t t_end{0};
+    uint64_t early_stop_ts{0};
 
     // Initial state (for APY calculations)
     T tvl_start{0};
@@ -93,9 +93,21 @@ struct PoolResult {
     T donation_frequency{0};
     double apy_net_gm{-1.0};
     double apy_net_robust_90d{-1.0};
+    double pool_nav_vs_hold{-1.0};
     T yb_releverage_fee{T(0)};
     double yb_releverage_apy{-1.0};
     double yb_releverage_apy_gm{-1.0};
+    double yb_external_equity_eth{-1.0};
+    double yb_external_growth_eth{-1.0};
+    double yb_external_max_drawdown_hourly{-1.0};
+    double yb_gm30{-1.0};
+    double yb_gm60{-1.0};
+    double yb_gm30_floor_share{-1.0};
+    double yb_gm30_unfloored{-1.0};
+    uint64_t yb_gm30_windows{0};
+    double yb_gm60_floor_share{-1.0};
+    double yb_price_scale_hourly_qv{-1.0};
+    std::array<double,3> policy_price_counters{-1,-1,-1};
     double yb_releverage_final_growth{-1.0};
     uint64_t yb_releverage_trades{0};
     uint64_t yb_releverage_gm_windows{0};
@@ -285,17 +297,31 @@ PoolResult<T> run_single_pool(
         result.metrics = loop_result.metrics;
         result.tw_metrics = loop_result.tw_metrics;
         result.slippage_probes = loop_result.slippage_probes;
-        result.reconciliation = loop_result.reconciliation;
         result.t_start = loop_result.t_start;
         result.t_end = loop_result.t_end;
+        result.early_stop_ts = loop_result.early_stop_ts;
         result.tvl_start = loop_result.tvl_start;
         result.donation_apy = loop_result.donation_apy;
         result.donation_frequency = pool_init.donation_frequency;
         result.apy_net_gm = loop_result.apy_net_gm;
         result.apy_net_robust_90d = loop_result.apy_net_robust_90d;
+        result.pool_nav_vs_hold = loop_result.pool_nav_vs_hold;
         result.yb_releverage_fee = loop_result.yb_releverage_fee;
         result.yb_releverage_apy = loop_result.yb_releverage_apy;
         result.yb_releverage_apy_gm = loop_result.yb_releverage_apy_gm;
+        result.yb_external_equity_eth = loop_result.yb_external_equity_eth;
+        result.yb_external_growth_eth = loop_result.yb_external_growth_eth;
+        result.yb_external_max_drawdown_hourly = loop_result.yb_external_max_drawdown_hourly;
+        result.yb_gm30 = loop_result.yb_gm30;
+        result.yb_gm60 = loop_result.yb_gm60;
+        result.yb_gm30_floor_share = loop_result.yb_gm30_floor_share;
+        result.yb_gm30_unfloored = loop_result.yb_gm30_unfloored;
+        result.yb_gm30_windows = loop_result.yb_gm30_windows;
+        result.yb_gm60_floor_share = loop_result.yb_gm60_floor_share;
+        result.yb_price_scale_hourly_qv = loop_result.yb_price_scale_hourly_qv;
+#ifdef TWOCRYPTO_POLICY_HEADER
+        result.policy_price_counters = policy_price_diagnostics<pools::twocrypto_fx::ChallengeFeePolicy<T>>(pool.policy,0);
+#endif
         result.yb_releverage_final_growth = loop_result.yb_releverage_final_growth;
         result.yb_releverage_trades = loop_result.yb_releverage_trades;
         result.yb_releverage_gm_windows = loop_result.yb_releverage_gm_windows;

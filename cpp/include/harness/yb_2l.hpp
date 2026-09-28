@@ -254,6 +254,22 @@ public:
         };
     }
 
+    // Conservative no-trade band: dropping nonnegative fixed/add costs widens
+    // both executable opportunities. Uncertain inputs must reach full sizing.
+    template <typename Pool>
+    bool may_trade(const Pool& pool, const T& external_price, uint64_t timestamp,
+                   const Costs& costs) const {
+        if (!enabled_ || state_.killed || timestamp < state_.rate_time) return false;
+        if (costs.transaction_coin0 < T(0) || costs.leg_coin0[0] < T(0) || costs.leg_coin0[1] < T(0))
+            return true;
+        const auto q = marginal_quote(pool, external_price, timestamp, costs);
+        if (q.hard_abstain != Yb2LAbstainReason::None) return false;
+        const T raw = q.x / state_.collateral;
+        const T factor = one() - state_.fee;
+        if (!std::isfinite(raw) || !std::isfinite(q.fair_bid) || !std::isfinite(q.fair_ask)) return true;
+        return raw / factor < q.fair_bid || raw * factor > q.fair_ask;
+    }
+
     template <typename Pool>
     Yb2LResult<T> try_fire(
         Pool& pool,
@@ -471,6 +487,11 @@ public:
     }
 
 private:
+    struct MarginalQuote {
+        Yb2LAbstainReason hard_abstain{Yb2LAbstainReason::None};
+        T oracle{}, debt{}, old_x0{}, x{}, fair_bid{}, fair_ask{}, ask{};
+    };
+
     struct FillProposal {
         bool valid{false};
         size_t direction{0};
@@ -571,13 +592,13 @@ private:
     }
 
     template <typename Pool>
-    Decision compute_decision(
+    MarginalQuote marginal_quote(
         const Pool& pool,
         const T& external_cex_price,
         uint64_t timestamp,
         const Costs& costs
     ) const {
-        Decision decision;
+        MarginalQuote decision;
         const T debt = projected_debt(timestamp);
         const T oracle = lp_oracle(pool);
         decision.oracle = oracle;
@@ -615,6 +636,27 @@ private:
         const T fair_lp_ask = (
             pool.balances[0] + ask * pool.balances[1]
         ) / pool.totalSupply;
+        decision.debt = debt;
+        decision.old_x0 = *old_x0;
+        decision.x = x;
+        decision.fair_bid = fair_lp_bid;
+        decision.fair_ask = fair_lp_ask;
+        decision.ask = ask;
+        return decision;
+    }
+
+    template <typename Pool>
+    Decision compute_decision(
+        const Pool& pool, const T& external_cex_price, uint64_t timestamp,
+        const Costs& costs
+    ) const {
+        const auto quote = marginal_quote(pool, external_cex_price, timestamp, costs);
+        Decision decision;
+        decision.oracle = quote.oracle;
+        decision.hard_abstain = quote.hard_abstain;
+        if (decision.hard_abstain != Yb2LAbstainReason::None) return decision;
+        const T debt = quote.debt, oracle = quote.oracle, x = quote.x;
+        const T fair_lp_bid = quote.fair_bid, fair_lp_ask = quote.fair_ask;
         const T fee_factor = one() - state_.fee;
         const T add_fee = expected_p1_add_fee(pool, timestamp);
         const T effective_p1_fair = add_fee < one()
@@ -625,7 +667,7 @@ private:
         const T band_cost0 = fixed0 + T(YB_2L_MIN_PROFIT_COIN0);
         const T band_cost1 = fixed1 + T(YB_2L_MIN_PROFIT_COIN0);
         const T reference0 = pool.balances[0] * T(0.02L);
-        const T reference1 = pool.balances[1] * ask * T(0.02L);
+        const T reference1 = pool.balances[1] * quote.ask * T(0.02L);
         const T fixed_frac0 = reference0 > T(0)
             ? band_cost0 / reference0 : T(0);
         const T fixed_frac1 = reference1 > T(0)
@@ -639,13 +681,13 @@ private:
         const T executable_p1 = levamm_raw * fee_factor;
         if (executable_p2 < bid_edge) {
             decision.p2 = propose_fill(
-                0, oracle, *old_x0, debt, x, bid_edge * fee_factor,
+                0, oracle, quote.old_x0, debt, x, bid_edge * fee_factor,
                 fair_lp_bid, fixed0
             );
         }
         if (executable_p1 > ask_edge) {
             decision.p1 = propose_fill(
-                1, oracle, *old_x0, debt, x, ask_edge / fee_factor,
+                1, oracle, quote.old_x0, debt, x, ask_edge / fee_factor,
                 effective_p1_fair, fixed1
             );
         }

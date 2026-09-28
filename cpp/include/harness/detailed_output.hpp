@@ -37,6 +37,17 @@ struct DetailedEntry {
     T p_cex{};            // event price used for this tick
     T p_price_feed{};     // latest generic feed price available at this tick
     T fee{};              // dynamic fee at this point
+    double policy_base_fee{-1};     // Optional controller diagnostics; -1 unavailable.
+    double policy_fallback_fee{-1};
+    double policy_fee_signal{-1};
+    double policy_pressure_base{-1};
+    double policy_pressure_fallback{-1};
+    double policy_pressure_fresh_bumps{-1};
+    double policy_pressure_cached_bumps{-1};
+
+    double policy_target_calls{-1};
+    double policy_actuator_holds{-1};
+    double policy_gate_rejections{-1};
     T slippage_1pct_0to1{}; // current 1%-TVL real slippage, coin0 -> coin1
     T slippage_1pct_1to0{}; // current 1%-TVL real slippage, coin1 -> coin0
     uint64_t n_trades{0};  // cumulative trade count

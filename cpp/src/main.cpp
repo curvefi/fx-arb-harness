@@ -45,8 +45,6 @@ namespace fs = std::filesystem;
 using arb::harness::EventCursor;
 using arb::harness::MetricProfile;
 using arb::harness::YbMode;
-using arb::harness::ActorTimingMode;
-using arb::harness::StateReconciliationMode;
 
 template <typename Enum>
 Enum session_option(
@@ -134,10 +132,19 @@ static const std::vector<std::string> CANONICAL_METRIC_FIELDS = {
     "tw_avg_pool_fee", "min_pool_fee", "max_pool_fee",
     "tw_real_slippage_1pct", "tw_real_slippage_5pct",
     "tw_real_slippage_10pct", "trades", "n_rebalances",
-    "arb_guarded_loss_coin0", "yb_apy", "yb_apy_gm", "yb_final_growth", "yb_fee",
+    "arb_guarded_loss_coin0", "yb_apy", "yb_apy_gm", "yb_gm30", "yb_gm60", "yb_gm90",
+    "yb_gm30_floor_share", "yb_gm30_unfloored", "yb_gm30_windows", "yb_gm60_floor_share",
+    "yb_price_scale_hourly_qv",
+    "yb_external_equity_eth",
+    "yb_external_growth_eth",
+    "yb_external_max_drawdown_hourly",
+
+    "policy_target_calls", "policy_actuator_holds", "policy_gate_rejections",
+    "arb_offered_report_trades", "arb_withheld_report_trades", "yb_final_growth", "yb_fee",
     "yb_releverage_trades", "yb_gm_windows", "yb_gm_floored_windows", "yb_gm_floor_share",
     "elapsed_ms", "total_notional_coin0", "lp_fee_coin0", "arb_pnl_coin0",
-    "fee_capture_rate", "donations", "donation_coin0_total", "tvl_growth"
+    "fee_capture_rate", "donations", "donation_coin0_total", "tvl_growth", "pool_nav_vs_hold",
+    "early_stop_ts"
 };
 
 static const std::unordered_set<std::string> GRID_CORE_METRIC_FIELDS = {
@@ -146,7 +153,7 @@ static const std::unordered_set<std::string> GRID_CORE_METRIC_FIELDS = {
     "final_rel_price_diff", "trades", "n_rebalances",
     "arb_guarded_loss_coin0", "elapsed_ms", "fee_capture_rate",
     "donations", "donation_coin0_total", "tvl_growth", "avg_imbalance",
-    "detach_energy_ungated",
+    "detach_energy_ungated", "pool_nav_vs_hold", "early_stop_ts",
 };
 
 const json::object& canonical_metric_schema() {
@@ -323,7 +330,7 @@ json::object make_hello_frame() {
     caps.push_back("full_trace");
     caps.push_back("atomic_sidecars");
     caps.push_back("registered_grid_ranges");
-    caps.push_back("state_reconciliation");
+    caps.push_back("maker_trade_flow");
     hello["capabilities"] = caps;
 
     json::array yb_modes;
@@ -507,18 +514,14 @@ private:
         if (const auto field = unknown_field(req, {
                 "protocol", "type", "request_id", "session_id",
                 "template_path", "scenario_id", "market_path", "price_feed_path",
-                "cex_depth_path", "cex_depth_max_age_s",
-                "actor_timing_mode",
-                "observed_state_path", "state_reconciliation_mode",
-                "reset_threshold_bps", "equalization_delay_s", "observation_interval_s",
-                "event_mode",
+                "trade_flow_path", "event_mode", "candle_volume",
                 "pool_index", "n_candles", "start_time",
-                "end_time", "candle_filter", "min_swap", "max_swap",
+                "end_time", "excluded_time_ranges", "candle_filter", "min_swap", "max_swap",
                 "dustswap_freq_s", "user_swap_freq_s",
                 "user_swap_size_frac", "user_swap_thresh",
                 "enable_slippage_probes", "yb_releverage_fee",
                 "yb_cash_multiplier", "yb_min_net_profit_coin0", "yb_initial_state", "yb_mode", "event_cursor",
-                "metric_profile"
+                "metric_profile", "early_stop_max_7d_rel_price_diff"
             })) {
             write_frame(std::cout, make_error_frame(
                 req_id, "protocol", "UNKNOWN_FIELD",
@@ -537,7 +540,7 @@ private:
             return;
         }
 
-        for (const auto* key : {"observed_state_path", "cex_depth_path", "market_path"}) {
+        for (const auto* key : {"market_path", "trade_flow_path"}) {
             if (const auto* value = req.if_contains(key); value && !value->is_string()) {
                 write_frame(std::cout, make_error_frame(req_id, "session", "INVALID_ARGUMENT",
                     std::string(key) + " must be a string"));
@@ -548,8 +551,7 @@ private:
         const std::string scenario_id = arb::get_string_opt(req, "scenario_id", "");
         const std::string market_path = arb::get_string_opt(req, "market_path", "");
         const std::string price_feed_path = arb::get_string_opt(req, "price_feed_path", "");
-        const std::string observed_state_path = arb::get_string_opt(req, "observed_state_path", "");
-        const std::string cex_depth_path = arb::get_string_opt(req, "cex_depth_path", "");
+        const std::string trade_flow_path = arb::get_string_opt(req, "trade_flow_path", "");
 
         if (tpl_path.empty() || scenario_id.empty()) {
             write_frame(std::cout, make_error_frame(
@@ -564,8 +566,6 @@ private:
         uint64_t end_ts = 0;
         uint64_t dustswap_freq_s = 0;
         uint64_t user_swap_freq_s = 0;
-        uint64_t equalization_delay_s = 60;
-        uint64_t cex_depth_max_age_s = 30;
         const auto parse_integer = [&](const char* key, auto fallback, auto& out) {
             if (arb::parse_bounded_uint_field(req, key, fallback, out)) return true;
             write_frame(std::cout, make_error_frame(
@@ -578,9 +578,7 @@ private:
             !parse_integer("start_time", uint64_t{0}, start_ts) ||
             !parse_integer("end_time", uint64_t{0}, end_ts) ||
             !parse_integer("dustswap_freq_s", uint64_t{3600}, dustswap_freq_s) ||
-            !parse_integer("user_swap_freq_s", uint64_t{0}, user_swap_freq_s) ||
-            !parse_integer("equalization_delay_s", uint64_t{60}, equalization_delay_s) ||
-            !parse_integer("cex_depth_max_age_s", uint64_t{30}, cex_depth_max_age_s)) {
+            !parse_integer("user_swap_freq_s", uint64_t{0}, user_swap_freq_s)) {
             return;
         }
 
@@ -591,24 +589,36 @@ private:
             opts.max_candles = max_candles;
             opts.start_ts = start_ts;
             opts.end_ts = end_ts;
+            if (const auto* ranges = req.if_contains("excluded_time_ranges")) {
+                if (!ranges->is_array())
+                    throw std::invalid_argument("excluded_time_ranges must be an array");
+                for (const auto& pair : ranges->as_array()) {
+                    if (!pair.is_array() || pair.as_array().size() != 2)
+                        throw std::invalid_argument("excluded_time_ranges requires [start, end) pairs");
+                    std::array<uint64_t, 2> range{};
+                    for (size_t i = 0; i < 2; ++i) {
+                        const auto& value = pair.as_array()[i];
+                        if (value.is_uint64()) range[i] = value.as_uint64();
+                        else if (value.is_int64() && value.as_int64() >= 0)
+                            range[i] = static_cast<uint64_t>(value.as_int64());
+                        else throw std::invalid_argument("excluded_time_ranges requires uint64 seconds");
+                    }
+                    opts.excluded_time_ranges.push_back(range);
+                }
+            }
             opts.candle_filter_pct = arb::get_double_opt(req, "candle_filter", 0.0);
             if (const auto* mode = req.if_contains("event_mode");
                 mode != nullptr && !mode->is_string()) {
                 throw std::invalid_argument("event_mode must be a string");
             }
-            opts.event_mode = arb::get_string_opt(req, "event_mode", "candle_path");
-            if (opts.event_mode != "candle_path" && opts.event_mode != "depth" && opts.event_mode != "mixed_depth") {
-                throw std::invalid_argument(
-                    "event_mode must be 'candle_path', 'depth', or 'mixed_depth'");
-            }
-            opts.cex_depth_max_age_s = cex_depth_max_age_s;
-
-            if (const auto* interval = req.if_contains("observation_interval_s")) {
-                if (!(interval->is_uint64() || (interval->is_int64() && interval->as_int64() > 0)))
-                    throw std::invalid_argument("observation_interval_s must be a positive uint64");
-                opts.observation_interval_s = interval->is_uint64() ? interval->as_uint64() : uint64_t(interval->as_int64());
-                if (!opts.observation_interval_s)
-                    throw std::invalid_argument("observation_interval_s must be positive");
+            opts.event_mode = arb::get_string_opt(req, "event_mode", "candles");
+            if (opts.event_mode != "candles" && opts.event_mode != "trade_flow")
+                throw std::invalid_argument("event_mode must be 'candles' or 'trade_flow'");
+            if (const auto* volume = req.if_contains("candle_volume")) {
+                if (!volume->is_bool()) throw std::invalid_argument("candle_volume must be a boolean");
+                if (opts.event_mode != "candles")
+                    throw std::invalid_argument("candle_volume applies only to event_mode='candles'");
+                opts.candle_volume = volume->as_bool();
             }
             curve_fx::evaluator::SessionConfig<RealT> cfg{};
             cfg.min_swap_frac = static_cast<RealT>(arb::get_double_opt(req, "min_swap", 1e-6));
@@ -618,47 +628,26 @@ private:
             cfg.user_swap_freq_s = user_swap_freq_s;
             cfg.user_swap_size_frac = static_cast<RealT>(arb::get_double_opt(req, "user_swap_size_frac", 0.01));
             cfg.user_swap_thresh = static_cast<RealT>(arb::get_double_opt(req, "user_swap_thresh", 0.05));
-            cfg.cex_depth_max_age_s = cex_depth_max_age_s;
-            cfg.equalization_delay_s = equalization_delay_s;
-            if (const auto* threshold = req.if_contains("reset_threshold_bps");
-                threshold && !threshold->is_number())
-                throw std::invalid_argument("reset_threshold_bps must be numeric");
-            cfg.reset_threshold_bps = static_cast<RealT>(arb::get_double_opt(req, "reset_threshold_bps", 100.0));
-            if (!std::isfinite(cfg.reset_threshold_bps) || cfg.reset_threshold_bps <= 0)
-                throw std::invalid_argument("reset_threshold_bps must be finite and positive");
-            cfg.observation_interval_s = opts.observation_interval_s;
             cfg.event_cursor = session_option(req, "event_cursor", EventCursor::Scalar,
-                {{"scalar", EventCursor::Scalar}, {"exact_skip", EventCursor::ExactSkip}});
+                {{"scalar", EventCursor::Scalar}, {"fast_skip", EventCursor::FastSkip}});
             cfg.metric_profile = session_option(req, "metric_profile", MetricProfile::FullSummary,
                 {{"full_summary", MetricProfile::FullSummary}, {"grid_core", MetricProfile::GridCore}});
             cfg.yb_mode = session_option(req, "yb_mode", YbMode::Off,
                 {{"off", YbMode::Off}, {"active_2l", YbMode::Active2l}, {"reference_2l", YbMode::Reference2l}});
-            cfg.actor_timing_mode = session_option(req, "actor_timing_mode", ActorTimingMode::LegacyEvent,
-                {{"legacy_event", ActorTimingMode::LegacyEvent}, {"minute_sequential", ActorTimingMode::MinuteSequential}});
-            cfg.state_reconciliation_mode = session_option(req, "state_reconciliation_mode", StateReconciliationMode::Off,
-                {{"off", StateReconciliationMode::Off}, {"on_price_scale_detach", StateReconciliationMode::OnPriceScaleDetach}});
             cfg.enable_slippage_probes =
                 req.if_contains("enable_slippage_probes") &&
                 req.at("enable_slippage_probes").as_bool();
-            if (
-                cfg.event_cursor == EventCursor::ExactSkip &&
-                cfg.metric_profile != MetricProfile::GridCore
-            ) {
-                write_frame(std::cout, make_error_frame(
-                    req_id, "session", "INVALID_EVENT_CURSOR",
-                    "exact_skip requires metric_profile='grid_core'"));
-                return;
+            if (const auto* threshold = req.if_contains("early_stop_max_7d_rel_price_diff")) {
+                if (!threshold->is_number())
+                    throw std::invalid_argument("early_stop_max_7d_rel_price_diff must be numeric");
+                cfg.early_stop_max_7d_rel_price_diff = arb::parse_input_double(*threshold);
+                if (!std::isfinite(cfg.early_stop_max_7d_rel_price_diff) ||
+                    cfg.early_stop_max_7d_rel_price_diff < 0)
+                    throw std::invalid_argument("early_stop_max_7d_rel_price_diff must be finite and nonnegative");
             }
-            if (cfg.actor_timing_mode == ActorTimingMode::MinuteSequential &&
-                (cex_depth_path.empty() || (cfg.yb_mode != YbMode::Reference2l && cfg.yb_mode != YbMode::Active2l) ||
-                 opts.event_mode != "depth" || cfg.dustswap_freq_s || cfg.user_swap_freq_s ||
-                 cfg.event_cursor != EventCursor::Scalar || cfg.metric_profile != MetricProfile::FullSummary))
-                throw std::invalid_argument("invalid minute_sequential configuration");
-            if (!observed_state_path.empty() || cfg.state_reconciliation_mode != StateReconciliationMode::Off) {
-                if (observed_state_path.empty() || cfg.actor_timing_mode != ActorTimingMode::MinuteSequential ||
-                    cfg.yb_mode != YbMode::Reference2l || equalization_delay_s > UINT64_MAX / 1'000'000'000ULL)
-                    throw std::invalid_argument("invalid observed state reconciliation configuration");
-            }
+            if (cfg.event_cursor == EventCursor::FastSkip &&
+                (cfg.metric_profile != MetricProfile::FullSummary || cfg.yb_mode == YbMode::Reference2l))
+                throw std::invalid_argument("fast_skip requires full_summary and YB off or active_2l");
             if (
                 cfg.metric_profile == MetricProfile::GridCore &&
                 (cfg.yb_mode != YbMode::Off || cfg.enable_slippage_probes)
@@ -669,10 +658,9 @@ private:
                 return;
             }
             std::cerr << "[evaluator] Loading scenario '" << scenario_id
-                      << "' from " << market_path << " with template: " << tpl_path << "\n";
-            store->load(
-                tpl_path, scenario_id, market_path, price_feed_path,
-                cex_depth_path, opts, observed_state_path);
+                      << "' from " << (market_path.empty() ? trade_flow_path : market_path)
+                      << " with template: " << tpl_path << "\n";
+            store->load(tpl_path, scenario_id, market_path, price_feed_path, trade_flow_path, opts);
 
             const auto* yb_releverage_fee_value =
                 req.if_contains("yb_releverage_fee");
@@ -727,8 +715,8 @@ private:
             scenario["id"] = sc.id;
             scenario["events_count"] = sc.events.size();
             scenario["candles_count"] = sc.candles.size();
-            scenario["start_ts"] = sc.candle_fallback ? sc.events.ts.front() : sc.start_ts;
-            scenario["end_ts"] = sc.candle_fallback ? sc.events.ts.back() : sc.candles.back().ts;
+            scenario["start_ts"] = sc.events.ts.front();
+            scenario["end_ts"] = sc.events.ts.back();
             resp["scenario"] = std::move(scenario);
             write_frame(std::cout, resp);
             std::cerr << "[evaluator] Session '" << session_id << "' initialized.\n";

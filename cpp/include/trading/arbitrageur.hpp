@@ -12,6 +12,7 @@
 #include "pools/twocrypto_fx/helpers.hpp"
 #include "trading/cex_depth.hpp"
 #include "trading/costs.hpp"
+#include "trading/swap_preview_cache.hpp"
 
 namespace arb {
 namespace trading {
@@ -31,7 +32,13 @@ struct Decision {
     T notional_coin0{};
 };
 
-inline constexpr int MAX_SIZING_EVALS = 24;       // hard eval budget per decision
+// Opt-in research cross-check for fees with multiple profit peaks. The default
+// path and its evaluation budget remain unchanged for existing grid artifacts.
+#ifndef ARB_DENSE_SIZING
+#define ARB_DENSE_SIZING 0
+#endif
+inline constexpr bool DENSE_SIZING = ARB_DENSE_SIZING != 0;
+inline constexpr int MAX_SIZING_EVALS = DENSE_SIZING ? 96 : 24;
 
 template <typename T, typename PoolT>
 Decision<T> decide_trade(
@@ -46,7 +53,9 @@ Decision<T> decide_trade(
     const T* p_now_hint = nullptr,
     const T* fee_hint = nullptr,
     const std::array<T, 2>* xp_hint = nullptr,
-    const CexDepthBook<T>* depth = nullptr
+    const CexDepthBook<T>* depth = nullptr,
+    SwapPreviewCache<T>* previews = nullptr,
+    bool trade_only = false
 ) {
     static_assert(std::is_floating_point_v<T>, "decide_trade is floating-only");
 
@@ -135,9 +144,23 @@ Decision<T> decide_trade(
     if (rho_01_floor >= rho_10_floor) { sel_i = 0; sel_j = 1; } else { sel_i = 1; sel_j = 0; }
     d.i = sel_i;
     d.j = sel_j;
+    // A caller that discards unprofitable decisions needs no sizing once the
+    // policy proves every size of this direction unprofitable.
+    if (trade_only && !pool.context_may_profit(
+            static_cast<size_t>(sel_i), p_now, sel_i == 0 ? p_cex_bid : p_cex_ask))
+        return d;
 
     const T avail = pool.balances[static_cast<size_t>(sel_i)];
     if (!(avail > T(0))) return d;
+
+    const auto prepared_fee = pool.prepare_fee();
+    const auto preview = [&](size_t i, size_t j, T dx) {
+        if (previews) return previews->quote(pool, i, j, dx, prepared_fee);
+        auto [xp, dy] = fx::post_swap_xp(pool, i, j, dx, pool.cached_price_scale);
+        const T gross = fx::xp_to_tokens_j(pool, j, dy, pool.cached_price_scale);
+        const T fee = prepared_fee(xp) * gross / fx::PoolTraits<T>::FEE_PRECISION();
+        return std::pair<T, T>{gross - fee, fee};
+    };
 
     // Sizing bounds
     T dx_lo = std::max(T(1e-18), avail * std::max(T(1e-12), min_swap_frac));
@@ -166,7 +189,7 @@ Decision<T> decide_trade(
             if (!capacity) return d;
             bool current_bound_fits = false;
             try {
-                const auto at_bound = fx::simulate_exchange_once(pool, 0, 1, dx_hi);
+                const auto at_bound = preview(0, 1, dx_hi);
                 current_bound_fits = depth->sell_base(at_bound.first).has_value();
             } catch (...) {
                 // Fall through to the bounded inverse or fail closed below.
@@ -197,7 +220,7 @@ Decision<T> decide_trade(
     const T depth_cost_coeff = (sel_i == 1 && top_ask) ? static_cast<T>(*top_ask) * cex_fee_markup : cost_coeff;
 
     auto evaluate_candidate = [&](T dx) -> Candidate {
-        auto sim = fx::simulate_exchange_once(pool, static_cast<size_t>(sel_i), static_cast<size_t>(sel_j), dx);
+        auto sim = preview(static_cast<size_t>(sel_i), static_cast<size_t>(sel_j), dx);
         T profit;
         if (depth == nullptr) {
             profit = sim.first * value_coeff - dx * cost_coeff - costs.gas_coin0;
@@ -230,8 +253,9 @@ Decision<T> decide_trade(
     //      interpolation with golden-section safeguards (Brent-style):
     //      superlinear on smooth fees, still convergent on kinks/jumps.
     // The answer is the best of *all* evaluations; total full evaluations
-    // are capped at MAX_SIZING_EVALS = 24 by construction (ladder <= 20,
-    // refine consumes the remainder).
+    // are capped at 24 by default (ladder <= 20, refine uses the remainder).
+    // The opt-in dense verification profile uses at most 80 ladder points
+    // and a total budget of 96, with the same quote and profit functions.
     // Fee-free envelope probes are extra but ~half-cost (no policy call).
     // All stepping is multiplicative in dx (no log/exp calls).
     // ------------------------------------------------------------------
@@ -346,7 +370,7 @@ Decision<T> decide_trade(
         ? std::max(dx_lo, std::min(dx_seed, dx_dip > T(0) ? dx_dip : dx_seed) / T(27))
         : dx_lo;
 
-    T pts[24];
+    T pts[MAX_SIZING_EVALS];
     int n_pts = 0;
     pts[n_pts++] = low_cover;
     pts[n_pts++] = dx_cap;
@@ -358,9 +382,19 @@ Decision<T> decide_trade(
         if (dx_dip / T(3) > low_cover) pts[n_pts++] = dx_dip / T(3);
         if (dx_dip * T(3) < dx_cap)    pts[n_pts++] = dx_dip * T(3);
     }
-    for (T v = dx_seed / T(9); v > low_cover && n_pts < 14; v /= T(9)) pts[n_pts++] = v;
-    for (T v = dx_seed * T(9); v < dx_cap && n_pts < 20; v *= T(9)) pts[n_pts++] = v;
-    std::sort(pts, pts + n_pts);
+    if constexpr (DENSE_SIZING) {
+        for (T v = dx_seed / T(1.5); v > low_cover && n_pts < 64; v /= T(1.5)) pts[n_pts++] = v;
+        for (T v = dx_seed * T(1.5); v < dx_cap && n_pts < 80; v *= T(1.5)) pts[n_pts++] = v;
+    } else {
+        for (T v = dx_seed / T(9); v > low_cover && n_pts < 14; v /= T(9)) pts[n_pts++] = v;
+        for (T v = dx_seed * T(9); v < dx_cap && n_pts < 20; v *= T(9)) pts[n_pts++] = v;
+    }
+    if constexpr (DENSE_SIZING) {
+        std::sort(pts, pts + n_pts);
+    } else {
+        for (int k = 1; k < n_pts; ++k)  // At most 20 rungs: insertion sort.
+            for (int m = k; m > 0 && pts[m] < pts[m - 1]; --m) std::swap(pts[m], pts[m - 1]);
+    }
     int m_pts = 0;
     for (int k = 0; k < n_pts; ++k) {
         if (m_pts == 0 || pts[k] > pts[m_pts - 1] * (T(1) + T(1e-9))) {
@@ -372,7 +406,7 @@ Decision<T> decide_trade(
     // (dx_cap < dx_hi), so spend no full evaluation there: use the envelope
     // value itself as its bracket ordinate.
     const bool cap_is_hi = (dx_cap >= dx_hi * (T(1) - T(1e-9)));
-    Candidate scan[24];
+    Candidate scan[MAX_SIZING_EVALS];
     int best_idx = 0;
     for (int k = 0; k < m_pts; ++k) {
         if (k == m_pts - 1 && !cap_is_hi && m_pts > 1) {

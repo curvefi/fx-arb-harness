@@ -2,7 +2,7 @@
 
 import math
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -89,19 +89,17 @@ class OpenSessionFrame(ProtocolModel):
     scenario_id: str
     market_path: Optional[str] = None
     price_feed_path: Optional[str] = None
-    cex_depth_path: Optional[str] = None
-    cex_depth_max_age_s: int = Field(default=30, ge=0, le=2**64 - 1)
-    observed_state_path: Optional[str] = None
-    state_reconciliation_mode: Optional[Literal["off", "on_price_scale_detach"]] = None
-    reset_threshold_bps: Optional[FiniteFloat] = Field(default=None, gt=0)
-    equalization_delay_s: Optional[int] = Field(default=None, ge=0, le=2**64 - 1)
-    observation_interval_s: Optional[int] = Field(default=None, gt=0, le=2**64 - 1)
-    actor_timing_mode: Literal["legacy_event", "minute_sequential"] = "legacy_event"
-    event_mode: Literal["candle_path", "depth", "mixed_depth"] = "candle_path"
+    trade_flow_path: Optional[str] = None
+    event_mode: Literal["candles", "trade_flow"] = "candles"
+    candle_volume: Optional[bool] = None
     pool_index: int = 0
     n_candles: int = 0
     start_time: int = 0
     end_time: int = 0
+    excluded_time_ranges: Optional[List[tuple[
+        Annotated[int, Field(strict=True, ge=0, le=2**64 - 1)],
+        Annotated[int, Field(strict=True, ge=0, le=2**64 - 1)],
+    ]]] = None
     candle_filter: FiniteFloat = 0.0
     min_swap: FiniteFloat = 1e-6
     max_swap: FiniteFloat = 1.0
@@ -110,13 +108,14 @@ class OpenSessionFrame(ProtocolModel):
     user_swap_size_frac: FiniteFloat = 0.01
     user_swap_thresh: FiniteFloat = 0.05
     enable_slippage_probes: bool = False
-    event_cursor: Literal["scalar", "exact_skip"] = "scalar"
+    event_cursor: Literal["scalar", "fast_skip"] = "scalar"
     metric_profile: Literal["full_summary", "grid_core"] = "full_summary"
     yb_mode: Literal["off", "active_2l", "reference_2l"] = "off"
     yb_releverage_fee: Optional[FiniteFloat] = None
     yb_cash_multiplier: FiniteFloat = 1.0
     yb_min_net_profit_coin0: Optional[FiniteFloat] = Field(default=None, ge=0)
     yb_initial_state: Optional[YbInitialState] = None
+    early_stop_max_7d_rel_price_diff: Optional[FiniteFloat] = Field(default=None, ge=0)
 
 
 class ScenarioInfo(ProtocolModel):

@@ -6,9 +6,8 @@
 #include <optional>
 #include <vector>
 
-#include "events/cex_depth.hpp"
+#include "events/trade_flow.hpp"
 #include "harness/yb_initial_state.hpp"
-#include "harness/state_reconciliation.hpp"
 
 namespace arb {
 namespace harness {
@@ -22,7 +21,7 @@ enum class YbMode : uint8_t {
 
 enum class EventCursor : uint8_t {
     Scalar = 0,
-    ExactSkip,
+    FastSkip,
 };
 
 enum class MetricProfile : uint8_t {
@@ -30,7 +29,6 @@ enum class MetricProfile : uint8_t {
     GridCore,
 };
 
-enum class ActorTimingMode : uint8_t { LegacyEvent = 0, MinuteSequential };
 
 template <typename T>
 struct RunConfig {
@@ -42,15 +40,14 @@ struct RunConfig {
     T user_swap_size_frac{T(0.01)};
     T user_swap_thresh{T(0.05)};
     T arb_report_rate{T(1)};
-    const events::CexDepthTape* cex_depth{nullptr};
-    bool candle_fallback{false};
-    const events::ObservedStateTape<T>* observed_state{nullptr};
-    StateReconciliationMode state_reconciliation_mode{StateReconciliationMode::Off};
-    uint64_t equalization_delay_s{60};
-    T reset_threshold_bps{T(100)};
-    uint64_t observation_interval_s{60};
-    uint64_t cex_depth_max_age_s{30};
-    ActorTimingMode actor_timing_mode{ActorTimingMode::LegacyEvent};
+    T arb_report_max_age_s{T(0)};
+    T arb_report_count{T(0)}; // 0 preserves time-window mode; >0 selects last N reports.
+    T arb_report_random_count{T(0)}; // 0 disables; 1..6 samples one of the last N reports.
+    T arb_report_offset{T(-1)}; // -1 preserves window/count mode; 0 is latest, 1 is previous.
+    // Measured or candle-approximated taker flow. Native arbitrage is a maker
+    // that quotes the pool on the CEX and hedges each bin's trade-through
+    // fills at the next event, paying arb_fee_bps on the CEX leg.
+    const events::TradeFlowTape* trade_flow{nullptr};
     bool save_actions{false};
 
     // Detailed per-event logging
@@ -68,10 +65,13 @@ struct RunConfig {
     // Slippage probe sampling
     bool enable_slippage_probes{false};
 
-    // Scalar remains the reference cursor. ExactSkip is admitted only when
-    // skipped events are provably observationally irrelevant.
+    // Scalar remains the reference cursor. FastSkip bypasses only events that
+    // are provably observationally irrelevant.
     EventCursor event_cursor{EventCursor::Scalar};
     MetricProfile metric_profile{MetricProfile::FullSummary};
+
+    // Positive: end the run once max_7d_rel_price_diff exceeds this value.
+    double early_stop_max_7d_rel_price_diff{0.0};
 
 };
 

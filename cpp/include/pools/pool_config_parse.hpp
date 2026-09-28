@@ -419,11 +419,16 @@ void parse_pool_entry(
         const auto& co = c->as_object();
         reject_unknown_fields(
             co,
-            {"arb_fee_bps", "gas_coin0", "use_volume_cap", "volume_cap_mult", "volume_cap_is_coin_1"},
+            {"arb_fee_bps", "gas_coin0", "report_coin0", "use_volume_cap", "volume_cap_mult", "volume_cap_is_coin_1"},
             "pool costs override"
         );
         if (auto* v = co.if_contains("arb_fee_bps")) out_costs.arb_fee_bps = parse_plain_real<T>(*v);
         if (auto* v = co.if_contains("gas_coin0")) out_costs.gas_coin0 = parse_plain_real<T>(*v);
+        if (auto* v = co.if_contains("report_coin0")) {
+            out_costs.report_coin0 = parse_plain_real<T>(*v);
+            if (!(out_costs.report_coin0 >= T(0)) || !std::isfinite(static_cast<double>(out_costs.report_coin0)))
+                throw std::runtime_error("report_coin0 must be finite and nonnegative");
+        }
         if (auto* v = co.if_contains("use_volume_cap")) out_costs.use_volume_cap = v->as_bool();
         if (auto* v = co.if_contains("volume_cap_mult")) out_costs.volume_cap_mult = parse_plain_real<T>(*v);
         if (auto* v = co.if_contains("volume_cap_is_coin_1")) {
@@ -469,12 +474,17 @@ struct PoolOverride {
         UseVolumeCap = 1u << 2,
         VolumeCapMult = 1u << 3,
         VolumeCapIsCoin1 = 1u << 4,
+        ReportCoin0 = 1u << 5,
     };
 
     PoolInit<T> pool{};
     arb::trading::Costs<T> costs{};
     std::optional<T> yb_releverage_fee{};
     std::optional<T> arb_report_rate{};
+    std::optional<T> arb_report_max_age_s{};
+    std::optional<T> arb_report_count{};
+    std::optional<T> arb_report_random_count{};
+    std::optional<T> arb_report_offset{};
     uint32_t pool_fields{0};
     uint32_t cost_fields{0};
 
@@ -507,6 +517,7 @@ struct PoolOverride {
 
         if (cost_fields & ArbFeeBps) target_costs.arb_fee_bps = costs.arb_fee_bps;
         if (cost_fields & GasCoin0) target_costs.gas_coin0 = costs.gas_coin0;
+        if (cost_fields & ReportCoin0) target_costs.report_coin0 = costs.report_coin0;
         if (cost_fields & UseVolumeCap) target_costs.use_volume_cap = costs.use_volume_cap;
         if (cost_fields & VolumeCapMult) target_costs.volume_cap_mult = costs.volume_cap_mult;
         if (cost_fields & VolumeCapIsCoin1) target_costs.volume_cap_is_coin1 = costs.volume_cap_is_coin1;
@@ -516,6 +527,10 @@ struct PoolOverride {
         patch.apply(pool, costs);
         pool_fields |= patch.pool_fields;
         cost_fields |= patch.cost_fields;
+        if (patch.arb_report_max_age_s.has_value()) arb_report_max_age_s = patch.arb_report_max_age_s;
+        if (patch.arb_report_count.has_value()) arb_report_count = patch.arb_report_count;
+        if (patch.arb_report_random_count.has_value()) arb_report_random_count = patch.arb_report_random_count;
+        if (patch.arb_report_offset.has_value()) arb_report_offset = patch.arb_report_offset;
         if (patch.arb_report_rate.has_value()) arb_report_rate = patch.arb_report_rate;
         if (patch.yb_releverage_fee.has_value()) {
             yb_releverage_fee = patch.yb_releverage_fee;
@@ -566,6 +581,7 @@ PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
         const auto& co = costs->as_object();
         if (co.if_contains("arb_fee_bps")) out.cost_fields |= PoolOverride<T>::ArbFeeBps;
         if (co.if_contains("gas_coin0")) out.cost_fields |= PoolOverride<T>::GasCoin0;
+        if (co.if_contains("report_coin0")) out.cost_fields |= PoolOverride<T>::ReportCoin0;
         if (co.if_contains("use_volume_cap")) out.cost_fields |= PoolOverride<T>::UseVolumeCap;
         if (co.if_contains("volume_cap_mult")) out.cost_fields |= PoolOverride<T>::VolumeCapMult;
         if (co.if_contains("volume_cap_is_coin_1")) out.cost_fields |= PoolOverride<T>::VolumeCapIsCoin1;
@@ -575,7 +591,34 @@ PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
             throw std::runtime_error("candidate run override must be an object");
         }
         const auto& ro = run->as_object();
-        reject_unknown_fields(ro, {"yb_releverage_fee", "arb_report_rate"}, "candidate run override");
+        reject_unknown_fields(ro, {"yb_releverage_fee", "arb_report_rate", "arb_report_max_age_s", "arb_report_count", "arb_report_random_count", "arb_report_offset"}, "candidate run override");
+        if (auto* count = ro.if_contains("arb_report_count"); count != nullptr) {
+            const T value = parse_plain_real<T>(*count);
+            const double number = static_cast<double>(value);
+            if (!std::isfinite(number) || number < 0 || number > 1024 || std::floor(number) != number)
+                throw std::runtime_error("arb_report_count must be an integer in [0, 1024]");
+            out.arb_report_count = value;
+        }
+        if (auto* count = ro.if_contains("arb_report_random_count"); count != nullptr) {
+            const T value = parse_plain_real<T>(*count);
+            const double number = static_cast<double>(value);
+            if (!std::isfinite(number) || number < 0 || number > 6 || std::floor(number) != number)
+                throw std::runtime_error("arb_report_random_count must be an integer in [0, 6]");
+            out.arb_report_random_count = value;
+        }
+        if (auto* offset = ro.if_contains("arb_report_offset"); offset != nullptr) {
+            const T value = parse_plain_real<T>(*offset);
+            const double number = static_cast<double>(value);
+            if (!std::isfinite(number) || number < -1 || number > 1023 || std::floor(number) != number)
+                throw std::runtime_error("arb_report_offset must be -1 or an integer in [0, 1023]");
+            out.arb_report_offset = value;
+        }
+        if (auto* age = ro.if_contains("arb_report_max_age_s"); age != nullptr) {
+            const T value = parse_plain_real<T>(*age);
+            if (!(value >= T(0)) || !std::isfinite(static_cast<double>(value)))
+                throw std::runtime_error("arb_report_max_age_s must be finite and nonnegative");
+            out.arb_report_max_age_s = value;
+        }
         if (auto* rate = ro.if_contains("arb_report_rate"); rate != nullptr) {
             const T value = parse_plain_real<T>(*rate);
             if (!(value >= T(0) && value <= T(1))) {

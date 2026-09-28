@@ -99,11 +99,19 @@ The evaluator defaults to one worker per process so an orchestrator can allocate
 
 ## Protocol and artifact contract
 
-Every frame is one UTF-8 JSON object terminated by a newline. The lifecycle is `hello` -> `open_session`/`session_ready` -> optional `register_grid`/`grid_ready` -> one or more `evaluate_batch`/`batch_result` exchanges -> `close_session` and `shutdown`. All real-valued request inputs materialize once as finite IEEE-754 binary64 values, then widen to the evaluator arithmetic type when needed. One session admits exactly one scenario. `open_session` supplies `template_path`, `scenario_id`, `market_path`, and optional `price_feed_path`; `yb_mode` is the canonical YB selector. `event_cursor=scalar` is the permanent reference. `exact_skip` requires `metric_profile=grid_core` and falls back to scalar whenever its remaining exactness preconditions are absent. `metric_profile` selects `full_summary` or the exact no-YB `grid_core` field set; the latter rejects unsupported fields instead of returning approximations. GridCore reports `apy_net_robust_90d`, the APY whose log-growth rate gives equal weight to the mean and worst-5% mean of daily-sampled trailing-90-day net log returns. Negative weak regimes remain finite and rankable. The full profile retains legacy `apy_net_gm`. `observation.kind` (`summary` or `full_trace`) controls trace capture.
+Every frame is one UTF-8 JSON object terminated by a newline. The lifecycle is `hello` -> `open_session`/`session_ready` -> optional `register_grid`/`grid_ready` -> one or more `evaluate_batch`/`batch_result` exchanges -> `close_session` and `shutdown`. All real-valued request inputs materialize once as finite IEEE-754 binary64 values, then widen to the evaluator arithmetic type when needed. One session admits exactly one scenario. `open_session` supplies `template_path`, `scenario_id`, `market_path`, and optional `price_feed_path`; `yb_mode` is the canonical YB selector. `event_cursor=scalar` is the permanent reference; `fast_skip` bypasses only provably inactive events. `metric_profile` selects `full_summary` or the exact no-YB `grid_core` field set; the latter rejects unsupported fields instead of returning approximations. GridCore reports `apy_net_robust_90d`, the APY whose log-growth rate gives equal weight to the mean and worst-5% mean of daily-sampled trailing-90-day net log returns. Negative weak regimes remain finite and rankable. The full profile retains legacy `apy_net_gm`. `observation.kind` (`summary` or `full_trace`) controls trace capture.
 
 Full observation writes an atomic trace sidecar and, when requested, an action sidecar. The response returns `trace_path`, optional `actions_path`, and `effective_inputs`, a finite numeric map of the resolved pool/run controls used to initialize the replay. The evaluator returns raw metrics; objective scoring, plotting, replay, and placement remain in the optimizer.
 
 See [`protocol/protocol_spec.md`](protocol/protocol_spec.md) for frame schemas and limits.
+
+For research sensitivity checks, configure an isolated build with
+`-DCURVE_FX_DENSE_ARB_SIZING=ON`. This increases the arbitrage search budget from
+24 to 96 evaluations and tightens its geometric size ladder. It changes the
+modeled arbitrageur, including cached-report sizing; it is not an exact speed
+optimization. Compare policies using matched builds. The default is `OFF`.
+Record this CMake setting with research artifacts: it is a build option, not a
+session parameter, and the optimizer's clean `--rebuild` uses the default.
 
 ## Ownership, inputs, and private data
 
@@ -113,15 +121,14 @@ Inputs are ordinary paths supplied by the optimizer TOML. Acquisition of private
 
 Candle input is a JSON array of six numeric OHLCV fields per row. Invalid rows fail the load; timestamps accept seconds or milliseconds, and the configured clipping remains applied. Each result contains one candidate's metrics directly. Terminal APYs measure growth relative to the pool state at the start of the simulation window, including historical checkpoints.
 
-Depth inputs use the canonical numeric NPZ archive; v1 archives remain readable.
-Use `event_mode="depth"` with `cex_depth_path` and `observation_interval_s` to
-run directly from the book, omitting `market_path`. Candle runs continue to use
-`event_mode="candle_path"` and `market_path`. Optional traces and summaries are
-available for both. See [the protocol](protocol/protocol_spec.md#open_session)
-for the array contract and non-overwriting JSONL conversion command.
+Native arbitrage is a maker: it quotes the pool on the CEX and hedges each bin's
+trade-through fills on the pool at the bin-end event, paying `arb_fee_bps` on the
+CEX leg. Its taker flow comes from one of two market modes:
+- **`event_mode="candles"`** (default) approximates the flow from `market_path`
+  OHLCV. With `candle_volume` (default), volume is spread along the candle's
+  OHLC path; without it, the wicks carry unlimited volume. This mode ballparks
+  assets without trade data.
+- **`event_mode="trade_flow"`** uses measured binned Binance taker trades from
+  `trade_flow_path`, packed by `data/market/pack_trade_flow.py`.
 
-For the depth clock, set `actor_timing_mode="minute_sequential"` and choose
-`yb_mode="reference_2l"` or `"active_2l"`. The observation interval is configurable;
-the mode name does not force 60 seconds. Reference mode executes finite-depth
-hedges; active mode retains its midpoint-based YB model. Resets require reference
-mode. Native CEX fees/gas are not forwarded to either YB actor.
+See [the protocol](protocol/protocol_spec.md#open_session).

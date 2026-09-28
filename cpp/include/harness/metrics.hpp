@@ -14,6 +14,7 @@
 #include <deque>
 #include <functional>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -50,6 +51,8 @@ template <typename T>
 struct Metrics {
     // Trade execution
     size_t trades{0};
+    size_t arb_offered_report_trades{0};
+    size_t arb_withheld_report_trades{0};
     T notional{0};              // Total notional in coin0 units
     T lp_fee_coin0{0};          // Total LP fees in coin0 units
     T arb_pnl_coin0{0};         // Arbitrageur profit in coin0 units
@@ -93,6 +96,7 @@ struct RollingGeoApyWindow {
     uint64_t last_sample_ts{0};
     bool have_sample{false};
     F sum_log_apy{F(0)};
+    F sum_log_unfloored_apy{F(0)};
     size_t n_windows{0};
     size_t n_floored_windows{0};
 
@@ -142,10 +146,13 @@ struct RollingGeoApyWindow {
             }
         }
 
-        sum_log_apy += std::log(annualized_apy);
+        const F log_apy = std::log(annualized_apy);
+        sum_log_apy += log_apy;
         n_windows += 1;
         if (floored) {
             n_floored_windows += 1;
+        } else {
+            sum_log_unfloored_apy += log_apy;
         }
     }
 
@@ -154,6 +161,12 @@ struct RollingGeoApyWindow {
             return -1.0;
         }
         return static_cast<double>(std::exp(sum_log_apy / static_cast<F>(n_windows)));
+    }
+
+    // Diagnostic only: never used to replace the requested floored GM score.
+    double unfloored_value() const {
+        const size_t count = n_windows - n_floored_windows;
+        return count ? static_cast<double>(std::exp(sum_log_unfloored_apy / F(count))) : -1.0;
     }
 
     double floor_share() const {
@@ -568,6 +581,21 @@ inline double tvl_growth(double tvl_start, double tvl_end) {
     return tvl_start > 0.0 ? tvl_end / tvl_start : -1.0;
 }
 
+// Gross endpoint assets versus holding the initial tokens. Use the same
+// external coin0/coin1 mark for both portfolios; include all capital flows.
+template <typename T>
+double pool_nav_vs_hold(const std::array<T, 2>& initial,
+                        const std::array<T, 2>& final, T market_price) {
+    using F = MetricF<T>;
+    const F price = static_cast<F>(market_price);
+    const F hold = static_cast<F>(initial[0]) + price * static_cast<F>(initial[1]);
+    const F nav = static_cast<F>(final[0]) + price * static_cast<F>(final[1]);
+    if (!(price > F(0)) || !(hold > F(0)) || !std::isfinite(price) ||
+        !std::isfinite(hold) || !std::isfinite(nav))
+        throw std::invalid_argument("NAV versus hold requires a finite positive market price and hold value");
+    return static_cast<double>(nav / hold - F(1));
+}
+
 template <typename T>
 struct SlippageProbes {
     using F = MetricF<T>;
@@ -620,25 +648,57 @@ struct SlippageProbes {
     }
 };
 
+// Called on the existing settled hourly YB sampling clock, never per event.
+template <typename F>
+struct SampledLogVariation {
+    F previous{0}, squared_log_sum{0};
+    uint64_t first_ts{0}, last_ts{0};
+    void sample(uint64_t ts, F value) {
+        if (!(value > F(0)) || !std::isfinite(value)) return;
+        if (previous > F(0)) {
+            const F change = std::log(value / previous);
+            squared_log_sum += change * change;
+        } else first_ts = ts;
+        previous = value;
+        last_ts = ts;
+    }
+    double annualized() const {
+        return last_ts > first_ts
+            ? static_cast<double>(squared_log_sum * F(365ULL * 86400) / F(last_ts - first_ts))
+            : -1.0;
+    }
+};
+
 template <typename T>
 struct EventLoopResult {
     Metrics<T> metrics{};
     TimeWeightedMetrics<T> tw_metrics{};
     SlippageProbes<T> slippage_probes{};
-    ReconciliationSummary reconciliation{};
 
     uint64_t t_start{0};
     uint64_t t_end{0};
+    uint64_t early_stop_ts{0};  // Nonzero when a divergence stop ended the run.
     T tvl_start{0};
     T donation_apy{0};
     double apy_net_gm{-1.0};
     double apy_net_robust_90d{-1.0};
+    double pool_nav_vs_hold{-1.0};
 
     // YieldBasis metric family. Filled by the state-mutating active_2l or
     // reference_2l actor.
     T yb_releverage_fee{T(0)};
     double yb_releverage_apy{-1.0};
     double yb_releverage_apy_gm{-1.0};
+    double yb_external_equity_eth{-1.0};
+    double yb_external_growth_eth{-1.0};
+    double yb_external_max_drawdown_hourly{-1.0};
+    double yb_gm30{-1.0};
+    double yb_gm60{-1.0};
+    double yb_gm30_floor_share{-1.0};
+    double yb_gm30_unfloored{-1.0};
+    uint64_t yb_gm30_windows{0};
+    double yb_gm60_floor_share{-1.0};
+    double yb_price_scale_hourly_qv{-1.0};
     double yb_releverage_final_growth{-1.0};
     uint64_t yb_releverage_trades{0};
     uint64_t yb_releverage_gm_windows{0};

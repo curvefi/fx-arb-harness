@@ -11,9 +11,11 @@ namespace arb {
 namespace price_feeds {
 
 struct PriceFeedPoint {
-    uint64_t ts{0};
+    double ts{0}; // Unix seconds, preserving fractional report times.
     double price{0.0};
 };
+
+std::vector<PriceFeedPoint> load_price_feed_npz(const std::string& path);
 
 std::vector<PriceFeedPoint> load_price_feed_csv(const std::string& path);
 

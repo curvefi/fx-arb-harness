@@ -17,7 +17,7 @@
 #include "curve_fx_evaluator/trace.hpp"
 #include "curve_fx_evaluator/types.hpp"
 #include "events/loader.hpp"
-#include "events/cex_depth.hpp"
+#include "events/trade_flow.hpp"
 #include "events/types.hpp"
 #include "harness/actions.hpp"
 #include "harness/detailed_output.hpp"
@@ -38,9 +38,11 @@ struct ScenarioLoadOptions {
     uint64_t start_ts{0};
     uint64_t end_ts{0};
     double candle_filter_pct{0.0};
-    std::string event_mode{"candle_path"};
-    uint64_t observation_interval_s{60};
-    uint64_t cex_depth_max_age_s{30};
+    // "candles": market_path OHLCV approximates the taker flow; "trade_flow":
+    // trade_flow_path holds binned trades. Both drive the maker arbitrageur.
+    std::string event_mode{"candles"};
+    bool candle_volume{true};  // candles only: spread volume along the path, else unlimited
+    arb::events::TimeRanges excluded_time_ranges;
 };
 
 template <typename T = RealT>
@@ -48,9 +50,7 @@ struct Scenario {
     std::string id;
     std::vector<arb::Candle> candles;
     arb::EventSoA events;
-    std::optional<arb::events::CexDepthTape> cex_depth;
-    bool candle_fallback{false};
-    std::optional<arb::events::ObservedStateTape<T>> observed_state;
+    arb::events::TradeFlowTape trade_flow;
     arb::pools::PoolInit<T> base_pool;
     arb::trading::Costs<T> base_costs;
     uint64_t start_ts{0};
@@ -68,12 +68,7 @@ struct SessionConfig {
     bool enable_slippage_probes{false};
     arb::harness::EventCursor event_cursor{arb::harness::EventCursor::Scalar};
     arb::harness::MetricProfile metric_profile{arb::harness::MetricProfile::FullSummary};
-    uint64_t cex_depth_max_age_s{30};
-    arb::harness::StateReconciliationMode state_reconciliation_mode{arb::harness::StateReconciliationMode::Off};
-    uint64_t equalization_delay_s{60};
-    T reset_threshold_bps{T(100)};
-    uint64_t observation_interval_s{60};
-    arb::harness::ActorTimingMode actor_timing_mode{arb::harness::ActorTimingMode::LegacyEvent};
+    double early_stop_max_7d_rel_price_diff{0.0};
 
     // YieldBasis mode: "off", "active_2l" (established Observer2-equivalent
     // lane), or "reference_2l" (contract-derived candidate lane).
@@ -138,9 +133,8 @@ public:
         const std::string& scenario_id,
         const std::string& market_path,
         const std::string& price_feed_path,
-        const std::string& cex_depth_path,
-        const ScenarioLoadOptions& opts,
-        const std::string& observed_state_path = ""
+        const std::string& trade_flow_path,
+        const ScenarioLoadOptions& opts
     );
 
     const Scenario<T>& scenario() const {

@@ -1,6 +1,5 @@
 // Events module - implementation (non-templated)
 #include "events/loader.hpp"
-#include "events/cex_depth.hpp"
 
 #include <boost/json.hpp>
 #include <boost/json/basic_parser_impl.hpp>
@@ -243,37 +242,7 @@ EventSoA EventSoA::from_events(const std::vector<Event>& evs) {
             s.price_feed_ts.push_back(e.price_feed_ts);
         }
     }
-    s.price_blocks.build(s.p_cex);
     return s;
-}
-
-void PriceBlockIndex::build(const std::vector<double>& prices) {
-    block_count = (prices.size() + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    if (block_count == 0) {
-        min_positive.clear();
-        max_positive.clear();
-        return;
-    }
-
-    min_positive.assign(
-        block_count, std::numeric_limits<double>::infinity()
-    );
-    max_positive.assign(block_count, 0.0);
-
-    for (size_t block = 0; block < block_count; ++block) {
-        const size_t begin = block * BLOCK_SIZE;
-        const size_t end = std::min(begin + BLOCK_SIZE, prices.size());
-        double minimum = std::numeric_limits<double>::infinity();
-        double maximum = 0.0;
-        for (size_t index = begin; index < end; ++index) {
-            const double price = prices[index];
-            if (!(price > 0.0)) continue;
-            minimum = std::min(minimum, price);
-            maximum = std::max(maximum, price);
-        }
-        min_positive[block] = minimum;
-        max_positive[block] = maximum;
-    }
 }
 
 std::vector<Candle> load_candles(const std::string& path,
@@ -333,76 +302,6 @@ std::vector<Candle> load_candles(const std::string& path,
     });
 
     return out;
-}
-
-std::vector<Event> gen_events(const std::vector<Candle>& cs) {
-    if (cs.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
-        throw std::runtime_error("Too many candles for 32-bit candle_idx");
-    }
-
-    std::vector<Event> evs;
-    evs.reserve(cs.size() * 2);
-
-    for (size_t idx = 0; idx < cs.size(); ++idx) {
-        const auto& c = cs[idx];
-        // Choose path: "low first" vs "high first" based on which is shorter
-        const double path1 = std::abs(c.open - c.low)  + std::abs(c.high - c.close);
-        const double path2 = std::abs(c.open - c.high) + std::abs(c.low  - c.close);
-        const bool first_low = path1 < path2;
-
-        const uint64_t ts0 = c.ts >= 5 ? c.ts - 5 : 0;
-        const uint64_t ts1 = c.ts + 5;
-
-        evs.push_back(Event{ts0, first_low ? c.low  : c.high, 0.0, 0, c.volume / 2.0, static_cast<uint32_t>(idx)});
-        evs.push_back(Event{ts1, first_low ? c.high : c.low, 0.0, 0, c.volume / 2.0, static_cast<uint32_t>(idx)});
-    }
-
-    std::sort(evs.begin(), evs.end(), [](const Event& a, const Event& b) {
-        return a.ts < b.ts;
-    });
-    return evs;
-}
-
-std::vector<Event> gen_mixed_depth_events(
-    std::vector<Candle>& candles, const events::CexDepthTape& depth,
-    uint64_t observation_interval_s, uint64_t max_age_s, uint64_t start_ts) {
-    if (!observation_interval_s)
-        throw std::invalid_argument("observation_interval_s must be positive");
-    const auto candle_events = gen_events(candles);
-    if (candle_events.empty()) return {};
-    constexpr uint64_t NS = 1'000'000'000ULL;
-    const uint64_t first_ns = depth.snapshots().front().available_ns;
-    uint64_t depth_ts = std::max({start_ts, candle_events.front().ts,
-        first_ns / NS + (first_ns % NS != 0)});
-    const uint64_t end_ts = candle_events.back().ts;
-    bool depth_pending = depth_ts <= end_ts;
-    events::CexDepthCursor<double> cursor(depth, max_age_s);
-    std::vector<Event> mixed;
-    size_t candle_event_idx = 0;
-    while (candle_event_idx < candle_events.size() || depth_pending) {
-        const bool observation = depth_pending &&
-            (candle_event_idx == candle_events.size() ||
-             depth_ts <= candle_events[candle_event_idx].ts);
-        const uint64_t ts = observation ? depth_ts : candle_events[candle_event_idx].ts;
-        // Use the execution cursor's publication and exact age-boundary rules.
-        // An exhausted but fresh book is still depth; it must not gain flat liquidity.
-        const auto mid = cursor.advance(ts);
-        if (observation) {
-            if (mid) {
-                if (candles.size() > std::numeric_limits<uint32_t>::max())
-                    throw std::invalid_argument("Mixed observation indices exceed uint32_t");
-                mixed.push_back({ts, *mid, 0.0, 0, 0.0, static_cast<uint32_t>(candles.size())});
-                candles.push_back({ts, *mid, *mid, *mid, *mid, 0.0});
-            }
-            // Preserve the clock across gaps, without emitting stale depth events.
-            if (observation_interval_s > end_ts - depth_ts) depth_pending = false;
-            else depth_ts += observation_interval_s;
-        } else {
-            if (!mid) mixed.push_back(candle_events[candle_event_idx]);
-            ++candle_event_idx;
-        }
-    }
-    return mixed;
 }
 
 } // namespace arb

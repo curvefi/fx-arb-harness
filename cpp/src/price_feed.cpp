@@ -1,9 +1,12 @@
 #include "price_feeds/price_feed.hpp"
+#include "io/numeric_npz.hpp"
+#include <cstring>
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <fstream>
+#include <filesystem>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -35,6 +38,7 @@ std::vector<std::string> split_csv_line(const std::string& line) {
 } // namespace
 
 std::vector<PriceFeedPoint> load_price_feed_csv(const std::string& path) {
+    if (std::filesystem::path(path).extension()==".npz") return load_price_feed_npz(path);
     std::ifstream in(path);
     if (!in) {
         throw std::runtime_error("Cannot open price feed: " + path);
@@ -87,10 +91,10 @@ std::vector<PriceFeedPoint> load_price_feed_csv(const std::string& path) {
             continue;
         }
         try {
-            uint64_t ts = static_cast<uint64_t>(std::stoull(cols[timestamp_column]));
-            if (ts > 10000000000ULL) ts /= 1000ULL;
+            double ts = std::stod(cols[timestamp_column]);
+            if (ts > 10000000000.0) ts /= 1000.0;
             const double price = std::stod(cols[price_column]);
-            if (ts > 0 && std::isfinite(price) && price > 0.0) {
+            if (std::isfinite(ts) && ts > 0 && std::isfinite(price) && price > 0.0) {
                 points.push_back(PriceFeedPoint{ts, price});
             }
         } catch (...) {
@@ -132,3 +136,28 @@ void attach_price_feed(
 
 } // namespace price_feeds
 } // namespace arb
+
+namespace arb::price_feeds {
+std::vector<PriceFeedPoint> load_price_feed_npz(const std::string& path) {
+    auto arrays = io::read_arrays(path, {"ts.npy", "price.npy"});
+    if (arrays.size()!=2) throw std::runtime_error("Price NPZ requires ts and price");
+    const auto& ts=arrays.at("ts.npy"); const auto& price=arrays.at("price.npy");
+    if (ts.shape.size()!=1 || price.shape!=ts.shape || price.dtype!="<f8" ||
+        (ts.dtype!="<i8" && ts.dtype!="<f8"))
+        throw std::runtime_error("Price NPZ requires Unix seconds ts and float64 price");
+    std::vector<PriceFeedPoint> out; out.reserve(ts.shape[0]);
+    double previous=0;
+    for (size_t i=0; i<ts.shape[0]; ++i) {
+        auto bits=io::little(ts.data()+8*i,8); double t,p;
+        if (ts.dtype=="<i8") {
+            if (bits>INT64_MAX) throw std::runtime_error("Invalid price timestamp");
+            t=static_cast<double>(bits);
+        } else std::memcpy(&t,&bits,8);
+        bits=io::little(price.data()+8*i,8); std::memcpy(&p,&bits,8);
+        if (!std::isfinite(t) || !std::isfinite(p) || t<=previous || p<=0)
+            throw std::runtime_error("Invalid or unordered price NPZ");
+        previous=t; out.push_back({t,p});
+    }
+    return out;
+}
+} // namespace arb::price_feeds

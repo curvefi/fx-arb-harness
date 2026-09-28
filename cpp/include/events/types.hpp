@@ -22,26 +22,9 @@ struct Event {
     uint64_t ts;
     double p_cex;
     double p_price_feed{0.0};
-    uint64_t price_feed_ts{0};
+    double price_feed_ts{0};
     double volume;
     uint32_t candle_idx;  // index into candle vector (used for detailed logging)
-};
-
-struct PriceBlockIndex {
-    static constexpr size_t BLOCK_SIZE = 16;
-
-    size_t block_count{0};
-    std::vector<double> min_positive;
-    std::vector<double> max_positive;
-
-    void build(const std::vector<double>& prices);
-
-    bool ready_for(size_t event_count) const {
-        return block_count ==
-                (event_count + BLOCK_SIZE - 1) / BLOCK_SIZE &&
-            min_positive.size() == block_count &&
-            max_positive.size() == block_count;
-    }
 };
 
 // Structure-of-arrays event stream consumed by the event loop. The hot path
@@ -57,8 +40,17 @@ struct EventSoA {
     std::vector<double> volume;
     std::vector<uint32_t> candle_idx;
     std::vector<double> p_price_feed;  // empty unless a price feed was attached
-    std::vector<uint64_t> price_feed_ts;
-    PriceBlockIndex price_blocks;
+    std::vector<double> price_feed_ts;
+    // Complete independent report tape, including observations between events.
+    std::vector<double> report_ts;
+    std::vector<double> report_prices;
+    // Optional: reports published at or before each event (empty = search).
+    std::vector<uint32_t> report_upper;
+    // Each event's trade-flow bin and the best bid/ask of its maker fill book
+    // (zero for an empty side), so gates and cursors skip without building it.
+    std::vector<uint32_t> flow_bin;
+    std::vector<double> fill_bid;
+    std::vector<double> fill_ask;
 
     size_t size() const { return ts.size(); }
     bool empty() const { return ts.empty(); }
