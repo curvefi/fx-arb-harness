@@ -17,12 +17,6 @@ option(CURVE_FX_ENABLE_IPO
 option(CURVE_FX_NATIVE_TUNING
     "Tune evaluator code for the build host CPU (not portable across blades)"
     OFF)
-option(CURVE_FX_VALIDATE_EVENT_JUMPS
-    "Validate every event skipped by the exact event cursor"
-    OFF)
-option(CURVE_FX_DENSE_ARB_SIZING
-    "Research verification: denser arbitrage ladder and 96-evaluation budget"
-    OFF)
 
 if(CURVE_FX_ENABLE_IPO)
     include(CheckIPOSupported)
@@ -77,7 +71,7 @@ find_package(Boost REQUIRED COMPONENTS json)
 find_path(MINIZIP_INCLUDE_DIR minizip/unzip.h)
 find_library(MINIZIP_LIBRARY NAMES minizip)
 if(NOT MINIZIP_INCLUDE_DIR OR NOT MINIZIP_LIBRARY)
-    message(FATAL_ERROR "MiniZip headers and library are required for NPZ depth input")
+    message(FATAL_ERROR "MiniZip headers and library are required for NPZ input")
 endif()
 
 # twocrypto::pool resolution
@@ -131,11 +125,7 @@ endif()
 
 # Policy selection and identity generation
 set(POLICY_ID "" CACHE STRING "Optional identifier for compiled policy")
-set(POLICY_ABI "twocrypto_policy_v1" CACHE STRING "ABI version of compiled policy")
 set(POLICY_HEADER_PATH "" CACHE FILEPATH "Optional path to private compiled policy regular-file header")
-if(NOT POLICY_ABI STREQUAL "twocrypto_policy_v1")
-    message(FATAL_ERROR "Compiled policies implement exactly twocrypto_policy_v1.")
-endif()
 
 if(POLICY_HEADER_PATH)
     if(NOT EXISTS "${POLICY_HEADER_PATH}" OR IS_DIRECTORY "${POLICY_HEADER_PATH}")
@@ -148,7 +138,7 @@ if(POLICY_HEADER_PATH)
         message(FATAL_ERROR "POLICY_ID is required when POLICY_HEADER_PATH is set.")
     endif()
     set(EFFECTIVE_POLICY_ID "${POLICY_ID}")
-    set(EFFECTIVE_POLICY_ABI "${POLICY_ABI}")
+    set(EFFECTIVE_POLICY_ABI "twocrypto_policy_v1")
 else()
     if(POLICY_ID)
         message(FATAL_ERROR "POLICY_ID requires POLICY_HEADER_PATH.")
@@ -188,7 +178,8 @@ set(CURVE_FX_EVALUATOR_SOURCES
     cpp/src/events.cpp
     cpp/src/price_feed.cpp
     cpp/src/pool_config_source.cpp
-    cpp/src/trade_flow.cpp
+    cpp/src/candle_tape.cpp
+    cpp/src/block_tape.cpp
 )
 
 if(POLICY_HEADER_PATH)
@@ -200,24 +191,15 @@ function(add_curve_fx_evaluator TARGET_NAME LIBRARY_NAME MODE_DEFINE)
     target_include_directories(${LIBRARY_NAME} PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/cpp/include>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
-        $<INSTALL_INTERFACE:include>
     )
     target_include_directories(${LIBRARY_NAME} PRIVATE ${MINIZIP_INCLUDE_DIR})
     target_compile_definitions(${LIBRARY_NAME} PUBLIC ${MODE_DEFINE}=1)
-    if(CURVE_FX_DENSE_ARB_SIZING)
-        target_compile_definitions(${LIBRARY_NAME} PUBLIC ARB_DENSE_SIZING=1)
-    endif()
     target_link_libraries(${LIBRARY_NAME} PUBLIC
         twocrypto::pool
         Boost::json
         Threads::Threads
         ${MINIZIP_LIBRARY}
     )
-    if(CURVE_FX_VALIDATE_EVENT_JUMPS)
-        target_compile_definitions(${LIBRARY_NAME} PUBLIC
-            ARB_VALIDATE_EVENT_JUMPS=1
-        )
-    endif()
     if(POLICY_HEADER_PATH)
         target_include_directories(${LIBRARY_NAME} PRIVATE "${POLICY_INCLUDE_DIR}")
         # Public headers instantiate the selected policy. Consumers must use
@@ -237,7 +219,6 @@ function(add_curve_fx_evaluator TARGET_NAME LIBRARY_NAME MODE_DEFINE)
     add_executable(${TARGET_NAME} cpp/src/main.cpp)
     target_compile_definitions(${TARGET_NAME} PRIVATE
         BUILD_TARGET_NAME="${TARGET_NAME}"
-        BUILD_TYPE_NAME="$<CONFIG>"
     )
     target_link_libraries(${TARGET_NAME} PRIVATE ${LIBRARY_NAME})
     if(CURVE_FX_ENABLE_IPO)
@@ -270,7 +251,8 @@ if(BUILD_TESTING)
 
     add_harness_test(test_yb_2l cpp/tests/test_yb_2l.cpp)
     add_harness_test(test_metric_semantics cpp/tests/test_metric_semantics.cpp)
-    add_harness_test(test_trade_flow cpp/tests/test_trade_flow.cpp)
+    add_harness_test(test_events cpp/tests/test_events.cpp)
+    add_harness_test(test_arbitrage_rules cpp/tests/test_arbitrage_rules.cpp)
 
     # Run the complete public protocol contract on f64 and the numeric identity
     # plus one real batch on the second arithmetic target.
@@ -302,8 +284,3 @@ if(BUILD_TESTING)
             tests/test_real_evaluator.py::test_identity_policy_admission_and_batch)
     endif()
 endif()
-
-# Install rules
-include(GNUInstallDirs)
-install(TARGETS arb_evaluator_f64 arb_evaluator_ld
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

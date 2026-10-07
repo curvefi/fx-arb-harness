@@ -260,26 +260,24 @@ class EvaluatorClient:
         user_swap_thresh: float = 0.05,
         enable_slippage_probes: bool = False,
         event_cursor: str = "scalar",
-        metric_profile: str = "full_summary",
         yb_mode: str = "off",
         yb_releverage_fee: Optional[float] = None,
         yb_cash_multiplier: float = 1.0,
         yb_min_net_profit_coin0: Optional[float] = None,
         yb_arb: str = "levamm",
-        yb_round_trip_cost_coin0: Optional[float] = None,
+        yb_execution_bps: Optional[float] = None,
         yb_initial_state: Optional[Union[YbInitialState, Dict[str, Any]]] = None,
-        trade_flow_path: Optional[Union[str, Path]] = None,
         event_mode: str = "candles",
-        candle_volume: Optional[bool] = None,
+        block_tape_path: Optional[Union[str, Path]] = None,
+        arb_settle_offset_s: Optional[int] = None,
         excluded_time_ranges: Optional[Sequence[Sequence[int]]] = None,
         early_stop_max_7d_rel_price_diff: Optional[float] = None,
         **removed_options: Any,
     ) -> SessionReadyFrame:
         """Open an immutable evaluation session from direct scenario inputs.
 
-        ``yb_mode`` selects "off" (default), "active_2l" (established
-        Observer2-equivalent lane), or "reference_2l" (contract-derived
-        candidate lane). Enabled modes evaluate after every causal event.
+        ``yb_mode`` selects "off" (default) or "active_2l" (established
+        Observer2-equivalent lane), which evaluates after every causal event.
         """
         # Older optimizer configs still pass these inactive defaults.
         retired_defaults = {
@@ -304,9 +302,9 @@ class EvaluatorClient:
                 price_feed_path=(
                     str(price_feed_path) if price_feed_path is not None else None
                 ),
-                trade_flow_path=str(trade_flow_path) if trade_flow_path is not None else None,
                 event_mode=event_mode,
-                candle_volume=candle_volume,
+                block_tape_path=str(block_tape_path) if block_tape_path is not None else None,
+                arb_settle_offset_s=arb_settle_offset_s,
                 pool_index=pool_index,
                 n_candles=n_candles,
                 start_time=start_time,
@@ -321,13 +319,12 @@ class EvaluatorClient:
                 user_swap_thresh=user_swap_thresh,
                 enable_slippage_probes=enable_slippage_probes,
                 event_cursor=event_cursor,
-                metric_profile=metric_profile,
                 yb_mode=yb_mode,
                 yb_releverage_fee=yb_releverage_fee,
                 yb_cash_multiplier=yb_cash_multiplier,
                 yb_min_net_profit_coin0=yb_min_net_profit_coin0,
                 yb_arb=yb_arb,
-                yb_round_trip_cost_coin0=yb_round_trip_cost_coin0,
+                yb_execution_bps=yb_execution_bps,
                 yb_initial_state=yb_initial_state,
                 early_stop_max_7d_rel_price_diff=early_stop_max_7d_rel_price_diff,
             )

@@ -90,21 +90,6 @@ public:
         out_actions_->push_back(std::move(act));
     }
 
-    template <typename Route>
-    void log_yb_route(uint64_t ts, const Route& route) {
-        if (!enabled()) return;
-        YbRouteAction<T> act;
-        act.ts = ts;
-        act.direction = route.direction;
-        act.input = route.input;
-        act.output = route.output;
-        act.profit_coin0 = route.profit_coin0;
-        act.lp_amount = route.lp_amount;
-        act.donation = route.donation;
-        act.flash_amount = route.flash_amount;
-        out_actions_->push_back(std::move(act));
-    }
-
     // Log a tick action (idle tick with no trade)
     template <typename Pool>
     void log_tick(uint64_t ts, T p_cex,
@@ -158,7 +143,51 @@ public:
         act.vp_before = vp_before;
         act.vp_after = pool.get_vp_boosted();
         act.balance_indicator = pools::twocrypto_fx::balance_indicator(pool);
+        act.balances_after = pool.balances;
+        act.D_after = pool.D;
+        act.lp_xcp_profit_after = pool.lp_xcp_profit;
+        act.donation_shares_after = pool.donation_shares;
+        act.total_supply_after = pool.totalSupply;
+        act.virtual_price_after = pool.get_virtual_price();
+        act.last_donation_release_ts_after = pool.last_donation_release_ts;
+        act.donation_protection_expiry_ts_after = pool.donation_protection_expiry_ts;
         out_actions_->push_back(std::move(act));
+    }
+
+    // Log an active_2l fill (its input and output) and the public state it left
+    template <typename Pool>
+    void log_injected(uint64_t ts, size_t index, const std::array<T, 2>& out, const Pool& pool) {
+        if (!enabled()) return;
+        InjectedLog<T> act;
+        act.ts = ts;
+        act.index = index;
+        act.out = out;
+        act.balances = pool.balances;
+        act.D = pool.D;
+        act.total_supply = pool.totalSupply;
+        act.price_scale = pool.cached_price_scale;
+        act.price_oracle = pool.cached_price_oracle;
+        act.last_prices = pool.last_prices;
+        act.last_timestamp = pool.last_timestamp;
+        act.virtual_price = pool.get_virtual_price();
+        act.xcp_profit = pool.xcp_profit;
+        act.lp_xcp_profit = pool.lp_xcp_profit;
+        act.donation_shares = pool.donation_shares;
+        act.last_donation_release_ts = pool.last_donation_release_ts;
+        act.donation_protection_expiry_ts = pool.donation_protection_expiry_ts;
+        out_actions_->push_back(std::move(act));
+    }
+
+    // The LEVAMM state after the last logged fill.
+    void annotate_last_yb(uint8_t direction, T collateral, T debt, T stable_balance, T price, T donation) {
+        if (!enabled()) return;
+        auto& act = std::get<InjectedLog<T>>(out_actions_->back());
+        act.yb_direction = direction;
+        act.yb_collateral = collateral;
+        act.yb_debt = debt;
+        act.yb_stable_balance = stable_balance;
+        act.yb_price = price;
+        act.yb_donation = donation;
     }
 
 private:

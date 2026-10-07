@@ -62,10 +62,9 @@ struct Metrics {
     // Donations
     size_t donations{0};
     T donation_coin0_total{0};
-    std::array<T, 2> donation_amounts_total{T(0), T(0)};
 
     size_t yb_2l_fires{0};
-    size_t yb_round_trips{0};
+    T yb_levamm_profit_coin0{0};      // actor net profit of committed LEVAMM fills
 };
 
 struct TimeWeightedSummary {
@@ -319,10 +318,6 @@ struct TimeWeightedMetrics {
     std::array<F, PRICE_DIFF_BUCKETS> rel_bucket_dt{};
     std::array<uint64_t, PRICE_DIFF_BUCKETS> rel_bucket_id{};
     std::array<bool, PRICE_DIFF_BUCKETS> rel_bucket_live{};
-    F rel_window_sum_dt{F(0)};
-    F rel_window_dt{F(0)};
-    uint64_t rel_oldest_bucket{0};
-    bool have_rel_oldest_bucket{false};
     uint64_t last_7d_eval_bucket{0};
     F max_7d_rel_abs{F(0)};
     bool have_7d_rel_abs{false};
@@ -371,7 +366,6 @@ struct TimeWeightedMetrics {
         return summary;
     }
 
-    template <bool GridCore = false>
     void sample_price_error(uint64_t ts, T price_scale, T p_cex) {
         if (!have_err) {
             first_ts_err = ts;
@@ -396,15 +390,9 @@ struct TimeWeightedMetrics {
                 const F ex = g - th_in;
                 detach_ungated_total += ex * ex * dt / F(86400);
             }
-            if constexpr (GridCore) {
-                sample_7d_price_error_incremental(
-                    last_ts_err, ts, static_cast<F>(last_rel_abs)
-                );
-            } else {
-                sample_7d_price_error(
-                    last_ts_err, ts, static_cast<F>(last_rel_abs)
-                );
-            }
+            sample_7d_price_error(
+                last_ts_err, ts, static_cast<F>(last_rel_abs)
+            );
         }
 
         if (static_cast<F>(cur_rel_abs) > max_rel_abs) {
@@ -466,76 +454,6 @@ struct TimeWeightedMetrics {
 
         if (window_dt > F(0)) {
             const F avg = window_sum_dt / window_dt;
-            if (!have_7d_rel_abs || avg > max_7d_rel_abs) {
-                max_7d_rel_abs = avg;
-                have_7d_rel_abs = true;
-            }
-        }
-    }
-
-    void sample_7d_price_error_incremental(
-        uint64_t start_ts,
-        uint64_t end_ts,
-        F rel_abs
-    ) {
-        while (start_ts < end_ts) {
-            const uint64_t bucket_id = start_ts / PRICE_DIFF_BUCKET_S;
-            const uint64_t bucket_end = (bucket_id + 1) * PRICE_DIFF_BUCKET_S;
-            const uint64_t segment_end = end_ts < bucket_end ? end_ts : bucket_end;
-            const size_t idx = static_cast<size_t>(bucket_id % PRICE_DIFF_BUCKETS);
-
-            if (!rel_bucket_live[idx] || rel_bucket_id[idx] != bucket_id) {
-                if (rel_bucket_live[idx]) {
-                    rel_window_sum_dt -= rel_bucket_sum_dt[idx];
-                    rel_window_dt -= rel_bucket_dt[idx];
-                }
-                rel_bucket_live[idx] = true;
-                rel_bucket_id[idx] = bucket_id;
-                rel_bucket_sum_dt[idx] = F(0);
-                rel_bucket_dt[idx] = F(0);
-            }
-            if (!have_rel_oldest_bucket) {
-                rel_oldest_bucket = bucket_id;
-                have_rel_oldest_bucket = true;
-            }
-
-            const F dt = static_cast<F>(segment_end - start_ts);
-            const F weighted = rel_abs * dt;
-            rel_bucket_sum_dt[idx] += weighted;
-            rel_bucket_dt[idx] += dt;
-            rel_window_sum_dt += weighted;
-            rel_window_dt += dt;
-            start_ts = segment_end;
-        }
-
-        const uint64_t eval_bucket = end_ts / PRICE_DIFF_BUCKET_S;
-        if (have_7d_rel_abs && eval_bucket == last_7d_eval_bucket) {
-            return;
-        }
-        last_7d_eval_bucket = eval_bucket;
-        if (end_ts < first_ts_err + PRICE_DIFF_WINDOW_S) {
-            return;
-        }
-
-        const uint64_t cutoff = end_ts - PRICE_DIFF_WINDOW_S;
-        const uint64_t keep_from = cutoff / PRICE_DIFF_BUCKET_S;
-        while (have_rel_oldest_bucket && rel_oldest_bucket < keep_from) {
-            const size_t idx = static_cast<size_t>(
-                rel_oldest_bucket % PRICE_DIFF_BUCKETS
-            );
-            if (
-                rel_bucket_live[idx] &&
-                rel_bucket_id[idx] == rel_oldest_bucket
-            ) {
-                rel_window_sum_dt -= rel_bucket_sum_dt[idx];
-                rel_window_dt -= rel_bucket_dt[idx];
-                rel_bucket_live[idx] = false;
-            }
-            ++rel_oldest_bucket;
-        }
-
-        if (rel_window_dt > F(0)) {
-            const F avg = rel_window_sum_dt / rel_window_dt;
             if (!have_7d_rel_abs || avg > max_7d_rel_abs) {
                 max_7d_rel_abs = avg;
                 have_7d_rel_abs = true;
@@ -638,15 +556,6 @@ struct SlippageProbes {
         return static_cast<double>((tw_real_s01_sum_dt[k] + tw_real_s10_sum_dt[k]) / (F(2) * tw_real_dt[k]));
     }
 
-    double tw_slippage_0to1(size_t k) const {
-        if (k >= N_SIZES || tw_real_dt[k] <= F(0)) return -1.0;
-        return static_cast<double>(tw_real_s01_sum_dt[k] / tw_real_dt[k]);
-    }
-
-    double tw_slippage_1to0(size_t k) const {
-        if (k >= N_SIZES || tw_real_dt[k] <= F(0)) return -1.0;
-        return static_cast<double>(tw_real_s10_sum_dt[k] / tw_real_dt[k]);
-    }
 };
 
 // Called on the existing settled hourly YB sampling clock, never per event.
@@ -685,14 +594,15 @@ struct EventLoopResult {
     double apy_net_robust_90d{-1.0};
     double pool_nav_vs_hold{-1.0};
 
-    // YieldBasis metric family. Filled by the state-mutating active_2l or
-    // reference_2l actor.
+    // YieldBasis metric family. Filled by the state-mutating active_2l actor.
     T yb_releverage_fee{T(0)};
     double yb_releverage_apy{-1.0};
     double yb_releverage_apy_gm{-1.0};
     double yb_external_equity_eth{-1.0};
     double yb_external_growth_eth{-1.0};
     double yb_external_max_drawdown_hourly{-1.0};
+    double yb_exposure_return{-1.0};
+    double yb_exposure_rms{-1.0};
     double yb_gm30{-1.0};
     double yb_gm60{-1.0};
     double yb_gm30_floor_share{-1.0};

@@ -36,10 +36,6 @@ class EvaluatorIdentity(ProtocolModel):
 
 
 class Limits(ProtocolModel):
-    max_frame_bytes: Optional[int] = None
-    max_candidates_per_batch: Optional[int] = None
-    max_metric_values_per_batch: Optional[int] = None
-    max_materialized_batch_bytes: Optional[int] = None
     max_inflight_batches: int = 1
 
 
@@ -52,7 +48,7 @@ class HelloFrame(ProtocolModel):
             "summary", "full_trace", "atomic_sidecars", "registered_grid_ranges"
         ]
     )
-    yb_modes: List[str] = Field(default_factory=lambda: ["off", "active_2l", "reference_2l"])
+    yb_modes: List[str] = Field(default_factory=lambda: ["off", "active_2l"])
     metric_schema: str = "twocrypto-summary-v1"
     metric_fields: List[str] = Field(default_factory=list)
     limits: Limits = Field(default_factory=Limits)
@@ -73,9 +69,7 @@ class YbInitialState(ProtocolModel):
     redeemed: FiniteFloat
     stable_balance: FiniteFloat
     lt_stable_balance: FiniteFloat
-    flash_max_loan: FiniteFloat
     stable_aggregator: FiniteFloat
-    rounding_discount: FiniteFloat
     lt_donation_discount: FiniteFloat
     killed: bool
 
@@ -89,9 +83,9 @@ class OpenSessionFrame(ProtocolModel):
     scenario_id: str
     market_path: Optional[str] = None
     price_feed_path: Optional[str] = None
-    trade_flow_path: Optional[str] = None
-    event_mode: Literal["candles", "trade_flow"] = "candles"
-    candle_volume: Optional[bool] = None
+    event_mode: Literal["candles", "block"] = "candles"
+    block_tape_path: Optional[str] = None
+    arb_settle_offset_s: Optional[int] = Field(default=None, ge=0, le=2)
     pool_index: int = 0
     n_candles: int = 0
     start_time: int = 0
@@ -109,13 +103,12 @@ class OpenSessionFrame(ProtocolModel):
     user_swap_thresh: FiniteFloat = 0.05
     enable_slippage_probes: bool = False
     event_cursor: Literal["scalar", "fast_skip"] = "scalar"
-    metric_profile: Literal["full_summary", "grid_core"] = "full_summary"
-    yb_mode: Literal["off", "active_2l", "reference_2l"] = "off"
+    yb_mode: Literal["off", "active_2l"] = "off"
     yb_releverage_fee: Optional[FiniteFloat] = None
     yb_cash_multiplier: FiniteFloat = 1.0
     yb_min_net_profit_coin0: Optional[FiniteFloat] = Field(default=None, ge=0)
-    yb_arb: Literal["levamm", "lt_round_trip"] = "levamm"
-    yb_round_trip_cost_coin0: Optional[FiniteFloat] = Field(default=None, ge=0)
+    yb_arb: Literal["levamm", "none"] = "levamm"
+    yb_execution_bps: Optional[FiniteFloat] = Field(default=None, ge=0)
     yb_initial_state: Optional[YbInitialState] = None
     early_stop_max_7d_rel_price_diff: Optional[FiniteFloat] = Field(default=None, ge=0)
 

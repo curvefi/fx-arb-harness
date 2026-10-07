@@ -2,7 +2,6 @@
 //
 // Modes:
 //   --identity-json  : Emit evaluator identity and protocol capabilities to stdout and exit 0.
-//   --describe-json  : Emit executable-bound build and lowering schema to stdout and exit 0.
 //   serve            : Persistent NDJSON server implementing protocol curve_fx_eval over stdin/stdout.
 
 #include <algorithm>
@@ -10,19 +9,14 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
 #include <initializer_list>
 #include <iostream>
 #include <limits>
-#include <map>
 #include <memory>
 #include <optional>
-#include <unordered_map>
 #include <unordered_set>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -31,19 +25,16 @@
 
 #include <boost/json.hpp>
 
-#include "core/common.hpp"
 #include "core/json_utils.hpp"
 #include "curve_fx_evaluator/compiled_grid.hpp"
 #include "curve_fx_evaluator/compiled_policy_identity.hpp"
 #include "curve_fx_evaluator/evaluator.hpp"
-#include "curve_fx_evaluator/parameter_schema.hpp"
 #include "pools/pool_config_parse.hpp"
 #include "pools/twocrypto_fx/policy_descriptor.hpp"
 
 namespace json = boost::json;
 namespace fs = std::filesystem;
 using arb::harness::EventCursor;
-using arb::harness::MetricProfile;
 using arb::harness::YbMode;
 using arb::harness::YbArb;
 
@@ -63,25 +54,17 @@ Enum session_option(
 }
 
 
-#if defined(ARB_MODE_LD) && defined(ARB_MODE_F64)
-#error "select exactly one evaluator arithmetic mode"
-#elif defined(ARB_MODE_LD)
-using RealT = long double;
+using curve_fx::evaluator::RealT;
+#if defined(ARB_MODE_LD)
 static constexpr const char* NUMERIC_MODE_NAME = "longdouble";
 static constexpr const char* REAL_TYPE_NAME = "long double";
-#elif defined(ARB_MODE_F64)
-using RealT = double;
+#else
 static constexpr const char* NUMERIC_MODE_NAME = "double";
 static constexpr const char* REAL_TYPE_NAME = "double";
-#else
-#error "evaluator target must define ARB_MODE_LD or ARB_MODE_F64"
 #endif
 
 #ifndef BUILD_TARGET_NAME
 #define BUILD_TARGET_NAME "arb_evaluator_ld"
-#endif
-#ifndef BUILD_TYPE_NAME
-#define BUILD_TYPE_NAME "unknown"
 #endif
 
 static_assert(
@@ -138,23 +121,16 @@ static const std::vector<std::string> CANONICAL_METRIC_FIELDS = {
     "yb_price_scale_hourly_qv",
     "yb_external_equity_eth",
     "yb_external_growth_eth",
-    "yb_external_max_drawdown_hourly",
+    "yb_external_max_drawdown_hourly", "yb_exposure_return", "yb_exposure_rms",
 
     "policy_target_calls", "policy_actuator_holds", "policy_gate_rejections",
-    "arb_offered_report_trades", "arb_withheld_report_trades", "yb_final_growth", "yb_fee",
-    "yb_releverage_trades", "yb_round_trips", "yb_gm_windows", "yb_gm_floored_windows", "yb_gm_floor_share",
+    "arb_offered_report_trades", "arb_withheld_report_trades",
+    "yb_final_growth", "yb_fee",
+    "yb_releverage_trades", "yb_gm_windows", "yb_gm_floored_windows", "yb_gm_floor_share",
+    "yb_levamm_profit_coin0",
     "elapsed_ms", "total_notional_coin0", "lp_fee_coin0", "arb_pnl_coin0",
     "fee_capture_rate", "donations", "donation_coin0_total", "tvl_growth", "pool_nav_vs_hold",
     "early_stop_ts"
-};
-
-static const std::unordered_set<std::string> GRID_CORE_METRIC_FIELDS = {
-    "vp", "lp_xcp_profit", "apy", "apy_net", "apy_net_robust_90d",
-    "avg_rel_price_diff", "max_rel_price_diff", "max_7d_rel_price_diff",
-    "final_rel_price_diff", "trades", "n_rebalances",
-    "arb_guarded_loss_coin0", "elapsed_ms", "fee_capture_rate",
-    "donations", "donation_coin0_total", "tvl_growth", "avg_imbalance",
-    "detach_energy_ungated", "pool_nav_vs_hold", "early_stop_ts",
 };
 
 const json::object& canonical_metric_schema() {
@@ -204,11 +180,6 @@ json::object normalize_pool_override_identity(const json::object& value) {
     return normalize_pool_override_identity_value(value, "").as_object();
 }
 
-std::optional<std::string> unknown_field(
-    const json::object& object,
-    std::initializer_list<std::string_view> allowed
-);
-
 json::object make_evaluator_identity() {
     json::object id;
     id["harness_version"] = curve_fx::identity::HARNESS_VERSION;
@@ -225,101 +196,6 @@ json::object make_evaluator_identity() {
     return id;
 }
 
-json::value source_dirty_value(std::string_view value) {
-    if (value == "true" || value == "TRUE" || value == "1") return true;
-    if (value == "false" || value == "FALSE" || value == "0") return false;
-    return nullptr;
-}
-
-json::object make_parameter_schema() {
-    json::array parameters;
-#ifdef TWOCRYPTO_POLICY_HEADER
-    for (const auto& descriptor : SelectedPolicy::DESCRIPTOR.parameters) {
-        json::object value;
-        value["name"] = "policy." + std::string(descriptor.name);
-        value["lowering_path"] =
-            "evaluate_batch.candidates[].policy_params[" +
-            std::to_string(descriptor.order) + "]";
-        value["order"] = descriptor.order;
-        value["type"] = "real";
-        value["unit"] = std::string(descriptor.unit);
-        value["wire_representation"] = "finite_binary64";
-        value["classification"] = "candidate";
-        value["default"] = static_cast<double>(descriptor.default_value);
-        value["minimum"] = static_cast<double>(descriptor.minimum);
-        value["maximum"] = static_cast<double>(descriptor.maximum);
-        value["quantum"] = static_cast<double>(descriptor.quantum);
-        parameters.push_back(std::move(value));
-    }
-#endif
-    for (const auto& descriptor : curve_fx::evaluator::STATIC_PARAMETERS) {
-        json::object value;
-        value["name"] = std::string(descriptor.name);
-        value["lowering_path"] = std::string(descriptor.lowering_path);
-        value["type"] = std::string(descriptor.type);
-        value["unit"] = std::string(descriptor.unit);
-        value["wire_representation"] = std::string(descriptor.wire);
-        value["classification"] = std::string(descriptor.classification);
-        if (!descriptor.default_json.empty()) {
-            value["default"] = json::parse(descriptor.default_json);
-        }
-        if (!descriptor.choices_json.empty()) {
-            value["choices"] = json::parse(descriptor.choices_json);
-        }
-        parameters.push_back(std::move(value));
-    }
-    json::object schema;
-    schema["schema_version"] = "curve_fx_parameter_schema_v1";
-    schema["parameters"] = std::move(parameters);
-    return schema;
-}
-
-json::object make_description() {
-    json::object info;
-    info["schema_version"] = "curve_fx_evaluator_description_v1";
-
-    json::object harness;
-    harness["version"] = curve_fx::identity::HARNESS_VERSION;
-    harness["revision"] = curve_fx::identity::HARNESS_GIT_REVISION;
-    harness["dirty"] = source_dirty_value(
-        curve_fx::identity::HARNESS_GIT_DIRTY);
-    info["harness"] = std::move(harness);
-
-    json::object pool;
-    pool["version"] = curve_fx::identity::POOL_VERSION;
-    info["pool"] = std::move(pool);
-
-    json::object policy;
-    policy["id"] = std::string(SELECTED_POLICY_ID);
-    policy["abi"] = curve_fx::identity::POLICY_ABI;
-    policy["parameter_count"] = SELECTED_POLICY_PARAM_COUNT;
-#ifdef TWOCRYPTO_POLICY_HEADER
-    policy["descriptor_abi_version"] =
-        arb::pools::twocrypto_fx::POLICY_DESCRIPTOR_ABI_VERSION;
-#endif
-    info["policy"] = std::move(policy);
-
-    json::object build;
-    build["type"] = BUILD_TYPE_NAME;
-    build["compiler"] = curve_fx::identity::COMPILER_ID;
-    build["target"] = BUILD_TARGET_NAME;
-    build["numeric_mode"] = NUMERIC_MODE_NAME;
-    build["real_type"] = REAL_TYPE_NAME;
-    build["real_digits"] = std::numeric_limits<RealT>::digits;
-    build["real_max_digits10"] = std::numeric_limits<RealT>::max_digits10;
-    build["wire_real_type"] = "IEEE-754 binary64";
-    build["wire_real_digits"] = std::numeric_limits<double>::digits;
-    build["ipo_enabled"] = curve_fx::identity::ENABLE_IPO;
-    build["native_tuning"] = curve_fx::identity::NATIVE_TUNING;
-    info["build"] = std::move(build);
-
-    json::object schema = make_parameter_schema();
-    const std::string schema_canonical_json = arb::canonical_json(schema);
-    info["parameter_schema_canonical_json"] = schema_canonical_json;
-    info["parameter_schema"] = std::move(schema);
-    return info;
-}
-
 json::object make_hello_frame() {
     json::object hello;
     hello["protocol"] = "curve_fx_eval";
@@ -331,13 +207,11 @@ json::object make_hello_frame() {
     caps.push_back("full_trace");
     caps.push_back("atomic_sidecars");
     caps.push_back("registered_grid_ranges");
-    caps.push_back("maker_trade_flow");
     hello["capabilities"] = caps;
 
     json::array yb_modes;
     yb_modes.push_back("off");
     yb_modes.push_back("active_2l");
-    yb_modes.push_back("reference_2l");
     hello["yb_modes"] = yb_modes;
 
     const auto& metric_schema = canonical_metric_schema();
@@ -515,15 +389,16 @@ private:
         if (const auto field = unknown_field(req, {
                 "protocol", "type", "request_id", "session_id",
                 "template_path", "scenario_id", "market_path", "price_feed_path",
-                "trade_flow_path", "event_mode", "candle_volume",
+                "event_mode", "block_tape_path",
+                "arb_settle_offset_s",
                 "pool_index", "n_candles", "start_time",
                 "end_time", "excluded_time_ranges", "candle_filter", "min_swap", "max_swap",
                 "dustswap_freq_s", "user_swap_freq_s",
                 "user_swap_size_frac", "user_swap_thresh",
                 "enable_slippage_probes", "yb_releverage_fee",
                 "yb_cash_multiplier", "yb_min_net_profit_coin0", "yb_initial_state", "yb_mode", "event_cursor",
-                "yb_arb", "yb_round_trip_cost_coin0",
-                "metric_profile", "early_stop_max_7d_rel_price_diff"
+                "yb_arb", "yb_execution_bps",
+                "early_stop_max_7d_rel_price_diff"
             })) {
             write_frame(std::cout, make_error_frame(
                 req_id, "protocol", "UNKNOWN_FIELD",
@@ -542,7 +417,7 @@ private:
             return;
         }
 
-        for (const auto* key : {"market_path", "trade_flow_path"}) {
+        for (const auto* key : {"market_path", "block_tape_path"}) {
             if (const auto* value = req.if_contains(key); value && !value->is_string()) {
                 write_frame(std::cout, make_error_frame(req_id, "session", "INVALID_ARGUMENT",
                     std::string(key) + " must be a string"));
@@ -553,7 +428,6 @@ private:
         const std::string scenario_id = arb::get_string_opt(req, "scenario_id", "");
         const std::string market_path = arb::get_string_opt(req, "market_path", "");
         const std::string price_feed_path = arb::get_string_opt(req, "price_feed_path", "");
-        const std::string trade_flow_path = arb::get_string_opt(req, "trade_flow_path", "");
 
         if (tpl_path.empty() || scenario_id.empty()) {
             write_frame(std::cout, make_error_frame(
@@ -591,37 +465,37 @@ private:
             opts.max_candles = max_candles;
             opts.start_ts = start_ts;
             opts.end_ts = end_ts;
-            if (const auto* ranges = req.if_contains("excluded_time_ranges")) {
+            const auto parse_ranges = [&](const char* key, arb::events::TimeRanges& out) {
+                const auto* ranges = req.if_contains(key);
+                if (ranges == nullptr) return;
+                const std::string name(key);
                 if (!ranges->is_array())
-                    throw std::invalid_argument("excluded_time_ranges must be an array");
+                    throw std::invalid_argument(name + " must be an array");
                 for (const auto& pair : ranges->as_array()) {
                     if (!pair.is_array() || pair.as_array().size() != 2)
-                        throw std::invalid_argument("excluded_time_ranges requires [start, end) pairs");
+                        throw std::invalid_argument(name + " requires [start, end) pairs");
                     std::array<uint64_t, 2> range{};
                     for (size_t i = 0; i < 2; ++i) {
                         const auto& value = pair.as_array()[i];
                         if (value.is_uint64()) range[i] = value.as_uint64();
                         else if (value.is_int64() && value.as_int64() >= 0)
                             range[i] = static_cast<uint64_t>(value.as_int64());
-                        else throw std::invalid_argument("excluded_time_ranges requires uint64 seconds");
+                        else throw std::invalid_argument(name + " requires uint64 seconds");
                     }
-                    opts.excluded_time_ranges.push_back(range);
+                    out.push_back(range);
                 }
-            }
+                arb::events::validate_time_ranges(out);
+            };
+            parse_ranges("excluded_time_ranges", opts.excluded_time_ranges);
             opts.candle_filter_pct = arb::get_double_opt(req, "candle_filter", 0.0);
             if (const auto* mode = req.if_contains("event_mode");
                 mode != nullptr && !mode->is_string()) {
                 throw std::invalid_argument("event_mode must be a string");
             }
             opts.event_mode = arb::get_string_opt(req, "event_mode", "candles");
-            if (opts.event_mode != "candles" && opts.event_mode != "trade_flow")
-                throw std::invalid_argument("event_mode must be 'candles' or 'trade_flow'");
-            if (const auto* volume = req.if_contains("candle_volume")) {
-                if (!volume->is_bool()) throw std::invalid_argument("candle_volume must be a boolean");
-                if (opts.event_mode != "candles")
-                    throw std::invalid_argument("candle_volume applies only to event_mode='candles'");
-                opts.candle_volume = volume->as_bool();
-            }
+            if (opts.event_mode != "candles" && opts.event_mode != "block")
+                throw std::invalid_argument("event_mode must be 'candles' or 'block'");
+            opts.block_tape_path = arb::get_string_opt(req, "block_tape_path", "");
             curve_fx::evaluator::SessionConfig<RealT> cfg{};
             cfg.min_swap_frac = static_cast<RealT>(arb::get_double_opt(req, "min_swap", 1e-6));
             cfg.max_swap_frac = static_cast<RealT>(arb::get_double_opt(req, "max_swap", 1.0));
@@ -632,19 +506,29 @@ private:
             cfg.user_swap_thresh = static_cast<RealT>(arb::get_double_opt(req, "user_swap_thresh", 0.05));
             cfg.event_cursor = session_option(req, "event_cursor", EventCursor::Scalar,
                 {{"scalar", EventCursor::Scalar}, {"fast_skip", EventCursor::FastSkip}});
-            cfg.metric_profile = session_option(req, "metric_profile", MetricProfile::FullSummary,
-                {{"full_summary", MetricProfile::FullSummary}, {"grid_core", MetricProfile::GridCore}});
             cfg.yb_mode = session_option(req, "yb_mode", YbMode::Off,
-                {{"off", YbMode::Off}, {"active_2l", YbMode::Active2l}, {"reference_2l", YbMode::Reference2l}});
+                {{"off", YbMode::Off}, {"active_2l", YbMode::Active2l}});
+            const bool block = opts.event_mode == "block";
+            if (req.if_contains("arb_settle_offset_s") && !block)
+                throw std::invalid_argument("arb_settle_offset_s requires event_mode='block'");
+            const auto offset_s = [&](const char* key, uint64_t fallback) {
+                const auto* value = req.if_contains(key);
+                if (!value) return fallback;
+                if (!(value->is_uint64() || (value->is_int64() && value->as_int64() >= 0)) ||
+                    (value->is_uint64() ? value->as_uint64() : static_cast<uint64_t>(value->as_int64())) > 2)
+                    throw std::invalid_argument(std::string(key) + " must be 0, 1 or 2");
+                return value->is_uint64() ? value->as_uint64() : static_cast<uint64_t>(value->as_int64());
+            };
+            opts.arb_settle_offset_s = static_cast<size_t>(offset_s("arb_settle_offset_s", 1));
             cfg.yb_arb = session_option(req, "yb_arb", YbArb::Levamm,
-                {{"levamm", YbArb::Levamm}, {"lt_round_trip", YbArb::LtRoundTrip}});
-            if (cfg.yb_arb == YbArb::LtRoundTrip && cfg.yb_mode != YbMode::Active2l)
-                throw std::invalid_argument("yb_arb='lt_round_trip' requires yb_mode='active_2l'");
-            if (const auto* cost = req.if_contains("yb_round_trip_cost_coin0")) {
-                if (!cost->is_number()) throw std::invalid_argument("yb_round_trip_cost_coin0 must be numeric");
-                cfg.yb_round_trip_cost_coin0 = static_cast<RealT>(arb::parse_input_double(*cost));
-                if (!std::isfinite(cfg.yb_round_trip_cost_coin0) || cfg.yb_round_trip_cost_coin0 < RealT(0))
-                    throw std::invalid_argument("yb_round_trip_cost_coin0 must be finite and nonnegative");
+                {{"levamm", YbArb::Levamm}, {"none", YbArb::None}});
+            if (cfg.yb_arb != YbArb::Levamm && cfg.yb_mode != YbMode::Active2l)
+                throw std::invalid_argument("yb_arb='none' requires yb_mode='active_2l'");
+            if (const auto* bps = req.if_contains("yb_execution_bps")) {
+                if (!bps->is_number()) throw std::invalid_argument("yb_execution_bps must be numeric");
+                cfg.yb_execution_bps = static_cast<RealT>(arb::parse_input_double(*bps));
+                if (!std::isfinite(cfg.yb_execution_bps) || cfg.yb_execution_bps < RealT(0))
+                    throw std::invalid_argument("yb_execution_bps must be finite and nonnegative");
             }
             cfg.enable_slippage_probes =
                 req.if_contains("enable_slippage_probes") &&
@@ -657,22 +541,10 @@ private:
                     cfg.early_stop_max_7d_rel_price_diff < 0)
                     throw std::invalid_argument("early_stop_max_7d_rel_price_diff must be finite and nonnegative");
             }
-            if (cfg.event_cursor == EventCursor::FastSkip &&
-                (cfg.metric_profile != MetricProfile::FullSummary || cfg.yb_mode == YbMode::Reference2l))
-                throw std::invalid_argument("fast_skip requires full_summary and YB off or active_2l");
-            if (
-                cfg.metric_profile == MetricProfile::GridCore &&
-                (cfg.yb_mode != YbMode::Off || cfg.enable_slippage_probes)
-            ) {
-                write_frame(std::cout, make_error_frame(
-                    req_id, "session", "INVALID_METRIC_PROFILE",
-                    "grid_core requires yb_mode='off' and slippage disabled"));
-                return;
-            }
             std::cerr << "[evaluator] Loading scenario '" << scenario_id
-                      << "' from " << (market_path.empty() ? trade_flow_path : market_path)
+                      << "' from " << (!market_path.empty() ? market_path : opts.block_tape_path)
                       << " with template: " << tpl_path << "\n";
-            store->load(tpl_path, scenario_id, market_path, price_feed_path, trade_flow_path, opts);
+            store->load(tpl_path, scenario_id, market_path, price_feed_path, opts);
 
             const auto* yb_releverage_fee_value =
                 req.if_contains("yb_releverage_fee");
@@ -888,16 +760,6 @@ private:
                 metric_fields.push_back(name);
             }
         }
-        if (session_->config.metric_profile == MetricProfile::GridCore) {
-            for (const auto& name : metric_fields) {
-                if (GRID_CORE_METRIC_FIELDS.count(name) == 0) {
-                    write_frame(std::cout, make_error_frame(
-                        req_id, "protocol", "INVALID_METRIC_PROFILE",
-                        "grid_core does not provide metric field: " + name));
-                    return;
-                }
-            }
-        }
         const bool has_candidates = req.if_contains("candidates") != nullptr;
         const bool has_grid_id = req.if_contains("grid_id") != nullptr;
         const bool has_ranges = req.if_contains("ranges") != nullptr;
@@ -1018,15 +880,6 @@ private:
                 return;
             }
 
-        }
-        if (
-            session_->config.metric_profile == MetricProfile::GridCore &&
-            obs_spec.kind != curve_fx::evaluator::ObservationKind::Summary
-        ) {
-            write_frame(std::cout, make_error_frame(
-                req_id, "protocol", "INVALID_METRIC_PROFILE",
-                "grid_core supports summary observation only"));
-            return;
         }
 
         auto t0 = std::chrono::high_resolution_clock::now();
@@ -1185,9 +1038,6 @@ private:
             if (!res.success) {
                 r["error"] = res.error_message;
             }
-            if (!res.actor_metrics.empty()) {
-                r["actor_metrics"] = res.actor_metrics;
-            }
 
             // Raw metrics dictionary in canonical field order.
             if (metrics_format == "array") {
@@ -1311,8 +1161,6 @@ private:
 
 int main(int argc, char* argv[]) {
     bool identity_only = false;
-    bool describe_only = false;
-    std::string mode = "serve";
     bool mode_explicit = false;
     size_t worker_count = 1;
 
@@ -1320,10 +1168,6 @@ int main(int argc, char* argv[]) {
         const std::string arg = argv[i];
         if (arg == "--identity-json") {
             identity_only = true;
-            continue;
-        }
-        if (arg == "--describe-json") {
-            describe_only = true;
             continue;
         }
         if (arg == "--workers") {
@@ -1353,27 +1197,20 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "-h" || arg == "--help") {
             std::cerr << "Usage: " << argv[0]
-                      << " [serve | --identity-json | --describe-json] [--workers N]\n\n"
+                      << " [serve | --identity-json] [--workers N]\n\n"
                       << "Modes:\n"
                       << "  serve              Run persistent NDJSON server implementing protocol curve_fx_eval (stdin/stdout)\n"
                       << "  --identity-json    Print evaluator identity frame to stdout and exit 0\n"
-                      << "  --describe-json    Print executable-bound build and lowering schema and exit 0\n"
                       << "Options:\n"
                       << "  --workers N        Use N evaluator workers (default 1; cannot exceed detected hardware concurrency)\n";
             return 0;
         }
         if (arg == "serve" && !mode_explicit) {
-            mode = arg;
             mode_explicit = true;
             continue;
         }
         std::cerr << "Error: Unknown argument '" << arg
                   << "'. Use --help for usage.\n";
-        return 1;
-    }
-
-    if (identity_only && describe_only) {
-        std::cerr << "Error: --identity-json and --describe-json are mutually exclusive\n";
         return 1;
     }
 
@@ -1389,20 +1226,12 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    if (describe_only) {
-        write_frame(std::cout, make_description());
+    try {
+        curve_fx::server::EvaluatorServer server;
+        server.run();
         return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "Error: " << error.what() << "\n";
+        return 1;
     }
-
-    if (mode == "serve") {
-        try {
-            curve_fx::server::EvaluatorServer server;
-            server.run();
-            return 0;
-        } catch (const std::exception& error) {
-            std::cerr << "Error: " << error.what() << "\n";
-            return 1;
-        }
-    }
-    return 1;
 }

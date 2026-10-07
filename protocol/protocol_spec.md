@@ -20,7 +20,7 @@ evaluator process is required for another session.
   "type": "hello",
   "evaluator_identity": {
     "harness_version": "1.0.0",
-    "pool_version": "1.0.0",
+    "pool_version": "0.1.0",
     "policy_id": "none",
     "policy_abi": "none",
     "policy_parameter_count": 0,
@@ -32,8 +32,8 @@ evaluator process is required for another session.
     "native_tuning": false
   },
   "capabilities": ["summary", "full_trace", "atomic_sidecars",
-                   "registered_grid_ranges", "maker_trade_flow"],
-  "yb_modes": ["off", "active_2l", "reference_2l"],
+                   "registered_grid_ranges"],
+  "yb_modes": ["off", "active_2l"],
   "metric_schema": "twocrypto-summary-v1",
   "metric_fields": [
     "vp", "lp_xcp_profit", "apy", "apy_net", "apy_net_gm",
@@ -43,7 +43,7 @@ evaluator process is required for another session.
     "tw_real_slippage_1pct", "tw_real_slippage_5pct",
     "tw_real_slippage_10pct", "trades", "n_rebalances",
     "arb_guarded_loss_coin0", "yb_apy", "yb_apy_gm", "yb_gm30", "yb_gm60", "yb_gm90", "yb_final_growth",
-    "yb_fee", "yb_releverage_trades", "yb_round_trips", "yb_gm_windows",
+    "yb_fee", "yb_releverage_trades", "yb_gm_windows",
     "yb_gm_floored_windows", "yb_gm_floor_share", "elapsed_ms",
     "total_notional_coin0", "lp_fee_coin0", "arb_pnl_coin0",
     "fee_capture_rate", "donations", "donation_coin0_total", "tvl_growth"
@@ -52,16 +52,7 @@ evaluator process is required for another session.
 }
 ```
 
-`--identity-json` emits the same identity-shaped record and exits. The separate
-`--describe-json` output is an executable-bound description and is not a frame.
-
-The optional CMake build setting `CURVE_FX_DENSE_ARB_SIZING=ON` changes the
-arbitrage search from 24 to 96 evaluations and uses a denser size ladder. It
-applies to offered and cached-report searches. This research sensitivity mode
-is not an `open_session` option and is not currently exposed in the identity
-record; retain the CMake setting and executable hash with experiment evidence.
-Default builds keep the 24-evaluation search. Results from the two search modes
-are not expected to be bit-identical.
+`--identity-json` emits the same identity-shaped record and exits.
 
 Experimental policies may expose cumulative `policy_target_calls`,
 `policy_actuator_holds`, and `policy_gate_rejections`. They are available in
@@ -87,7 +78,6 @@ They are loaded once at admission.
   "price_feed_path": "data/ethusd-reports.npz",
   "market_path": "data/ethusd-1m-candles.json",
   "event_mode": "candles",
-  "candle_volume": true,
   "pool_index": 0,
   "n_candles": 0,
   "start_time": 0,
@@ -104,71 +94,54 @@ They are loaded once at admission.
 }
 ```
 
-Native arbitrage is a maker. It quotes the pool on the CEX and hedges its fills
-on the pool at the next event. The market input describes CEX taker flow in
-regular bins. There are two modes:
+The market input gives one external price per event. There are two modes:
 
-- **`event_mode="candles"`** (default) approximates the flow from `market_path`,
-  a JSON array of six numeric OHLCV fields per row (timestamps in seconds or
-  milliseconds).
+- **`event_mode="candles"`** (default) reads `market_path`, a JSON array of six
+  numeric OHLCV fields per row (timestamps in seconds or milliseconds).
   - **Clock:** candles lie on one regular clock whose bin is the smallest
     timestamp step. Missing candles are empty bins.
-  - **Path:** each candle's taker flow follows its shorter OHLC path (open,
-    low, high, close or open, high, low, close; ties go high first). Rising
-    legs print taker buys and falling legs taker sells.
-  - **Volume:** with `candle_volume=true` (default), the candle volume is spread
-    evenly over every 1bp bucket the path crosses. With `false`, the highest buy
-    and lowest sell print carry unlimited volume, so fills are limited only by
-    the pool.
   - **Input filters:** `candle_filter` clamps wicks and `n_candles` caps input
     rows.
-- **`event_mode="trade_flow"`** reads measured flow from `trade_flow_path` (see
-  below) and omits `market_path`, `candle_filter`, `n_candles` and
-  `candle_volume`.
+- **`event_mode="block"`** reads per-block prices from `block_tape_path` (see
+  **Block events**) and takes no `market_path`, `candle_filter` or `n_candles`.
 
-**Events.** There is one event at each bin end, `t0 + (i+1)*bin_s`, within
-`[start_time, end_time]`.
-- **Price:** the bin's last trade, carried across empty bins.
-- **Volume:** the bin's taker volume.
+**Events.** In the candle mode there is one event at each bin
+end, `t0 + (i+1)*bin_s`, within `[start_time, end_time]`.
+- **Price:** the bin's close, carried across empty bins.
 - **Trace candles:** the bin OHLCV.
 - **Exclusions:** bins overlapping an excluded range emit no event and do not
   move the carried price.
 
-**Fill book.** At each event the maker sizes against a fill book built from that
-bin's prints:
-- **Selling base:** taker buys are the levels it can sell base into, each valued
-  at its bucket's lower price edge `exp(b/1e4)`, best first.
-- **Buying base:** taker sells are the levels it can buy base from, at
-  `exp((b+1)/1e4)`.
+**Native arbitrage.** At each event the arbitrageur trades the pool against the
+event price at most once, in any size, and keeps the size with the largest
+profit net of `pool.costs.arb_fee_bps` (its external fee, default 0) and
+`pool.costs.gas_coin0` (default 0). Report costs and report selection apply as
+described below. The rules both actors obey are in
+[`docs/arbitrage_rules.md`](../docs/arbitrage_rules.md).
 
-Price priority fills a resting quote before any print strictly through it, so a
-fill never receives more than that print allowed. The pool trade equals the size
-at which a competitive maker ladder, quoting the pool's marginal price, crosses
-the volume that printed through it. The arbitrageur keeps the difference between
-print and quote, so `arb_pnl_coin0` is an upper bound.
+**Block events.** `block_tape_path` accepts `.npz` from
+`data/market/build_block_tape.py`: scalars `format_version` (uint32, 1), `t0`
+(int64, `t0 % 12 == 11`) and `block_s` (int64, 12); `price_offsets_s` `[0..4]`
+and `volume_offsets_s` `[0..2]` (int64); `price` float64 `[N, 5]`, the last trade
+strictly before `B + o` for block `B = t0 + 12k` (NaN before the first trade);
+and `volume` float64 `[N, 3]`, the base volume traded in `[B + o - 12, B + o)`.
+- **Clock:** the pool runs on block time `B`; every actor's information ends at
+  `B + d`, `d = arb_settle_offset_s` (0, 1 or 2, default 1).
+- **Events:** one per block `B` within `[start_time, end_time]` whose row window
+  `[B - 12, B + 4)` avoids every exclusion, timestamped `B` and priced
+  `P(B + d)`. Trace candles are synthetic.
+- **YieldBasis:** `active_2l` acts after native arbitrage at the same event price.
 
-Either side may be empty and the sides may cross. A bin with no print beyond the
-pool's fee floor cannot hedge. `pool.costs.arb_fee_bps` is the CEX fee of the
-maker's leg. Gas, report costs and report selection apply as described below.
-
-`trade_flow_path` accepts only `.npz` from `data/market/pack_trade_flow.py`:
-
-| Array | Type and shape | Meaning |
-| --- | --- | --- |
-| `format_version` | uint32 scalar | `1` |
-| `bin_s`, `t0` | int64 scalars | bin seconds; first bin start (UTC seconds) |
-| `open`, `high`, `low`, `close` | float64 `[N]` | trade prices, NaN in a bin without trades |
-| `buy_qty`, `sell_qty` | float64 `[N]` | taker volume by side (base) |
-| `ptr` | int64 `[N+1]` | bin `i` owns profile rows `ptr[i]..ptr[i+1]` |
-| `side` | uint8 `[M]` | 0 taker buy, 1 taker sell |
-| `bucket` | uint32 `[M]` | `floor(1e4*ln(price))` |
-| `qty` | float64 `[M]` | positive base volume |
-
-Rows within a bin are strictly ordered by side, then bucket.
+**Entry threshold.** `pool.costs.entry_edge_bps` (default 1.5) admits native
+arbitrage at an event only when the first unit's fee-inclusive edge against the
+event price exceeds it: `max((1-f)·P/p, (1-f)·p/P) > exp(entry_edge_bps/1e4)`,
+with `p` the pool spot, `f` its current fee and `P` the event price. It gates
+entry only; sizing still maximizes profit net of `arb_fee_bps` and gas. At 0 the
+test is not applied: any size with positive profit trades.
 
 The remaining optional session controls are `user_swap_freq_s`,
 `user_swap_size_frac`, `user_swap_thresh`, `event_cursor` (`scalar` or
-`fast_skip`), `metric_profile`, and `enable_slippage_probes`. Slippage probes
+`fast_skip`), and `enable_slippage_probes`. Slippage probes
 are off unless explicitly enabled.
 
 `excluded_time_ranges` optionally removes UTC Unix-second intervals from a
@@ -176,7 +149,7 @@ session, e.g. `[[1760054400, 1760140800]]` excludes 10 October 2025.
 - **Format:** pairs are ordered, disjoint and half-open `[start, end)`. Source
   files are unchanged.
 - **What is omitted:** events and price-feed samples inside a gap, so excluded
-  prints or feeds cannot leak into the next day.
+  prices or feeds cannot leak into the next day.
 - **Execution:** no actors execute inside a gap. Pool/YB state is retained,
   calendar time and annualization are unchanged, and execution resumes at the
   next retained event; the net price jump across the gap remains.
@@ -184,62 +157,54 @@ session, e.g. `[[1760054400, 1760140800]]` excludes 10 October 2025.
 - **Replay:** the optimizer records this setting in `run.json` and forwards it
   to exact replay.
 
+With `trace_actions`, every `active_2l` fill logs `type="injected"`, `kind="yb_fill"`, `success`, `out0`/`out1` (its
+input and output), the public pool state it left, and `yb_direction`, `yb_collateral`, `yb_debt` (projected),
+`yb_stable_balance`, `yb_price` (LEVAMM `get_p`) and `yb_donation`. Arbitrage exchange actions also log
+`balance0_after`, `balance1_after` and `D_after`.
+
 `user_swap_size_frac` is the daily fair-TVL utilization fraction. Each scheduled
 order has coin0-equivalent notional `fair_tvl * user_swap_size_frac *
 user_swap_freq_s / 86400`, converted into the alternating input coin at the
 current event price. Thus `1.0` means 100% attempted fair-TVL turnover per day,
 not 100% of one reserve per swap.
 
-`yb_mode` is `off`, `active_2l`, or `reference_2l`.
-- The enabled modes use `yb_releverage_fee` and `yb_cash_multiplier`, evaluate
-  after native arbitrage at every event, and hedge at the event price.
-- Native CEX fees and gas are not charged to either YB actor.
-- `yb_arb` selects how `active_2l` rebalancing reaches the LEVAMM.
-  - `levamm` (default) uses only the fee-paying LEVAMM exchange.
-  - `lt_round_trip` first tries the live searchers' LT `deposit` +
-    `emergency_withdraw` in one transaction. The deposit adds balanced pool
-    liquidity whose cash leg is borrowed from LEVAMM idle cash; the add runs
-    the pool's price update and pays its noise/spam fee. The withdrawal
-    returns the new shares' pro-rata collateral and debt.
-  - LT shares follow the LEVAMM value x0, which is homogeneous of degree one,
-    so the LEVAMM moves along its own curve at the post-add oracle, toward the
-    pool's cash-per-LP ratio, without the exchange fee.
-  - The depositor hedges net coin1 at the external bid/ask and needs profit
-    above `yb_round_trip_cost_coin0` (default 6: gas plus the searcher's
-    retained floor) plus 1 coin0.
-  - When no round trip pays, the fee-paying exchange may still act.
-  - The candidate override `pool.run.yb_lt_round_trip` (0 or 1) replaces the
-    session's `yb_arb` per candidate, so both modes can share one grid.
-  - `yb_round_trips` counts committed round trips; `yb_releverage_trades`
-    counts all fills.
+`yb_mode` is `off` or `active_2l`.
+- `active_2l` uses `yb_releverage_fee` and `yb_cash_multiplier`, evaluates
+  after native arbitrage at every event, and hedges at the event price.
+- Native CEX fees and gas are not charged to the YB actor.
+- `yb_arb` is `levamm` (default: `active_2l` trades the fee-paying LEVAMM exchange) or `none` (it never trades).
 - Summary valuation is hourly for GM accounting and once at the final endpoint
   for raw APY.
 
+`yb_execution_bps` (default 5) makes `active_2l` value coin 1 at the event price
+minus/plus that many bp (bid/ask): it closes short of the LEVAMM fee-band edge.
+Each event admits at most one fill, with no cap on its size.
+
 `yb_min_net_profit_coin0` is a finite nonnegative session setting, default 1.0.
-Only `reference_2l` admission uses it: candidate profit after all existing external
-charges must strictly exceed this extra coin0 margin. Zero permits strictly
-positive net profit. It changes neither transaction gas, protocol/AMM fees, sizing,
-nor accounting. Full-trace effective inputs expose `run.yb_min_net_profit_coin0`.
+`active_2l` fills must clear it. Full-trace effective inputs expose
+`run.yb_min_net_profit_coin0`.
 
 `yb_initial_state` optionally replaces synthetic fresh-2L initialization. It is
 a complete object with provenance fields `source_block`, `source_timestamp`, and
 `block_hash`; common fields `leverage`, `fee`, `collateral`, `debt`, `rate`,
 `rate_mul`, `rate_time`, `minted`, `redeemed`, `stable_balance`,
-`lt_stable_balance`, and `killed`; and reference fields `flash_max_loan`,
-`stable_aggregator`, `rounding_discount`, and `lt_donation_discount`. Quantities
+`lt_stable_balance`, and `killed`; and `stable_aggregator` and
+`lt_donation_discount`. `active_2l` multiplies its LP oracle by
+`stable_aggregator` (CryptopoolLPOracle: LP price times the crvUSD aggregator,
+held at its seed value; 1 for fresh
+initialization). Quantities
 are human-unit finite binary64 values. `debt` and `rate_mul` are the stored AMM
 values at `rate_time`, rather than projected getters. When the checkpoint is
 applied, its source block and timestamp must equal the native pool
 `historical_state`; `rate_time` may not be later than the source timestamp.
-Leverage is fixed at 2 and safety ratios are derived from it. Stable cash and
-flash capacity may be zero.
+Leverage is fixed at 2 and safety ratios are derived from it. Stable cash may
+be zero.
 
-For enabled modes, the historical `fee` is authoritative. An explicitly supplied
+With `active_2l`, the historical `fee` is authoritative. An explicitly supplied
 conflicting `yb_releverage_fee`, including a candidate override, is rejected; an
 omitted raw-protocol fee inherits the checkpoint value. `yb_cash_multiplier` and
 donation-APY rate derivation apply only to fresh initialization. In `off` mode a
-retained state object is validated but ignored. Reference external inputs seed
-only the initial state; without a chronological update tape this is represented state replay, not full E0b parity.
+retained state object is validated but ignored.
 
 ```json
 {
@@ -254,7 +219,7 @@ only the initial state; without a chronological update tape this is represented 
 ```
 
 `scenario_id` and `template_path` are required. `candles` requires
-`market_path`; `trade_flow` requires `trade_flow_path`. `price_feed_path` is
+`market_path`; `block` requires `block_tape_path`. `price_feed_path` is
 optional. The response contains one `scenario` object with event and candle
 counts and the first and last event times.
 
@@ -278,27 +243,28 @@ cleared after the arb attempt and cannot be reused by YB, user swaps, or idle ti
 An attached stale sample remains stale; no current timestamp is fabricated.
 Policies without `USES_SWAP_REPORTS` retain their existing feed behavior.
 
-The `aged_fair_fee_dual_ema` policy additionally retains the price and original
+The `report_dual_ema` policy additionally retains the price and original
 timestamp of the last committed report-assisted swap. Later native/YB/user swaps
 can use this cache; clearing the per-attempt report context does not erase it.
-Its fee is `q + (fallback - q) * min(observation_age / inflation_seconds, 1)`,
+Its fee is `(1 - w) * q + w * fallback`,
+`w = sqrt(clamp((observation_age + age_offset_s) / (aging_s + age_offset_s), 0, 1))`,
 where `q` is the base-plus-excess-capture fee capped at fallback. The native actor
 compares a supplied report against withholding it by fully sized net profit;
 only the selected executed branch can update report memory. Repeated or older
 publications cannot replace the cached reference. Newly supplied reports still
-pass the admission-age check; cached reports expire by the inflation horizon.
+pass the admission-age check (12 s); cached reports expire at `aging_s`.
 Reports may come from an independent `price_feed_path`: CSV, or numeric NPZ
 with exactly `ts` (int64/float64 Unix seconds) and `price` (float64). The NPZ
 reader preserves observation timestamps and requires positive prices and strictly
-increasing timestamps. It shares the portable MiniZip/NPY decoder with trade-flow tapes.
+increasing timestamps. It shares the portable MiniZip/NPY decoder with block tapes.
 
 `pool.run.arb_report_max_age_s = 0` selects the latest independent report at or
 before the event, retaining its actual age even across feed gaps. If no independent
-feed is configured, legacy same-event CEX reporting remains unchanged.
+feed is configured, the report is the current event price.
 
 A positive `arb_report_max_age_s = W` searches all reports in `[event_time-W,
 event_time]`, including reports between actor events. Each report is evaluated by
-fully sizing the trade against the same pool and remaining finite CEX book.
+fully sizing the trade against the same pool and event price.
 Selection maximizes executable net arbitrage profit, not the reported price or a
 fixed-size fee. Withholding the report is also considered. Only the winning action
 commits report memory and liquidity; policy admission rules still apply.
@@ -338,19 +304,19 @@ sets its age, even when reports are separated by gaps.
 Only the winning committed swap writes the reference; idle events do not refresh
 it. Ties retain the withholding action when it was considered first.
 
-The `sqrt_fair_fee_dual_ema` policy uses ten parameters: base fee, capture,
-fallback fee, whole-second expiry, then the unchanged six dual-EMA fields.
-Its standalone fee component computes `q = min(F, base + capture*max(edge-base,0))`
-with the standard noise floor, then `q + (F-q)*sqrt(min(age/expiry,1))`. No usable
-reference, future-dated reference, or age at/above expiry returns fallback.
+The `report_dual_ema` policy uses thirteen parameters: base fee, away capture,
+toward ratio, fallback fee, the unchanged six dual-EMA fields, then age offset,
+future window and aging horizon.
+Its fee component computes `q = min(F, base + capture*max(edge-base,0))`
+with the standard noise floor, then `(1-w)*q + w*F` with the weight above. No usable
+reference, a reference further ahead than the future window, or age at/above the
+aging horizon returns fallback.
 The same effective submitted-or-cached reference and aging formula govern its
 context sizing floor. New submissions do not reset the observation timestamp.
 
-`event_cursor="fast_skip"` is an opt-in `full_summary` optimization for YB off
-or `active_2l`. It bypasses an event only when neither the fill book's best
-levels clear the native floor gate nor the active YB fee-band gate accepts at
-the bin close. The cursor does not extrapolate quiet prices across a block.
-`reference_2l` requires the scalar cursor.
+`event_cursor="fast_skip"` is an opt-in optimization for YB off
+or `active_2l`. It bypasses an event only when neither the event price clears the native floor gate
+nor the active YB fee-band gate accepts at the bin close. The cursor does not extrapolate quiet prices across a block.
 
 The YB gate uses the same marginal LP quote as full sizing. It rejects only when
 neither fee-adjusted direction crosses the external LP bid/ask, ignoring
@@ -377,7 +343,7 @@ this hook. These projected controller parameters differ from the existing
 `fee` field, which is a small corrective-swap quote.
 
 Native arbitrage applies a conservative fee-floor gate before report selection.
-It tests the fill book's best bid and ask. If neither direction can cover the
+It tests the event price in both directions. If neither direction can cover the
 global fee floor, only native quote sizing is bypassed; YB decisions,
 accounting, metrics, and due idle ticks still process that event.
 
@@ -400,11 +366,11 @@ Errors retain the request ID where available:
 
 ```json
 {"protocol":"curve_fx_eval","type":"error","request_id":"batch-1",
- "scope":"protocol","error_code":"MISSING_REQUIRED_FIELD",
- "message":"evaluate_batch requires candidates or grid ranges","details":{}}
+ "scope":"candidate","error_code":"INVALID_ARGUMENT",
+ "message":"provide either candidates or a registered grid_id with ranges","details":{}}
 ```
 
-Unknown fields are rejected. Invalid JSON, oversized frames, missing paths,
+Unknown fields are rejected. Invalid JSON, missing paths,
 invalid direct inputs, non-finite numeric inputs, duplicate candidate IDs/ordinals,
 and session mismatches are reported as errors without changing the active
 session.
@@ -424,8 +390,7 @@ observation at or before the window boundary and annualize by actual elapsed tim
 `yb_gm_floored_windows`, and `yb_gm_floor_share` remain 90-day diagnostics.
 The two additional bounded queues advance only at the existing hourly sample
 times, with amortized constant work per sample and no additional YB valuation.
-These fields require `full_summary`, as do the other YB metrics. Existing stored
-results do not acquire new horizons without reevaluation.
+Existing stored results do not acquire new horizons without reevaluation.
 
 ### GM floor and report-selection diagnostics
 
@@ -450,13 +415,6 @@ partial final hour, and adds one log calculation per hourly YB sample. It is a
 diagnostic, not a yield adjustment or a substitute for GM30.
 
 ### Post-trade pressure research diagnostics (2026-09-25)
-
-`pool.costs.report_coin0` is a finite, nonnegative candidate-level fixed cost in
-coin0, default0. It is added to arbitrage sizing's gas cost only for the alternative
-that submits a report. Withholding/cached execution does not pay it. The extra
-cost participates in the profit comparison and trade decision; it is not a pool
-fee or a balance mutation. It can be scanned through the ordinary candidate/grid
-schema. Fast-skip bounds may ignore this positive cost conservatively.
 
 New YB summary metrics are `yb_external_equity_eth`, `yb_external_growth_eth` and
 `yb_external_max_drawdown_hourly`. They value LP collateral at external NAV,

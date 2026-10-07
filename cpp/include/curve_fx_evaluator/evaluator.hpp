@@ -12,12 +12,12 @@
 
 #include <boost/json.hpp>
 
-#include "core/common.hpp"
 #include "core/json_utils.hpp"
 #include "curve_fx_evaluator/trace.hpp"
 #include "curve_fx_evaluator/types.hpp"
+#include "events/block_tape.hpp"
 #include "events/loader.hpp"
-#include "events/trade_flow.hpp"
+#include "events/candle_tape.hpp"
 #include "events/types.hpp"
 #include "harness/actions.hpp"
 #include "harness/detailed_output.hpp"
@@ -38,10 +38,11 @@ struct ScenarioLoadOptions {
     uint64_t start_ts{0};
     uint64_t end_ts{0};
     double candle_filter_pct{0.0};
-    // "candles": market_path OHLCV approximates the taker flow; "trade_flow":
-    // trade_flow_path holds binned trades. Both drive the maker arbitrageur.
+    // "candles": market_path OHLCV, one event per candle close;
+    // "block": block_tape_path holds per-block prices, one event per block.
     std::string event_mode{"candles"};
-    bool candle_volume{true};  // candles only: spread volume along the path, else unlimited
+    std::string block_tape_path;
+    size_t arb_settle_offset_s{1};  // block only: event price P(B + offset)
     arb::events::TimeRanges excluded_time_ranges;
 };
 
@@ -50,10 +51,8 @@ struct Scenario {
     std::string id;
     std::vector<arb::Candle> candles;
     arb::EventSoA events;
-    arb::events::TradeFlowTape trade_flow;
     arb::pools::PoolInit<T> base_pool;
     arb::trading::Costs<T> base_costs;
-    uint64_t start_ts{0};
 };
 
 template <typename T = RealT>
@@ -67,17 +66,15 @@ struct SessionConfig {
     T user_swap_thresh{static_cast<T>(0.05)};
     bool enable_slippage_probes{false};
     arb::harness::EventCursor event_cursor{arb::harness::EventCursor::Scalar};
-    arb::harness::MetricProfile metric_profile{arb::harness::MetricProfile::FullSummary};
     double early_stop_max_7d_rel_price_diff{0.0};
 
-    // YieldBasis mode: "off", "active_2l" (established Observer2-equivalent
-    // lane), or "reference_2l" (contract-derived candidate lane).
+    // YieldBasis mode: "off" or "active_2l" (established Observer2-equivalent lane).
     arb::harness::YbMode yb_mode{arb::harness::YbMode::Off};
     T yb_releverage_fee{static_cast<T>(0.012)};
     T yb_cash_multiplier{static_cast<T>(1.0)};
     T yb_min_net_profit_coin0{static_cast<T>(1.0)};
     arb::harness::YbArb yb_arb{arb::harness::YbArb::Levamm};
-    T yb_round_trip_cost_coin0{static_cast<T>(6.0)};
+    T yb_execution_bps{static_cast<T>(5.0)};
     std::optional<arb::harness::YbInitialState<T>> yb_initial_state;
 
 };
@@ -112,14 +109,10 @@ struct CandidateEvaluationResult {
     std::string trace_json;
     std::string actions_json;
     boost::json::object effective_inputs;
-    boost::json::object actor_metrics;
-    uint64_t trace_record_count{0};
-    uint64_t action_count{0};
 };
 
 struct BatchEvaluationResult {
     std::vector<CandidateEvaluationResult> candidate_results;
-    double elapsed_ms{0.0};
 };
 
 void configure_worker_count(size_t count);
@@ -135,7 +128,6 @@ public:
         const std::string& scenario_id,
         const std::string& market_path,
         const std::string& price_feed_path,
-        const std::string& trade_flow_path,
         const ScenarioLoadOptions& opts
     );
 

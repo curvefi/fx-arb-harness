@@ -48,8 +48,6 @@ def _write_inputs(root: Path, *, flat: bool = False) -> tuple[Path, Path]:
                 "costs": {
                     "arb_fee_bps": 10,
                     "gas_coin0": 1_000_000_000 if flat else 0,
-                    "use_volume_cap": False,
-                    "volume_cap_mult": 1,
                 },
             }]
         }, sort_keys=True),
@@ -77,23 +75,25 @@ def _write_price_feed(root: Path, contents: str) -> Path:
     return path
 
 
-def _description() -> dict[str, object]:
+def _identity() -> dict[str, object]:
     assert EVALUATOR is not None
     return json.loads(subprocess.run(
-        [EVALUATOR, "--describe-json"],
+        [EVALUATOR, "--identity-json"],
         check=True,
         capture_output=True,
         text=True,
-    ).stdout)
+    ).stdout)["evaluator_identity"]
 
 
-def _policy_defaults(description: dict[str, object]) -> list[float]:
-    parameters = description["parameter_schema"]["parameters"]
-    return [
-        parameter["default"]
-        for parameter in parameters
-        if parameter["name"].startswith("policy.")
-    ]
+def _policy_params(identity: dict[str, object]) -> list[float]:
+    # A native build takes none; a compiled-policy build reads its values (a JSON array)
+    # from CURVE_FX_TEST_POLICY_PARAMS and skips without them.
+    if not identity["policy_parameter_count"]:
+        return []
+    raw = os.environ.get("CURVE_FX_TEST_POLICY_PARAMS")
+    if raw is None:
+        pytest.skip("CURVE_FX_TEST_POLICY_PARAMS is required for a compiled-policy evaluator")
+    return json.loads(raw)
 
 
 def _open(
@@ -141,23 +141,18 @@ def test_identity_policy_admission_and_batch(
     tmp_path: Path, price_feed_csv: str,
 ) -> None:
     assert EVALUATOR is not None
-    description = _description()
-    build = description["build"]
+    build = _identity()
     expected_mode = os.environ.get("CURVE_FX_EXPECTED_NUMERIC_MODE")
     expected_real_type = os.environ.get("CURVE_FX_EXPECTED_REAL_TYPE")
     if expected_mode:
         assert build["numeric_mode"] == expected_mode
     if expected_real_type:
         assert build["real_type"] == expected_real_type
-    assert build["target"] == Path(EVALUATOR).name
-    assert build["wire_real_type"] == "IEEE-754 binary64"
-    assert build["wire_real_digits"] == 53
-    assert build["real_digits"] >= build["wire_real_digits"]
+    assert build["build_target"] == Path(EVALUATOR).name
 
-    policy_params = _policy_defaults(description)
-    policy = description["policy"]
+    policy_params = _policy_params(build)
     expected_count = len(policy_params)
-    assert policy["parameter_count"] == expected_count == len(policy_params)
+    assert build["policy_parameter_count"] == expected_count
     with pytest.raises(ValueError, match="finite"):
         CandidateSpec(
             ordinal=0,
@@ -173,7 +168,7 @@ def test_identity_policy_admission_and_batch(
         identity = hello.evaluator_identity
         assert identity.numeric_mode == build["numeric_mode"]
         assert identity.real_type == build["real_type"]
-        assert identity.policy_id == policy["id"]
+        assert identity.policy_id == build["policy_id"]
         assert identity.policy_parameter_count == expected_count
         _open(client, template, candles, "identity", price_feed_path=price_feed)
         result = _evaluate_once(
@@ -189,7 +184,7 @@ def test_identity_policy_admission_and_batch(
 
 def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
     assert EVALUATOR is not None
-    policy_params = _policy_defaults(_description())
+    policy_params = _policy_params(_identity())
     template, candles = _write_inputs(tmp_path, flat=True)
     price_feed = _write_price_feed(tmp_path, "ts,price\n1699999995,1.0\n")
     observation = ObservationSpec(
@@ -319,24 +314,23 @@ def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
         )
         assert not [row for row in rejected_actions if row.get("actor") == "user"]
 
-    for mode in ("active_2l", "reference_2l"):
-        with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
-            _open(
-                client,
-                template,
-                candles,
-                f"yb-{mode}",
-                price_feed_path=price_feed,
-                yb_mode=mode,
-                yb_releverage_fee=0.013,
-                yb_cash_multiplier=3.0,
-            )
-            result = _evaluate_once(
-                client,
-                policy_params,
-                candidate_id=f"yb-{mode}",
-                metric_fields=("yb_apy", "yb_fee"),
-            )
-            assert result.status == "ok"
-            assert result.metrics["yb_apy"] != -1.0
-            assert result.metrics["yb_fee"] == pytest.approx(0.013)
+    with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
+        _open(
+            client,
+            template,
+            candles,
+            "yb-active_2l",
+            price_feed_path=price_feed,
+            yb_mode="active_2l",
+            yb_releverage_fee=0.013,
+            yb_cash_multiplier=3.0,
+        )
+        result = _evaluate_once(
+            client,
+            policy_params,
+            candidate_id="yb-active_2l",
+            metric_fields=("yb_apy", "yb_fee"),
+        )
+        assert result.status == "ok"
+        assert result.metrics["yb_apy"] != -1.0
+        assert result.metrics["yb_fee"] == pytest.approx(0.013)

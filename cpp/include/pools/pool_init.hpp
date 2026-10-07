@@ -41,6 +41,15 @@ struct PoolHistoricalState {
     T donation_protection_lp_threshold{T(0)};
     T donation_protection_extension_remainder{T(0)};
     T donation_shares_max_ratio{T(0)};
+
+    // Optional state of a compiled dual-EMA price-scale policy
+    // (YBTwocryptoPolicy.state()); otherwise the policy starts from the pool.
+    bool has_policy_state{false};
+    uint64_t policy_last_update_ts{0};
+    T policy_last_prices{T(0)};
+    T policy_fast_ema{T(0)};
+    T policy_slow_ema{T(0)};
+    T policy_price_scale{T(0)};
 };
 
 // Pool initialization parameters (floating-point, unit-scaled).
@@ -72,8 +81,6 @@ struct PoolInit {
     // Optional per-pool user-swap size (fraction of from-side balance); when
     // unset the run-level RunConfig::user_swap_size_frac applies.
     std::optional<T> user_swap_size_frac{};
-    std::string tag;
-    size_t global_index{0};
 };
 
 } // namespace pools

@@ -28,7 +28,7 @@ struct Event {
 };
 
 // Structure-of-arrays event stream consumed by the event loop. The hot path
-// reads only ts and p_cex per event; volume is touched on edge candidates,
+// reads only ts and p_cex per event;
 // candle_idx only when detailed/YB sampling is on, and p_price_feed only by
 // externally priced policy pools (the array stays empty when no feed was
 // attached). Splitting the streams cuts the bytes touched per event from
@@ -46,11 +46,6 @@ struct EventSoA {
     std::vector<double> report_prices;
     // Optional: reports published at or before each event (empty = search).
     std::vector<uint32_t> report_upper;
-    // Each event's trade-flow bin and the best bid/ask of its maker fill book
-    // (zero for an empty side), so gates and cursors skip without building it.
-    std::vector<uint32_t> flow_bin;
-    std::vector<double> fill_bid;
-    std::vector<double> fill_ask;
 
     size_t size() const { return ts.size(); }
     bool empty() const { return ts.empty(); }

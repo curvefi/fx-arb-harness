@@ -13,7 +13,6 @@
 #include <vector>
 
 #include "core/common.hpp"
-#include "events/trade_flow.hpp"
 #include "events/types.hpp"
 #include "harness/metrics.hpp"
 #include "harness/actions.hpp"
@@ -23,7 +22,6 @@
 #include "harness/idle_tick.hpp"
 #include "harness/yb_2l.hpp"
 #include "harness/yb_2l_apy.hpp"
-#include "harness/yb_reference_2l.hpp"
 #include "harness/pool_snapshot.hpp"
 #include "harness/run_config.hpp"
 #include "harness/report_window.hpp"
@@ -59,7 +57,6 @@ struct YbLoopState {
     using F = MetricF<T>;
 
     Yb2LActor<T> actor;
-    YbReference2LMarket<T> reference_market;
     Yb2LApyTracker<T> apy_tracker;
     YbExternalEquity external_equity;
     RollingGeoApy90d<F> apy_gm;
@@ -68,13 +65,12 @@ struct YbLoopState {
     RollingGeoApyWindow<F> apy_gm30{30ULL * 86400, RollingGeoApy90d<F>::FLOOR_APY};
     RollingGeoApyWindow<F> apy_gm60{60ULL * 86400, RollingGeoApy90d<F>::FLOOR_APY};
     Yb2LCosts<T> actor_costs{};
-    YbReference2LCosts<T> reference_costs{};
     uint64_t last_valuation_ts{0};
     SampledLogVariation<F> price_scale_variation;
 
 };
 
-template <bool EnableYb, bool GridCore, typename T, typename Pool>
+template <bool EnableYb, typename T, typename Pool>
 EventLoopResult<T> run_event_loop_impl(
     Pool& pool,
     const EventSoA& events,
@@ -170,7 +166,7 @@ EventLoopResult<T> run_event_loop_impl(
         return donation_growth<F>(static_cast<F>(dcfg.apy), static_cast<F>(dcfg.freq_s), elapsed_s);
     };
     auto sample_net_apy = [&](uint64_t ts) {
-        const bool legacy_due = !GridCore && apy_net_gm.should_sample(ts);
+        const bool legacy_due = apy_net_gm.should_sample(ts);
         const bool robust_due = apy_net_robust_90d.should_sample(ts);
         if (!legacy_due && !robust_due) {
             return;
@@ -203,19 +199,11 @@ EventLoopResult<T> run_event_loop_impl(
     if constexpr (EnableYb) {
         if constexpr (std::is_floating_point_v<T>) {
             if (yb_mode == YbMode::Active2l) {
-                yb->actor_costs.lt_round_trip = cfg.yb_arb == YbArb::LtRoundTrip;
-                yb->actor_costs.round_trip_cost_coin0 = cfg.yb_round_trip_cost_coin0;
+                yb->actor_costs.min_profit_coin0 = cfg.yb_min_net_profit_coin0;
+                yb->actor_costs.execution_bps = {cfg.yb_execution_bps, cfg.yb_execution_bps};
                 yb->actor = cfg.yb_initial_state
                     ? Yb2LActor<T>::from_state(*cfg.yb_initial_state)
                     : Yb2LActor<T>::fresh_2l(
-                        pool, dcfg.apy, yb_releverage_fee, result.t_start,
-                        cfg.yb_cash_multiplier
-                    );
-            } else if (yb_mode == YbMode::Reference2l) {
-                yb->reference_costs.min_net_profit_coin0 = cfg.yb_min_net_profit_coin0;
-                yb->reference_market = cfg.yb_initial_state
-                    ? YbReference2LMarket<T>::from_state(*cfg.yb_initial_state)
-                    : YbReference2LMarket<T>::fresh_2l(
                         pool, dcfg.apy, yb_releverage_fee, result.t_start,
                         cfg.yb_cash_multiplier
                     );
@@ -230,7 +218,6 @@ EventLoopResult<T> run_event_loop_impl(
     if constexpr (EnableYb && std::is_floating_point_v<T>) {
         const T initial_mark = static_cast<T>(events.p_cex[first_event_idx]);
         if (yb->actor.enabled()) yb->external_equity.sample(pool, yb->actor, result.t_start, initial_mark);
-        else if (yb->reference_market.enabled()) yb->external_equity.sample(pool, yb->reference_market, result.t_start, initial_mark);
     }
 
     if (detailed_logger.enabled() && candles == nullptr) {
@@ -240,11 +227,6 @@ EventLoopResult<T> run_event_loop_impl(
     const T fee_cex = costs.arb_fee_bps / T(10000);
     const T cex_fee_discount = T(1) - fee_cex;
     const T cex_fee_markup = T(1) + fee_cex;
-    // The arbitrageur quotes the pool on the CEX and hedges its fills: each
-    // event bin's trade-through book, built once the prints on its best level
-    // could clear the pool's fee floor.
-    trading::CexDepthSnapshot flow_fills;
-    trading::CexDepthBook<T> flow_book;
 
     auto sample_slippage_probes = [&](uint64_t ts, T p_cex) {
         if (!enable_slippage_probes || !(p_cex > T(0))) return;
@@ -272,16 +254,20 @@ EventLoopResult<T> run_event_loop_impl(
         }
     };
 
-    const bool fee_cacheable = pool.uses_native_fee_model();
+    // Fee-model facts follow the pool's configuration, which can change:
+    // refreshed with the geometry after every pool mutation.
+    bool fee_cacheable = pool.uses_native_fee_model();
     bool geometry_valid = false;
     bool fee_valid = false;
     T edge_p_now{};
     T edge_floor_scaled_p{};
     T edge_fee{};
     std::array<T, 2> edge_xp{};
-    const T omf_floor = std::max(T(1) - pool.fee_lower_bound(), T(1e-12));
+    T omf_floor = std::max(T(1) - pool.fee_lower_bound(), T(1e-12));
     auto refresh_geometry = [&]() {
         if (geometry_valid) return;
+        fee_cacheable = pool.uses_native_fee_model();
+        omf_floor = std::max(T(1) - pool.fee_lower_bound(), T(1e-12));
         edge_xp = pools::twocrypto_fx::pool_xp_current(pool);
         edge_p_now = pools::twocrypto_fx::MathOps<T>::get_p(
             edge_xp, pool.D, {pool.A, pool.gamma}
@@ -295,9 +281,13 @@ EventLoopResult<T> run_event_loop_impl(
         edge_fee = pool.fee(edge_xp);
         fee_valid = true;
     };
+    // Cached YB no-trade price band: valid until the pool or the actor changes.
+    typename Yb2LActor<T>::NoTradeBand yb_band{};
+    bool yb_band_ready = false;
     auto invalidate_edge_inputs = [&]() {
         geometry_valid = false;
         fee_valid = false;
+        yb_band_ready = false;
     };
     uint64_t last_tw_sample_ts = 0;
     bool have_tw_sample = false;
@@ -308,7 +298,7 @@ EventLoopResult<T> run_event_loop_impl(
         last_tw_sample_ts = ts;
         have_tw_sample = true;
 
-        tw.template sample_price_error<GridCore>(
+        tw.sample_price_error(
             ts, pool.cached_price_scale, cex_price
         );
 
@@ -316,13 +306,11 @@ EventLoopResult<T> run_event_loop_impl(
             ts, pool.balances[0], pool.balances[1] * cex_price
         );
 
-        if constexpr (!GridCore) {
-            refresh_edge_fee();
-            tw.sample_fee(ts, edge_fee);
-        }
+        refresh_edge_fee();
+        tw.sample_fee(ts, edge_fee);
     };
 
-    auto apply_donation = [&](std::size_t, uint64_t ts, T cex_price) {
+    auto apply_donation = [&](uint64_t ts, T cex_price) {
         auto don_res = make_donation_ex(pool, dcfg, ts, m);
         if (don_res.success) {
             invalidate_edge_inputs();
@@ -333,7 +321,7 @@ EventLoopResult<T> run_event_loop_impl(
         }
     };
 
-    auto apply_user_swap = [&](std::size_t, uint64_t ts, T cex_price) {
+    auto apply_user_swap = [&](uint64_t ts, T cex_price) {
         const T ps_before = pool.cached_price_scale;
         T oracle_before{};
         T xcp_profit_before{};
@@ -383,55 +371,87 @@ EventLoopResult<T> run_event_loop_impl(
         }
     };
 
-    // Shared by per-event sizing and the fast cursor. All report choices are
-    // bounded by this floor; only executable remaining top prices are relevant.
-    const auto native_may_trade = [&](T cex_price, const trading::CexDepthBook<T>* depth) {
+    // Whether the event price clears the pool's fee floor in either direction: the gate of per-event sizing.
+    const auto native_may_trade = [&](T cex_price) {
         refresh_geometry();
-        const T bid = depth ? T(depth->bid_price().value_or(0.0)) : cex_price;
-        const T ask = depth ? T(depth->ask_price().value_or(0.0)) : cex_price;
-        return (bid > T(0) && omf_floor * (cex_fee_discount * bid) > edge_p_now) ||
-            (ask > T(0) && edge_floor_scaled_p > cex_fee_markup * ask);
+        return cex_price > T(0) && (omf_floor * (cex_fee_discount * cex_price) > edge_p_now ||
+                                    edge_floor_scaled_p > cex_fee_markup * cex_price);
     };
-    // native_may_trade on the fill book's best levels, indexed at load.
-    const auto flow_may_trade = [&](size_t index) {
-        refresh_geometry();
-        const T bid = static_cast<T>(events.fill_bid[index]);
-        const T ask = static_cast<T>(events.fill_ask[index]);
-        return (bid > T(0) && omf_floor * (cex_fee_discount * bid) > edge_p_now) ||
-            (ask > T(0) && edge_floor_scaled_p > cex_fee_markup * ask);
+
+    // Commit a previewed native swap of dx coin i at the current research context and record it.
+    const auto commit_swap = [&](uint64_t ev_ts, size_t i, T dx, T dy_after_fee, T fee_tokens, T profit,
+                                 T notional_coin0, T cex_price, bool offered_report) -> bool {
+        const T ps_before = pool.cached_price_scale;
+        T oracle_before{};
+        T xcp_profit_before{};
+        T vp_before{};
+        T p_pool_before{};
+        uint64_t last_ts_before{0};
+        T lp_before{};
+        const bool log_actions = action_logger.enabled();
+        if (log_actions) {
+            oracle_before = pool.cached_price_oracle;
+            xcp_profit_before = pool.xcp_profit;
+            vp_before = pool.get_vp_boosted();
+            p_pool_before = pool.get_p();
+            last_ts_before = pool.last_timestamp;
+            lp_before = pool.last_prices;
+        }
+        invalidate_edge_inputs();
+        std::array<T, 3> res{};
+        try {  // a reverting transition leaves the pool unchanged
+            res = pool.exchange_from_preview(i, 1 - i, dx, dy_after_fee, fee_tokens);
+        } catch (...) {
+            return false;
+        }
+        m.trades += 1;
+        if (pool.uses_swap_reports()) {
+            if (offered_report) ++m.arb_offered_report_trades;
+            else ++m.arb_withheld_report_trades;
+        }
+        m.notional += notional_coin0;
+        m.lp_fee_coin0 += (i == 0 ? res[1] * cex_price : res[1]);
+        m.arb_pnl_coin0 += profit;
+        if (differs_rel(pool.cached_price_scale, ps_before)) m.n_rebalances += 1;
+        if (enable_slippage_probes) sample_slippage_probes(ev_ts, cex_price);
+        if (log_actions) {
+            action_logger.log_exchange(ev_ts, static_cast<int>(i), static_cast<int>(1 - i), dx, res[0], res[1],
+                                       profit, cex_price, p_pool_before, oracle_before, ps_before,
+                                       last_ts_before, lp_before, xcp_profit_before, vp_before, pool);
+        }
+        return true;
     };
 
     auto execute_arb = [&] (
         size_t ev_idx,
         uint64_t ev_ts,
-        T cex_price,
-        trading::CexDepthBook<T>* depth
+        T cex_price
     ) -> bool {
-        if (!native_may_trade(cex_price, depth)) return false;
+        if (!native_may_trade(cex_price)) return false;
         refresh_edge_fee();
-        T volume_cap = std::numeric_limits<T>::infinity();
-        if (costs.use_volume_cap) {
-            volume_cap = static_cast<T>(events.volume[ev_idx]) * costs.volume_cap_mult;
-            if (!costs.volume_cap_is_coin1) {
-                volume_cap *= cex_price;
-            }
+        if (costs.entry_edge_bps > T(0)) {
+            // Enter only when the first unit's fee-inclusive edge against the event price clears the threshold.
+            const T keep = T(1) - edge_fee;
+            const T edge = std::max(keep * cex_price / edge_p_now, keep * edge_p_now / cex_price);
+            if (!(edge > std::exp(costs.entry_edge_bps / T(10000)))) return false;
         }
-
-        // Only research context changes while comparing actions. Pool reserves,
-        // policy memory and remaining external liquidity are committed once below.
+        // Only research context changes while comparing actions. Pool reserves
+        // and policy memory are committed once below.
         trading::SwapPreviewCache<T> previews;
         // Single-report runs rarely reuse sizes: avoid memoization overhead.
         auto* shared_previews = search_reports && !fixed_report && random_count == 0 && report_count != 1 ? &previews : nullptr;
+        // Fixed costs of a swap at the current context: gas, plus report_coin0 when it offers a report.
+        const auto action_costs = [&] {
+            auto out = costs;
+            if (pool.uses_swap_reports() && pool.policy.research.price_feed > T(0)) out.gas_coin0 += costs.report_coin0;
+            return out;
+        };
         const auto size_trade = [&](bool trade_only) {
             fee_valid = false;
             refresh_edge_fee();
-            auto action_costs = costs;
-            if (pool.uses_swap_reports() && pool.policy.research.price_feed > T(0))
-                action_costs.gas_coin0 += costs.report_coin0;
             return trading::decide_trade(
-                pool, cex_price, action_costs, volume_cap, min_swap_frac, max_swap_frac,
-                cex_fee_discount, cex_fee_markup, &edge_p_now, &edge_fee, &edge_xp, depth, shared_previews,
-                trade_only);
+                pool, cex_price, action_costs(), min_swap_frac, max_swap_frac,
+                cex_fee_discount, cex_fee_markup, &edge_p_now, &edge_fee, &edge_xp, shared_previews, trade_only);
         };
         auto winning_context = pool.policy.research;
         auto dec = size_trade(false);
@@ -462,77 +482,13 @@ EventLoopResult<T> run_event_loop_impl(
             return false;
         }
 
-        std::optional<trading::CexDepthBook<T>> depth_after;
-        if (depth != nullptr) {
-            depth_after.emplace(*depth);
-            const bool hedge_available = dec.i == 0
-                ? depth_after->consume_sell(dec.dy_after_fee)
-                : depth_after->consume_buy(dec.dx);
-            if (!hedge_available) return false;
-        }
-
-        try {
-            const T ps_before = pool.cached_price_scale;
-            T oracle_before{};
-            T xcp_profit_before{};
-            T vp_before{};
-            T p_pool_before{};
-            uint64_t last_ts_before{0};
-            T lp_before{};
-            const bool log_actions = action_logger.enabled();
-            if (log_actions) {
-                oracle_before = pool.cached_price_oracle;
-                xcp_profit_before = pool.xcp_profit;
-                vp_before = pool.get_vp_boosted();
-                p_pool_before = pool.get_p();
-                last_ts_before = pool.last_timestamp;
-                lp_before = pool.last_prices;
-            }
-
-            invalidate_edge_inputs();
-            auto res = pool.exchange_from_preview(
-                static_cast<size_t>(dec.i),
-                static_cast<size_t>(dec.j),
-                dec.dx,
-                dec.dy_after_fee,
-                dec.fee_tokens
-            );
-            if (depth_after) *depth = std::move(*depth_after);
-
-            const T dy_after_fee = res[0];
-            const T fee_tokens = res[1];
-            const T ps_after = pool.cached_price_scale;
-
-            m.trades += 1;
-            if (pool.uses_swap_reports()) {
-                if (winning_context.price_feed > T(0)) ++m.arb_offered_report_trades;
-                else ++m.arb_withheld_report_trades;
-            }
-            m.notional += dec.notional_coin0;
-            m.lp_fee_coin0 += (dec.j == 1 ? fee_tokens * cex_price : fee_tokens);
-            m.arb_pnl_coin0 += dec.profit;
-
-            if (differs_rel(ps_after, ps_before)) {
-                m.n_rebalances += 1;
-            }
-
-            if (enable_slippage_probes) {
-                sample_slippage_probes(ev_ts, cex_price);
-            }
-
-            if (log_actions) {
-                action_logger.log_exchange(ev_ts, dec.i, dec.j, dec.dx, dy_after_fee, fee_tokens,
-                                           dec.profit, cex_price, p_pool_before,
-                                           oracle_before, ps_before, last_ts_before, lp_before,
-                                           xcp_profit_before, vp_before, pool);
-            }
-            return true;
-        } catch (...) {
+        if (!commit_swap(ev_ts, static_cast<size_t>(dec.i), dec.dx, dec.dy_after_fee, dec.fee_tokens,
+                         dec.profit, dec.notional_coin0, cex_price, winning_context.price_feed > T(0)))
             return false;
-        }
+        return true;
     };
 
-    auto apply_idle_tick = [&](std::size_t, uint64_t ts, T cex_price) -> bool {
+    auto apply_idle_tick = [&](uint64_t ts, T cex_price) -> bool {
         PoolTransactionSnapshot<Pool> transaction_snapshot(pool);
         const T ps_before = pool.cached_price_scale;
         T oracle_before{};
@@ -565,14 +521,12 @@ EventLoopResult<T> run_event_loop_impl(
     const bool detailed_on = detailed_logger.enabled();
     const bool user_swap_on = ucfg.enabled();
     bool yb_2l_on = false;
-    bool yb_reference_on = false;
     if constexpr (EnableYb) {
         yb_2l_on = yb->actor.enabled();
-        yb_reference_on = yb->reference_market.enabled();
     }
-    const bool yb_on = yb_2l_on || yb_reference_on;
+    const bool yb_2l_trades = yb_2l_on && cfg.yb_arb != YbArb::None;
     const bool fast_skip = cfg.event_cursor == EventCursor::FastSkip;
-    const bool donation_on = dcfg.enabled && !yb_on;
+    const bool donation_on = dcfg.enabled && !yb_2l_on;
     const bool have_price_feed = !events.p_price_feed.empty();
     const bool swap_reports = pool.uses_swap_reports();
 
@@ -601,17 +555,15 @@ EventLoopResult<T> run_event_loop_impl(
             apy_net_robust_90d.last_sample_ts,
             NetApyRobust90d<F>::SAMPLE_S
         ));
-        if constexpr (!GridCore) {
-            if (!apy_net_gm.have_sample) {
-                return result.t_start;
-            }
-            include_due(due_after(
-                apy_net_gm.last_sample_ts,
-                RollingGeoApy90d<F>::SAMPLE_S
-            ));
+        if (!apy_net_gm.have_sample) {
+            return result.t_start;
         }
+        include_due(due_after(
+            apy_net_gm.last_sample_ts,
+            RollingGeoApy90d<F>::SAMPLE_S
+        ));
         if constexpr (EnableYb) {
-            if (yb_on) {
+            if (yb_2l_on) {
                 if (!yb->apy_gm.have_sample) return result.t_start;
                 include_due(due_after(yb->apy_gm.last_sample_ts, RollingGeoApy90d<F>::SAMPLE_S));
             }
@@ -630,8 +582,8 @@ EventLoopResult<T> run_event_loop_impl(
         }
         return next;
     };
-    // Indexed fast cursor: an event is skipped only when neither its fill
-    // book's best levels nor the active YB gate at the bin close could act,
+    // Indexed fast cursor: an event is skipped only when neither its event
+    // price nor the active YB gate could act,
     // tested exactly as execute_arb and the actor would, so skipping it
     // changes nothing.
     // Offered reports lower fees only through the policy's profit bound.
@@ -670,8 +622,22 @@ EventLoopResult<T> run_event_loop_impl(
         });
         return may;
     };
+    // Exactly may_trade: inside the cached band the actor provably abstains.
+    const auto yb_may_trade = [&](const T& mid, uint64_t ts) {
+        if constexpr (EnableYb) {
+            if (!yb_band_ready || ts < yb_band.from || ts > yb_band.to) {
+                yb_band = yb->actor.no_trade_band(pool, mid, ts, ts + 3600, yb->actor_costs);
+                yb_band_ready = true;
+            }
+            if (yb_band.valid && ts >= yb_band.from && ts <= yb_band.to && mid >= yb_band.lo && mid <= yb_band.hi)
+                return false;
+            return yb->actor.may_trade(pool, mid, ts, yb->actor_costs);
+        } else {
+            return false;
+        }
+    };
     const auto indexed_may_act = [&](size_t index, uint64_t ts) {
-        const double bid = events.fill_bid[index], ask = events.fill_ask[index];
+        const double bid = events.p_cex[index], ask = bid;
         refresh_geometry();
         const T best_bid = static_cast<T>(bid), best_ask = static_cast<T>(ask);
         if ((omf_floor * (cex_fee_discount * best_bid) > edge_p_now ||
@@ -683,8 +649,7 @@ EventLoopResult<T> run_event_loop_impl(
                 best_ask > T(0) && edge_floor_scaled_p > cex_fee_markup * best_ask * T(1 - 1e-12))))
             return true;
         if constexpr (EnableYb) {
-            const T mid = static_cast<T>(events.p_cex[index]);
-            if (yb_2l_on && yb->actor.may_trade(pool, mid, ts, yb->actor_costs)) return true;
+            if (yb_2l_trades && yb_may_trade(static_cast<T>(events.p_cex[index]), ts)) return true;
         }
         return false;
     };
@@ -700,6 +665,7 @@ EventLoopResult<T> run_event_loop_impl(
         return start;
     };
 
+    // One YB actor decision.
     const auto run_yb_2l_once = [&] (
         uint64_t ev_ts,
         const T& cex_price,
@@ -707,17 +673,23 @@ EventLoopResult<T> run_event_loop_impl(
     ) {
         auto& yb_2l_actor = yb->actor;
         const auto& yb_2l_costs = yb->actor_costs;
-        if (!yb_2l_on) return;
+        if (!yb_2l_trades) return;
         if constexpr (std::is_floating_point_v<T>) {
-            if (fast_skip && !yb_2l_actor.may_trade(pool, cex_price, ev_ts, yb_2l_costs)) return;
+            if (fast_skip && !yb_may_trade(cex_price, ev_ts)) return;
             auto actor_result = yb_2l_actor.try_fire(
                 pool, cex_price, ev_ts, yb_2l_costs
             );
+            if (actor_result.fired) yb_band_ready = false;  // a refused route leaves the pool and ledger as they were
             if (!actor_result.fired) return;
 
             ++m.yb_2l_fires;
-            m.yb_round_trips += actor_result.round_trip;
+            m.yb_levamm_profit_coin0 += actor_result.net_profit;
             did_any_trade = true;
+            action_logger.log_injected(ev_ts, m.yb_2l_fires - 1, {actor_result.input, actor_result.output}, pool);
+            action_logger.annotate_last_yb(static_cast<uint8_t>(actor_result.direction),
+                yb_2l_actor.state().collateral, yb_2l_actor.projected_debt(ev_ts),
+                yb_2l_actor.state().stable_balance, yb_2l_actor.levamm_price(pool, ev_ts),
+                actor_result.donation_committed ? actor_result.donation : T(0));
             m.n_rebalances += actor_result.fill_add_price_scale_moves;
             if (actor_result.fill_adds > 0 ||
                 actor_result.fill_removes > 0) {
@@ -727,7 +699,6 @@ EventLoopResult<T> run_event_loop_impl(
             if (!actor_result.donation_committed) return;
 
             ++m.donations;
-            m.donation_amounts_total[0] += actor_result.donation;
             m.donation_coin0_total += actor_result.donation;
             if (actor_result.donation_price_scale_moved) {
                 ++m.n_rebalances;
@@ -736,49 +707,6 @@ EventLoopResult<T> run_event_loop_impl(
                 ev_ts, actor_result.donation,
                 actor_result.price_scale_after_donation, dcfg.apy
             );
-            invalidate_edge_inputs();
-        }
-    };
-    const auto run_yb_reference_once = [&] (
-        uint64_t ev_ts,
-        const T& cex_price,
-        bool& did_any_trade,
-        trading::CexDepthBook<T>* depth
-    ) {
-        auto& yb_reference_market = yb->reference_market;
-        const auto& yb_reference_costs = yb->reference_costs;
-        if (!yb_reference_on) return;
-        if constexpr (std::is_floating_point_v<T>) {
-            const T price_scale_before = pool.cached_price_scale;
-            auto route = yb_reference_market.execute_best(
-                pool, cex_price, ev_ts, yb_reference_costs, true, depth
-            );
-            if (!route.committed) return;
-
-            ++m.yb_2l_fires;
-            action_logger.log_yb_route(ev_ts, route);
-
-            const T before_donation = route.direction == 1
-                ? route.price_scale_after_add : price_scale_before;
-            if (route.emitted_add &&
-                route.price_scale_after_add != price_scale_before) {
-                ++m.n_rebalances;
-            }
-            if (route.emitted_donation &&
-                route.price_scale_after_donation != before_donation) {
-                ++m.n_rebalances;
-            }
-
-            if (route.emitted_donation) {
-                ++m.donations;
-                m.donation_amounts_total[0] += route.donation;
-                m.donation_coin0_total += route.donation;
-                action_logger.log_yb_donation(
-                    ev_ts, route.donation,
-                    route.price_scale_after_donation, dcfg.apy
-                );
-            }
-            did_any_trade = true;
             invalidate_edge_inputs();
         }
     };
@@ -841,12 +769,7 @@ EventLoopResult<T> run_event_loop_impl(
         const uint64_t ev_ts = events.ts[ev_idx];
         pool.set_block_timestamp(ev_ts);
         const T cex_price = static_cast<T>(events.p_cex[ev_idx]);
-        trading::CexDepthBook<T>* fill_book = nullptr;
-        if (flow_may_trade(ev_idx)) {
-            events::trade_flow_book(*cfg.trade_flow, events.flow_bin[ev_idx], flow_fills);
-            flow_book.reset(&flow_fills);
-            fill_book = &flow_book;
-        }
+        const bool arb_may_trade = native_may_trade(cex_price);
         if (swap_reports) {
             pool.clear_policy_price_feed();
             pool.refresh_policy_context();
@@ -868,7 +791,7 @@ EventLoopResult<T> run_event_loop_impl(
             break;
         }
         if (donation_on && dcfg.next_ts != 0 && ev_ts >= dcfg.next_ts) {
-            apply_donation(ev_idx, ev_ts, cex_price);
+            apply_donation(ev_ts, cex_price);
         }
 
         if (!(cex_price > T(0))) {
@@ -893,7 +816,7 @@ EventLoopResult<T> run_event_loop_impl(
         // Reports affect policy quotes, not pool geometry. Actual reserve,
         // invariant and price-scale mutations invalidate both caches below.
         if (swap_reports) fee_valid = false;
-        bool did_any_trade = fill_book != nullptr && execute_arb(ev_idx, ev_ts, cex_price, fill_book);
+        bool did_any_trade = arb_may_trade && execute_arb(ev_idx, ev_ts, cex_price);
         if (swap_reports) {
             pool.clear_policy_price_feed();
             fee_valid = false;
@@ -901,16 +824,14 @@ EventLoopResult<T> run_event_loop_impl(
         if constexpr (EnableYb) {
             if (yb_2l_on) {
                 run_yb_2l_once(ev_ts, cex_price, did_any_trade);
-            } else if (yb_reference_on) {
-                run_yb_reference_once(ev_ts, cex_price, did_any_trade, nullptr);
             }
         }
         if (user_swap_on && ucfg.next_ts != 0 && ev_ts >= ucfg.next_ts) {
-            apply_user_swap(ev_idx, ev_ts, cex_price);
+            apply_user_swap(ev_ts, cex_price);
         }
         bool did_idle_tick = false;
         if (!did_any_trade && icfg.due(pool.last_timestamp, ev_ts)) {
-            did_idle_tick = apply_idle_tick(ev_idx, ev_ts, cex_price);
+            did_idle_tick = apply_idle_tick(ev_ts, cex_price);
             did_any_trade = did_idle_tick;
         }
         bool detailed_row_logged = false;
@@ -942,11 +863,6 @@ EventLoopResult<T> run_event_loop_impl(
                     sample_yb_report(
                         yb->actor, ev_ts, cex_price, detailed_row_logged
                     );
-                } else if (yb_reference_on) {
-                    sample_yb_report(
-                        yb->reference_market, ev_ts, cex_price,
-                        detailed_row_logged
-                    );
                 }
             }
         }
@@ -971,19 +887,17 @@ EventLoopResult<T> run_event_loop_impl(
             };
             if (yb_2l_on) {
                 sample_yb_endpoint(yb->actor);
-            } else if (yb_reference_on) {
-                sample_yb_endpoint(yb->reference_market);
             }
         }
 
-        result.yb_external_equity_eth = yb_on ? yb->external_equity.equity : -1;
-        result.yb_external_growth_eth = yb_on ? yb->external_equity.growth : -1;
-        result.yb_external_max_drawdown_hourly = yb_on ? yb->external_equity.max_drawdown : -1;
-        result.yb_releverage_fee = yb_2l_on
-            ? yb->actor.state().fee
-            : (yb_reference_on ? yb->reference_market.state().fee : T(0));
+        result.yb_external_equity_eth = yb_2l_on ? yb->external_equity.equity : -1;
+        result.yb_external_growth_eth = yb_2l_on ? yb->external_equity.growth : -1;
+        result.yb_external_max_drawdown_hourly = yb_2l_on ? yb->external_equity.max_drawdown : -1;
+        result.yb_exposure_return = yb_2l_on ? yb->external_equity.exposure_return : -1;
+        result.yb_exposure_rms = yb_2l_on ? yb->external_equity.exposure_rms() : -1;
+        result.yb_releverage_fee = yb_2l_on ? yb->actor.state().fee : T(0);
         result.yb_releverage_apy =
-            yb_on ? yb->apy_tracker.apy() : -1.0;
+            yb_2l_on ? yb->apy_tracker.apy() : -1.0;
         result.yb_releverage_apy_gm = yb->apy_gm.value();
         result.yb_gm30 = yb->apy_gm30.value();
         result.yb_gm60 = yb->apy_gm60.value();
@@ -992,9 +906,9 @@ EventLoopResult<T> run_event_loop_impl(
         result.yb_gm30_windows = static_cast<uint64_t>(yb->apy_gm30.n_windows);
         result.yb_gm60_floor_share = yb->apy_gm60.floor_share();
         result.yb_price_scale_hourly_qv = yb->price_scale_variation.annualized();
-        result.yb_releverage_final_growth = yb_on
+        result.yb_releverage_final_growth = yb_2l_on
             ? yb->apy_tracker.final_growth() : -1.0;
-        result.yb_releverage_trades = yb_on ? m.yb_2l_fires : 0;
+        result.yb_releverage_trades = yb_2l_on ? m.yb_2l_fires : 0;
         result.yb_releverage_gm_windows =
             static_cast<uint64_t>(yb->apy_gm.n_windows);
         result.yb_releverage_gm_floored_windows =
@@ -1020,34 +934,15 @@ EventLoopResult<T> run_event_loop(
 ) {
     if (!std::isfinite(cfg.yb_min_net_profit_coin0) || cfg.yb_min_net_profit_coin0 < T(0))
         throw std::invalid_argument("yb_min_net_profit_coin0 must be finite and nonnegative");
-    if (!cfg.trade_flow || events.flow_bin.size() != events.size() ||
-        events.fill_bid.size() != events.size() || events.fill_ask.size() != events.size())
-        throw std::invalid_argument("the event loop requires indexed trade-flow events");
-    if (cfg.yb_arb == YbArb::LtRoundTrip && cfg.yb_mode != YbMode::Active2l)
-        throw std::invalid_argument("yb_arb='lt_round_trip' requires yb_mode='active_2l'");
-    if (!std::isfinite(static_cast<double>(cfg.yb_round_trip_cost_coin0)) || cfg.yb_round_trip_cost_coin0 < T(0))
-        throw std::invalid_argument("yb_round_trip_cost_coin0 must be finite and nonnegative");
-    if (cfg.event_cursor == EventCursor::FastSkip &&
-        (cfg.metric_profile != MetricProfile::FullSummary || cfg.yb_mode == YbMode::Reference2l))
-        throw std::invalid_argument("fast_skip requires full_summary and YB off or active_2l");
+    if (cfg.yb_arb != YbArb::Levamm && cfg.yb_mode != YbMode::Active2l)
+        throw std::invalid_argument("yb_arb='none' requires yb_mode='active_2l'");
     if (cfg.yb_mode == YbMode::Off) {
-        if (cfg.metric_profile == MetricProfile::GridCore) {
-            return run_event_loop_impl<false, true>(
-                pool, events, costs, dcfg, icfg, ucfg, cfg, candles,
-                event_start_floor_ts, out_actions, out_detailed_entries
-            );
-        }
-        return run_event_loop_impl<false, false>(
+        return run_event_loop_impl<false>(
             pool, events, costs, dcfg, icfg, ucfg, cfg, candles,
             event_start_floor_ts, out_actions, out_detailed_entries
         );
     }
-    if (cfg.metric_profile == MetricProfile::GridCore) {
-        throw std::invalid_argument(
-            "grid_core metric profile does not support YieldBasis"
-        );
-    }
-    return run_event_loop_impl<true, false>(
+    return run_event_loop_impl<true>(
         pool, events, costs, dcfg, icfg, ucfg, cfg, candles,
         event_start_floor_ts, out_actions, out_detailed_entries
     );

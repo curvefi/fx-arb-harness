@@ -1,9 +1,7 @@
-#include "curve_fx_evaluator/compiled_policy_identity.hpp"
 #include "curve_fx_evaluator/evaluator.hpp"
 
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -194,6 +192,8 @@ void extract_metrics_from_pool_result(
     m["yb_external_equity_eth"] = res.yb_external_equity_eth;
     m["yb_external_growth_eth"] = res.yb_external_growth_eth;
     m["yb_external_max_drawdown_hourly"] = res.yb_external_max_drawdown_hourly;
+    m["yb_exposure_return"] = res.yb_exposure_return;
+    m["yb_exposure_rms"] = res.yb_exposure_rms;
     m["yb_gm30"] = res.yb_gm30;
     m["yb_gm60"] = res.yb_gm60;
     m["yb_gm90"] = res.yb_releverage_apy_gm;
@@ -210,7 +210,7 @@ void extract_metrics_from_pool_result(
     m["yb_final_growth"] = res.yb_releverage_final_growth;
     m["yb_fee"] = static_cast<double>(res.yb_releverage_fee);
     m["yb_releverage_trades"] = static_cast<double>(res.yb_releverage_trades);
-    m["yb_round_trips"] = static_cast<double>(res.yb_round_trips);
+    m["yb_levamm_profit_coin0"] = static_cast<double>(rm.yb_levamm_profit_coin0);
     m["yb_gm_windows"] = static_cast<double>(res.yb_releverage_gm_windows);
     m["yb_gm_floored_windows"] = static_cast<double>(res.yb_releverage_gm_floored_windows);
     m["yb_gm_floor_share"] = res.yb_releverage_gm_floor_share;
@@ -310,10 +310,8 @@ void execute_scenario_job(
             ? pool_override->arb_report_offset.value_or(RealT(-1)) : RealT(-1);
         run_cfg.arb_report_rate = pool_override != nullptr
             ? pool_override->arb_report_rate.value_or(RealT(1)) : RealT(1);
-        run_cfg.trade_flow = &scen.trade_flow;
         run_cfg.enable_slippage_probes = session_cfg.enable_slippage_probes;
         run_cfg.event_cursor = session_cfg.event_cursor;
-        run_cfg.metric_profile = session_cfg.metric_profile;
         run_cfg.early_stop_max_7d_rel_price_diff = session_cfg.early_stop_max_7d_rel_price_diff;
         run_cfg.yb_mode = session_cfg.yb_mode;
         run_cfg.yb_releverage_fee =
@@ -323,10 +321,7 @@ void execute_scenario_job(
         run_cfg.yb_cash_multiplier = session_cfg.yb_cash_multiplier;
         run_cfg.yb_min_net_profit_coin0 = session_cfg.yb_min_net_profit_coin0;
         run_cfg.yb_arb = session_cfg.yb_arb;
-        if (pool_override != nullptr && pool_override->yb_lt_round_trip.has_value())
-            run_cfg.yb_arb = *pool_override->yb_lt_round_trip != RealT(0)
-                ? arb::harness::YbArb::LtRoundTrip : arb::harness::YbArb::Levamm;
-        run_cfg.yb_round_trip_cost_coin0 = session_cfg.yb_round_trip_cost_coin0;
+        run_cfg.yb_execution_bps = session_cfg.yb_execution_bps;
         run_cfg.yb_initial_state = session_cfg.yb_initial_state;
 
         std::vector<arb::harness::Action<RealT>>* actions_ptr = nullptr;
@@ -361,6 +356,8 @@ void execute_scenario_job(
             effective["pool.costs.gas_coin0"] =
                 static_cast<double>(costs.gas_coin0);
             effective["pool.costs.report_coin0"] = static_cast<double>(costs.report_coin0);
+            effective["pool.costs.entry_edge_bps"] =
+                static_cast<double>(costs.entry_edge_bps);
             effective["run.yb_min_net_profit_coin0"] = static_cast<double>(run_cfg.yb_min_net_profit_coin0);
             effective["pool.run.yb_releverage_fee"] =
                 static_cast<double>(run_cfg.yb_releverage_fee);
@@ -368,8 +365,6 @@ void execute_scenario_job(
             effective["pool.run.arb_report_random_count"] = static_cast<double>(run_cfg.arb_report_random_count);
             effective["pool.run.arb_report_offset"] = static_cast<double>(run_cfg.arb_report_offset);
             effective["pool.run.arb_report_max_age_s"] = static_cast<double>(run_cfg.arb_report_max_age_s);
-            effective["pool.run.yb_lt_round_trip"] =
-                run_cfg.yb_arb == arb::harness::YbArb::LtRoundTrip ? 1.0 : 0.0;
             effective["pool.run.arb_report_rate"] =
                 static_cast<double>(run_cfg.arb_report_rate);
             if (run_cfg.yb_initial_state && run_cfg.yb_mode != arb::harness::YbMode::Off) {
@@ -380,18 +375,11 @@ void execute_scenario_job(
             }
 
             trace_lease.emplace(TraceArena::global_instance().acquire());
-            run_cfg.detailed_log = true;
             run_cfg.detailed_interval = std::max<size_t>(1, obs_spec.trace_interval);
-            run_cfg.save_actions = obs_spec.trace_actions;
             detailed_ptr = &trace_lease->detailed_entries();
-            if (run_cfg.save_actions) {
+            if (obs_spec.trace_actions) {
                 actions_ptr = &trace_lease->actions();
             }
-        } else {
-            // Summary mode: keep both output pointers null so the detailed
-            // logger stays disabled (enabled() == out_entries_ != nullptr)
-            // and the per-worker vectors never fill with per-event entries.
-            run_cfg.detailed_log = false;
         }
 
         auto pool_res = arb::harness::run_single_pool<RealT>(
@@ -415,8 +403,6 @@ void execute_scenario_job(
         extract_metrics_from_pool_result(pool_res, tw_summary, sc_res.metrics);
         if (trace_lease.has_value()) {
             sc_res.has_trace = true;
-            sc_res.trace_record_count = trace_lease->detailed_entries().size();
-            sc_res.action_count = trace_lease->actions().size();
             sc_res.trace_json = serialize_detailed_entries_json(
                 trace_lease->detailed_entries());
 
@@ -454,8 +440,6 @@ BatchEvaluationResult evaluate_batch_candidates(
     const std::vector<EvaluationCandidate<RealT>>& candidates,
     const ObservationSpec& obs_spec
 ) {
-    auto t_start = std::chrono::high_resolution_clock::now();
-
     const size_t n_candidates = candidates.size();
     const auto& scenario = store.scenario();
 
@@ -487,19 +471,14 @@ BatchEvaluationResult evaluate_batch_candidates(
     }
 
 
-    if (n_candidates > 0) {
-        // Each job owns one candidate result. TraceArena serializes full traces.
-        WorkerPool::global().run_jobs(n_candidates, [&](size_t cand_idx) {
-            execute_scenario_job(
-                candidates[cand_idx], scenario, session_cfg, obs_spec,
-                parsed_overrides[cand_idx] ? &*parsed_overrides[cand_idx] : nullptr,
-                override_errors[cand_idx], batch_result.candidate_results[cand_idx]
-            );
-        });
-    }
-
-    auto t_end = std::chrono::high_resolution_clock::now();
-    batch_result.elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+    // Each job owns one candidate result. TraceArena serializes full traces.
+    WorkerPool::global().run_jobs(n_candidates, [&](size_t cand_idx) {
+        execute_scenario_job(
+            candidates[cand_idx], scenario, session_cfg, obs_spec,
+            parsed_overrides[cand_idx] ? &*parsed_overrides[cand_idx] : nullptr,
+            override_errors[cand_idx], batch_result.candidate_results[cand_idx]
+        );
+    });
 
     return batch_result;
 }

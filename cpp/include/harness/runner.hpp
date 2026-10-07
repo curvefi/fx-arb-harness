@@ -11,7 +11,6 @@
 #include <utility>
 #include <vector>
 
-#include "core/common.hpp"
 #include "events/types.hpp"
 #include "harness/metrics.hpp"
 #include "harness/actions.hpp"
@@ -100,6 +99,8 @@ struct PoolResult {
     double yb_external_equity_eth{-1.0};
     double yb_external_growth_eth{-1.0};
     double yb_external_max_drawdown_hourly{-1.0};
+    double yb_exposure_return{-1.0};
+    double yb_exposure_rms{-1.0};
     double yb_gm30{-1.0};
     double yb_gm60{-1.0};
     double yb_gm30_floor_share{-1.0};
@@ -110,7 +111,6 @@ struct PoolResult {
     std::array<double,3> policy_price_counters{-1,-1,-1};
     double yb_releverage_final_growth{-1.0};
     uint64_t yb_releverage_trades{0};
-    uint64_t yb_round_trips{0};
     uint64_t yb_releverage_gm_windows{0};
     uint64_t yb_releverage_gm_floored_windows{0};
     double yb_releverage_gm_floor_share{-1.0};
@@ -313,6 +313,8 @@ PoolResult<T> run_single_pool(
         result.yb_external_equity_eth = loop_result.yb_external_equity_eth;
         result.yb_external_growth_eth = loop_result.yb_external_growth_eth;
         result.yb_external_max_drawdown_hourly = loop_result.yb_external_max_drawdown_hourly;
+        result.yb_exposure_return = loop_result.yb_exposure_return;
+        result.yb_exposure_rms = loop_result.yb_exposure_rms;
         result.yb_gm30 = loop_result.yb_gm30;
         result.yb_gm60 = loop_result.yb_gm60;
         result.yb_gm30_floor_share = loop_result.yb_gm30_floor_share;
@@ -325,7 +327,6 @@ PoolResult<T> run_single_pool(
 #endif
         result.yb_releverage_final_growth = loop_result.yb_releverage_final_growth;
         result.yb_releverage_trades = loop_result.yb_releverage_trades;
-        result.yb_round_trips = loop_result.metrics.yb_round_trips;
         result.yb_releverage_gm_windows = loop_result.yb_releverage_gm_windows;
         result.yb_releverage_gm_floored_windows =
             loop_result.yb_releverage_gm_floored_windows;

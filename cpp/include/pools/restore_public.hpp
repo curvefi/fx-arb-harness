@@ -1,8 +1,44 @@
 #pragma once
+#include <stdexcept>
+#include <type_traits>
+#include <utility>
+
 #include "pools/pool_init.hpp"
 #include "pools/twocrypto_fx/twocrypto.hpp"
 
 namespace arb::pools {
+namespace restore_detail {
+template <class S, class = void>
+struct IsDualEmaState : std::false_type {};
+template <class S>
+struct IsDualEmaState<S, std::void_t<
+    decltype(std::declval<S&>().last_update_ts), decltype(std::declval<S&>().last_prices),
+    decltype(std::declval<S&>().fast_ema), decltype(std::declval<S&>().slow_ema),
+    decltype(std::declval<S&>().price_scale)>> : std::true_type {};
+} // namespace restore_detail
+
+// The chain's dual-EMA policy state replaces the one initialized from the pool.
+template<class T, class Pool>
+void restore_policy_state(Pool& pool, const PoolHistoricalState<T>& state) {
+#ifdef TWOCRYPTO_POLICY_HEADER
+    using State = std::decay_t<decltype(pool.policy.compiled_state)>;
+    if constexpr (restore_detail::IsDualEmaState<State>::value) {
+        if (pool.policy.kind == twocrypto_fx::PolicyKind::Compiled) {
+            State restored{};
+            restored.last_update_ts = state.policy_last_update_ts;
+            restored.last_prices = state.policy_last_prices;
+            restored.fast_ema = state.policy_fast_ema;
+            restored.slow_ema = state.policy_slow_ema;
+            restored.price_scale = state.policy_price_scale;
+            pool.policy.compiled_state = restored;
+            return;
+        }
+    }
+#endif
+    (void)pool;
+    (void)state;
+    throw std::invalid_argument("historical policy_state requires a compiled dual-EMA policy");
+}
 template<class T, class Pool>
 void restore_public_state(Pool& pool, const PoolHistoricalState<T>& state) {
     pool.balances = state.balances;
@@ -30,16 +66,6 @@ void restore_public_state(Pool& pool, const PoolHistoricalState<T>& state) {
     pool.cached_ema_alpha = T(0);
     pool.cached_ema_alpha_valid = false;
     pool.initialize_policy_state_from_pool();
-}
-template<class T>
-auto pool_from_public_state(const PoolInit<T>& init) {
-    twocrypto_fx::TwoCryptoPool<T> pool(init.precisions, init.A, init.gamma,
-        init.mid_fee, init.out_fee, init.fee_gamma, init.adjustment_step_min,
-        init.adjustment_step_max, init.ma_time, init.historical_state.price_scale,
-        init.reserved_profit_fraction, init.admin_fee, init.policy_kind, init.policy_config);
-    pool.donation_duration = init.donation_duration;
-    pool.set_block_timestamp(init.historical_state.source_timestamp);
-    restore_public_state(pool, init.historical_state);
-    return pool;
+    if (state.has_policy_state) restore_policy_state(pool, state);
 }
 } // namespace arb::pools
