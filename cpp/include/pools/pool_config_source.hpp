@@ -31,7 +31,6 @@ public:
         }
         PoolInit<T> pool;
         arb::trading::Costs<T> costs;
-        pool.global_index = index;
         parse_pool_entry<T>(explicit_pools_.at(index).as_object(), pool, costs);
         return {std::move(pool), std::move(costs)};
     }

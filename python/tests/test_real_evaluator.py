@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from curve_fx_harness_client import CandidateSpec, EvaluatorClient
-from curve_fx_harness_client.exceptions import RemoteEvaluatorError
 from curve_fx_harness_client.models import ObservationSpec
 
 
@@ -49,8 +48,6 @@ def _write_inputs(root: Path, *, flat: bool = False) -> tuple[Path, Path]:
                 "costs": {
                     "arb_fee_bps": 10,
                     "gas_coin0": 1_000_000_000 if flat else 0,
-                    "use_volume_cap": False,
-                    "volume_cap_mult": 1,
                 },
             }]
         }, sort_keys=True),
@@ -78,23 +75,25 @@ def _write_price_feed(root: Path, contents: str) -> Path:
     return path
 
 
-def _description() -> dict[str, object]:
+def _identity() -> dict[str, object]:
     assert EVALUATOR is not None
     return json.loads(subprocess.run(
-        [EVALUATOR, "--describe-json"],
+        [EVALUATOR, "--identity-json"],
         check=True,
         capture_output=True,
         text=True,
-    ).stdout)
+    ).stdout)["evaluator_identity"]
 
 
-def _policy_defaults(description: dict[str, object]) -> list[float]:
-    parameters = description["parameter_schema"]["parameters"]
-    return [
-        parameter["default"]
-        for parameter in parameters
-        if parameter["name"].startswith("policy.")
-    ]
+def _policy_params(identity: dict[str, object]) -> list[float]:
+    # A native build takes none; a compiled-policy build reads its values (a JSON array)
+    # from CURVE_FX_TEST_POLICY_PARAMS and skips without them.
+    if not identity["policy_parameter_count"]:
+        return []
+    raw = os.environ.get("CURVE_FX_TEST_POLICY_PARAMS")
+    if raw is None:
+        pytest.skip("CURVE_FX_TEST_POLICY_PARAMS is required for a compiled-policy evaluator")
+    return json.loads(raw)
 
 
 def _open(
@@ -133,40 +132,6 @@ def _evaluate_once(
     ], **kwargs).results[0]
 
 
-def test_historical_start_apy_excludes_checkpoint_growth(tmp_path: Path) -> None:
-    template, candles = _write_inputs(tmp_path, flat=True)
-    document = json.loads(template.read_text())
-    wad = 10**18
-    # Balanced reserves imply XCP=100,000; supply=50,000 gives starting VP=2.
-    state = {
-        "source_timestamp": 1_700_000_000,
-        "last_timestamp": 1_700_000_000,
-        "balances": [str(100_000 * wad)] * 2,
-        "admin_balances": ["0", "0"],
-        "D": str(200_000 * wad),
-        "total_supply": str(50_000 * wad),
-        "price_scale": str(wad), "price_oracle": str(wad),
-        "last_prices": str(wad), "virtual_price": str(2 * wad),
-        "xcp_profit": str(2 * wad), "lp_xcp_profit": str(3 * wad // 2),
-        "donation_shares": "0", "last_donation_release_ts": "1700000000",
-        "donation_protection_expiry_ts": "0", "donation_protection_period": "3600",
-        "donation_protection_lp_threshold": "0",
-        "donation_protection_extension_remainder": "0",
-        "donation_shares_max_ratio": str(wad // 4),
-    }
-    document["pools"][0]["pool"]["historical_state"] = state
-    template.write_text(json.dumps(document))
-    with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
-        _open(client, template, candles, "historical", dustswap_freq_s=0)
-        result = _evaluate_once(client, _policy_defaults(_description()), candidate_id="historical")
-    assert result.status == "ok"
-    assert result.metrics["trades"] == 0
-    assert result.metrics["vp"] == 2.0
-    assert result.metrics["lp_xcp_profit"] == 1.5
-    assert result.metrics["apy"] == 0.0
-    assert result.metrics["apy_net"] == 0.0
-
-
 @pytest.mark.parametrize("price_feed_csv", [
     "ts,nav\n1699999995,1.0\n1700000600,1.001\n",
     "1699999995,1.0\n1700000600,1.001\n",
@@ -176,23 +141,18 @@ def test_identity_policy_admission_and_batch(
     tmp_path: Path, price_feed_csv: str,
 ) -> None:
     assert EVALUATOR is not None
-    description = _description()
-    build = description["build"]
+    build = _identity()
     expected_mode = os.environ.get("CURVE_FX_EXPECTED_NUMERIC_MODE")
     expected_real_type = os.environ.get("CURVE_FX_EXPECTED_REAL_TYPE")
     if expected_mode:
         assert build["numeric_mode"] == expected_mode
     if expected_real_type:
         assert build["real_type"] == expected_real_type
-    assert build["target"] == Path(EVALUATOR).name
-    assert build["wire_real_type"] == "IEEE-754 binary64"
-    assert build["wire_real_digits"] == 53
-    assert build["real_digits"] >= build["wire_real_digits"]
+    assert build["build_target"] == Path(EVALUATOR).name
 
-    policy_params = _policy_defaults(description)
-    policy = description["policy"]
+    policy_params = _policy_params(build)
     expected_count = len(policy_params)
-    assert policy["parameter_count"] == expected_count == len(policy_params)
+    assert build["policy_parameter_count"] == expected_count
     with pytest.raises(ValueError, match="finite"):
         CandidateSpec(
             ordinal=0,
@@ -208,7 +168,7 @@ def test_identity_policy_admission_and_batch(
         identity = hello.evaluator_identity
         assert identity.numeric_mode == build["numeric_mode"]
         assert identity.real_type == build["real_type"]
-        assert identity.policy_id == policy["id"]
+        assert identity.policy_id == build["policy_id"]
         assert identity.policy_parameter_count == expected_count
         _open(client, template, candles, "identity", price_feed_path=price_feed)
         result = _evaluate_once(
@@ -222,127 +182,9 @@ def test_identity_policy_admission_and_batch(
         client.shutdown()
 
 
-def test_session_rejects_malformed_execution_options(tmp_path: Path) -> None:
-    assert EVALUATOR is not None
-    template, candles = _write_inputs(tmp_path)
-    with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
-        for key, value in (
-            ("state_reconciliation_mode", True), ("actor_timing_mode", True),
-            ("cex_depth_path", 42), ("observed_state_path", None),
-        ):
-            # Exercise the raw public protocol, bypassing Pydantic coercion.
-            with pytest.raises(RemoteEvaluatorError, match=f"{key} must be a string") as exc:
-                client._transact({
-                    "protocol": "curve_fx_eval", "type": "open_session",
-                    "request_id": key, "session_id": "invalid-options",
-                    "template_path": str(template), "market_path": str(candles),
-                    "scenario_id": "protocol-contract", key: value,
-                })
-            assert exc.value.error_code == "INVALID_ARGUMENT"
-        _open(client, template, candles, "valid-after-rejection")
-
-
-def test_depth_clock_and_trace_need_no_companion_market(tmp_path: Path) -> None:
-    template, _ = _write_inputs(tmp_path, flat=True)
-    depth = Path(__file__).parents[2]/"cpp/tests/fixtures/depth-v2.npz"
-    for mode, interval in (("off", 60), ("reference_2l", 30), ("active_2l", 60)):
-        with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
-            client.open_session(f"depth-{mode}", template, "depth-clock", cex_depth_path=depth,
-                                event_mode="depth", observation_interval_s=interval, dustswap_freq_s=0,
-                                cex_depth_max_age_s=30, yb_mode=mode,
-                                actor_timing_mode="legacy_event" if mode == "off" else "minute_sequential")
-            result = _evaluate_once(client, _policy_defaults(_description()), candidate_id=mode,
-                                    observation=ObservationSpec(kind="full_trace", trace_interval=1,
-                                                                artifact_dir=f"trace-{mode}"))
-            assert result.status == "ok" and result.artifacts is not None
-            trace = json.loads((tmp_path/result.artifacts.trace_path).read_text())
-            times = list(range(1_700_000_001, 1_700_000_122, interval))
-            assert [row["t"] for row in trace] == times
-            assert [row["p_cex"] for row in trace] == pytest.approx([
-                1. if ts < 1_700_000_013 else 1.02 if ts < 1_700_000_121 else 1.1 for ts in times])
-    for override in ({"market_path": str(tmp_path/"candles.json")}, {"cex_depth_path": str(tmp_path/"candles.json")}):
-        with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
-            with pytest.raises(RemoteEvaluatorError, match="depth"):
-                client.open_session("invalid-depth", template, "depth-clock", event_mode="depth",
-                                    **(dict(cex_depth_path=depth) | override))
-
-
-def test_profiles_and_registered_range_match_public_results(tmp_path: Path) -> None:
-    assert EVALUATOR is not None
-    policy_params = _policy_defaults(_description())
-    template, candles = _write_inputs(tmp_path)
-    fields = (
-        "vp",
-        "apy_net",
-        "apy_net_robust_90d",
-        "avg_rel_price_diff",
-        "detach_energy_ungated",
-        "trades",
-        "n_rebalances",
-    )
-    override = {
-        "pool": {
-            "A": "5.000000000000001",
-            "mid_fee": "0.001",
-            "out_fee": "0.001",
-            "fee_gamma": "0.030000000000000123",
-            "reserved_profit_fraction": "0.3400000123",
-        }
-    }
-
-    with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as scalar:
-        _open(scalar, template, candles, "scalar", metric_profile="full_summary")
-        direct = scalar.evaluate_batch([
-            CandidateSpec(
-                ordinal=4,
-                candidate_id="direct",
-                policy_params=policy_params,
-                pool_overrides=override,
-            )
-        ], metric_fields=fields, metrics_format="array")["results"][0]
-        scalar.register_grid("one-point", {
-            "candidate_defaults": {
-                "policy_params": policy_params,
-                "pool": override["pool"],
-            },
-            "axes": {},
-            "axis_order": [],
-            "shape": [],
-        })
-        ranged = scalar.evaluate_batch(
-            [],
-            metric_fields=fields,
-            metrics_format="array",
-            trusted_candidates=True,
-            grid_id="one-point",
-            ranges=((0, 1),),
-        )["results"][0]
-        assert ranged["ordinal"] == 0
-        assert ranged["candidate_id"] == "p00000000"
-        assert ranged["metrics"] == direct["metrics"]
-
-    with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as skipped:
-        _open(
-            skipped,
-            template,
-            candles,
-            "exact-skip",
-            event_cursor="exact_skip",
-            metric_profile="grid_core",
-        )
-        exact = skipped.evaluate_batch([
-            CandidateSpec(
-                ordinal=4,
-                candidate_id="exact-skip",
-                policy_params=policy_params,
-                pool_overrides=override,
-            )
-        ], metric_fields=fields).results[0]
-        assert exact.metrics == dict(zip(fields, direct["metrics"]))
-
 def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
     assert EVALUATOR is not None
-    policy_params = _policy_defaults(_description())
+    policy_params = _policy_params(_identity())
     template, candles = _write_inputs(tmp_path, flat=True)
     price_feed = _write_price_feed(tmp_path, "ts,price\n1699999995,1.0\n")
     observation = ObservationSpec(
@@ -378,7 +220,7 @@ def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
         actions = json.loads(actions_path.read_text(encoding="utf-8"))
         assert trace[0]["p_price_feed"] == pytest.approx(1.0)
         tick_timestamps = [row["ts"] for row in actions if row["type"] == "tick"]
-        assert tick_timestamps[:2] == [1_700_000_125, 1_700_000_245]
+        assert tick_timestamps[:2] == [1_700_000_120, 1_700_000_240]
         assert all(
             later - earlier == 120
             for earlier, later in zip(tick_timestamps, tick_timestamps[1:])
@@ -426,8 +268,8 @@ def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
         )
         by_time = {row["t"]: row for row in user_trace}
         assert user_trace[-1]["n_rebalances"] > 0
-        before = by_time[1_700_000_175]
-        after = by_time[1_700_000_185]
+        before = by_time[1_700_000_120]
+        after = by_time[1_700_000_180]
         fair_tvl = before["token0"] + after["p_cex"] * before["token1"]
         expected_dx = fair_tvl * 0.01 * 180 / 86_400
         assert after["token0"] - before["token0"] == pytest.approx(expected_dx)
@@ -472,24 +314,23 @@ def test_scheduling_yb_and_atomic_sidecars(tmp_path: Path) -> None:
         )
         assert not [row for row in rejected_actions if row.get("actor") == "user"]
 
-    for mode in ("active_2l", "reference_2l"):
-        with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
-            _open(
-                client,
-                template,
-                candles,
-                f"yb-{mode}",
-                price_feed_path=price_feed,
-                yb_mode=mode,
-                yb_releverage_fee=0.013,
-                yb_cash_multiplier=3.0,
-            )
-            result = _evaluate_once(
-                client,
-                policy_params,
-                candidate_id=f"yb-{mode}",
-                metric_fields=("yb_apy", "yb_fee"),
-            )
-            assert result.status == "ok"
-            assert result.metrics["yb_apy"] != -1.0
-            assert result.metrics["yb_fee"] == pytest.approx(0.013)
+    with EvaluatorClient(EVALUATOR, work_dir=tmp_path) as client:
+        _open(
+            client,
+            template,
+            candles,
+            "yb-active_2l",
+            price_feed_path=price_feed,
+            yb_mode="active_2l",
+            yb_releverage_fee=0.013,
+            yb_cash_multiplier=3.0,
+        )
+        result = _evaluate_once(
+            client,
+            policy_params,
+            candidate_id="yb-active_2l",
+            metric_fields=("yb_apy", "yb_fee"),
+        )
+        assert result.status == "ok"
+        assert result.metrics["yb_apy"] != -1.0
+        assert result.metrics["yb_fee"] == pytest.approx(0.013)

@@ -1,23 +1,17 @@
 #include <algorithm>
 #include <cmath>
-#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <limits>
 #include <tuple>
-#include <utility>
 #include "harness/yb_2l.hpp"
-#include "harness/yb_reference_2l.hpp"
 #include "pools/twocrypto_fx/twocrypto.hpp"
-#include "trading/cex_depth.hpp"
 
 namespace fx = arb::pools::twocrypto_fx;
 namespace harness = arb::harness;
 
 using Pool = fx::TwoCryptoPool<double>;
 using Actor = harness::Yb2LActor<double>;
-using ReferenceMarket = harness::YbReference2LMarket<double>;
 
 namespace {
 
@@ -52,9 +46,7 @@ harness::YbInitialState<double> historical_yb_state() {
     state.redeemed = 12'211'045.854655864;
     state.stable_balance = 40'632'546.70310546;
     state.lt_stable_balance = 0.0;
-    state.flash_max_loan = 30'000'000.379967466;
     state.stable_aggregator = 0.9999390559313684;
-    state.rounding_discount = 1e-8;
     state.lt_donation_discount = 0.01;
     return state;
 }
@@ -119,7 +111,6 @@ int main() {
     {
         const auto initial = historical_yb_state();
         const auto actor = Actor::from_state(initial);
-        const auto market = ReferenceMarket::from_state(initial);
         require(actor.state().collateral == initial.collateral,
                 "active_2l did not retain historical collateral");
         require(actor.state().debt == initial.debt && actor.state().rate == initial.rate &&
@@ -129,27 +120,12 @@ int main() {
                     actor.state().min_safe_debt_ratio == 1.0 / 16.0 &&
                     actor.state().max_safe_debt_ratio == 17.0 / 32.0,
                 "historical leverage did not derive the deployed safety ratios");
-        require(market.state().flash_max_loan == initial.flash_max_loan &&
-                    market.state().stable_aggregator == initial.stable_aggregator &&
-                    market.state().rounding_discount == initial.rounding_discount,
-                "reference_2l did not retain historical external inputs");
-        const auto checkpoint_interest =
-            actor.projected_interest_summary(initial.source_timestamp);
-        require(std::fabs(checkpoint_interest.accrued) < 1e-9 &&
-                    checkpoint_interest.pending_interest > 0.0 &&
-                    std::fabs(checkpoint_interest.conservation_residual) < 1e-6,
-                "historical state lost initial pending-interest conservation");
-        const auto future_interest =
-            actor.projected_interest_summary(initial.source_timestamp + 86400);
-        require(future_interest.accrued > 0.0 &&
-                    std::fabs(future_interest.conservation_residual) < 1e-6,
-                "post-checkpoint interest accounting did not conserve");
+        require(actor.projected_debt(initial.source_timestamp) + initial.redeemed > initial.minted,
+                "historical state lost its pending interest");
 
         auto zero_cash = initial;
         zero_cash.stable_balance = 0.0;
-        zero_cash.flash_max_loan = 0.0;
         (void)Actor::from_state(zero_cash);
-        (void)ReferenceMarket::from_state(zero_cash);
 
         auto invalid = initial;
         invalid.rate_time = initial.source_timestamp + 1;
@@ -160,158 +136,6 @@ int main() {
             rejected = true;
         }
         require(rejected, "future historical rate_time was accepted");
-    }
-
-    // Contract-derived VirtualPool route surface: both directions commit their
-    // required native legs, while a forced final-output failure rolls back the
-    // complete pool and YB state.
-    for (size_t direction = 0; direction < 2; ++direction) {
-        Pool pool = make_pool();
-        const Pool pool_before = pool;
-        auto market = ReferenceMarket::fresh_2l(
-            pool, 0.0145, 0.012, TS, 3.0
-        );
-        const auto state_before = market.state();
-        const double basis = pool.balances[direction];
-        harness::YbReference2LRouteResult<double> route;
-        for (double fraction : {1e-7, 1e-6, 1e-5, 1e-4, 1e-3}) {
-            Pool candidate_pool = pool_before;
-            auto candidate_market = ReferenceMarket::fresh_2l(
-                candidate_pool, 0.0145, 0.012, TS, 3.0
-            );
-            route = candidate_market.apply_atomic(
-                candidate_pool, direction, basis * fraction, 0.0, TS + 3600
-            );
-            if (route.committed) {
-                pool = std::move(candidate_pool);
-                market = std::move(candidate_market);
-                break;
-            }
-        }
-        require(route.committed, "reference_2l must execute both route directions");
-        require(route.output > 0.0, "reference_2l route output must be positive");
-        require(
-            direction == 0 ? route.emitted_remove : route.emitted_add,
-            "reference_2l must execute the direction-specific native leg"
-        );
-        require(
-            !same_pool_state(pool, pool_before),
-            "reference_2l committed route must mutate the pool"
-        );
-
-        Pool failed_pool = pool_before;
-        auto failed_market = ReferenceMarket::fresh_2l(
-            failed_pool, 0.0145, 0.012, TS, 3.0
-        );
-        const auto failed = failed_market.apply_atomic(
-            failed_pool, direction, route.input,
-            std::nextafter(route.output, std::numeric_limits<double>::infinity()),
-            TS + 3600
-        );
-        require(!failed.committed, "reference_2l forced slippage must reject");
-        require(
-            same_pool_state(failed_pool, pool_before),
-            "reference_2l rejected route must roll back the complete pool"
-        );
-        require(
-            failed_market.state().collateral == state_before.collateral &&
-            failed_market.state().debt == state_before.debt &&
-            failed_market.state().stable_balance == state_before.stable_balance,
-            "reference_2l rejected route must roll back YB state"
-        );
-    }
-
-    {
-        auto pool = make_pool();
-        auto market = ReferenceMarket::fresh_2l(pool, 0.0145, 0.012, TS, 3.0);
-        harness::YbReference2LCosts<double> costs; costs.execution_bps = {1, 1}; costs.transaction_coin0 = 1;
-        const arb::trading::CexDepthSnapshot snapshot{1, {{10000., 1000.}}, {{20000., 1000.}}};
-        const arb::trading::CexDepthBook<double> book(&snapshot);
-        auto quote = [&] { return market.best_route_for_direction(pool, 15000., TS, costs, true, 1, 1e-7, .02, &book); };
-        const auto original = quote(); costs.min_net_profit_coin0 = 1;
-        const auto explicit_default = quote();
-        require(original.committed && original.input == explicit_default.input && original.profit_coin0 == explicit_default.profit_coin0, "default margin changed quote");
-        costs.transaction_coin0 += original.profit_coin0 - 0.5;
-        const auto blocked = quote(); costs.min_net_profit_coin0 = 0;
-        const auto admitted = quote();
-        require(!blocked.committed && admitted.committed && admitted.profit_coin0 > 0 && admitted.profit_coin0 < 1 &&
-            blocked.input == admitted.input && blocked.output == admitted.output && blocked.profit_coin0 == admitted.profit_coin0,
-            "margin changed sizing/economics or did not admit positive net");
-        costs.min_net_profit_coin0 = admitted.profit_coin0;
-        require(!quote().committed, "profit equal to floor was admitted");
-        costs.min_net_profit_coin0 = 0; costs.transaction_coin0 += admitted.profit_coin0;
-        require(!quote().committed && quote().profit_coin0 <= 0, "zero floor admitted nonpositive profit");
-        for (double bad : {-1., std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
-            costs.min_net_profit_coin0 = bad; bool rejected = false;
-            try { quote(); } catch (const std::invalid_argument&) { rejected = true; }
-            require(rejected, "invalid profit floor accepted");
-        }
-    }
-
-    // Reference routes share the already-depleted native book, price both
-    // directions from executable cash, and commit it with pool/YB state.
-    for (size_t direction = 0; direction < 2; ++direction) {
-        Pool pool = make_pool();
-        auto market = ReferenceMarket::fresh_2l(pool, 0.0145, 0.012, TS, 3.0);
-        harness::YbReference2LCosts<double> costs;
-        costs.market_basis_bps = 25.0;
-        costs.execution_bps[direction] = 10.0;
-        costs.transaction_coin0 = 0.25;
-        costs.leg_coin0[direction] = 0.5;
-        const arb::trading::CexDepthSnapshot snapshot = direction == 0
-            ? arb::trading::CexDepthSnapshot{
-                1, {{200'000.0, 1'000.0}}, {{300'000.0, 1'000.0}}}
-            : arb::trading::CexDepthSnapshot{
-                1, {{10'000.0, 1'000.0}}, {{20'000.0, 1.0}, {30'000.0, 1'000.0}}};
-        arb::trading::CexDepthBook<double> book(&snapshot);
-        if (direction == 1) {
-            require(book.consume_buy(1.0), "prior native ask consumption failed");
-        }
-        const auto before = book;
-        const auto result = market.execute_best(
-            pool, direction == 0 ? 250'000.0 : 20'000.0,
-            TS + 86400, costs, true, &book);
-        require(result.committed && result.direction == direction,
-                "depth-priced reference route did not commit expected direction");
-        const auto gross = direction == 0
-            ? before.sell_base(result.output)
-            : before.buy_base(result.input);
-        require(gross.has_value(), "committed reference hedge was not fillable");
-        const double adjusted = *gross * 1.0025;
-        const double expected = direction == 0
-            ? adjusted * 0.999 - result.input - 0.75
-            : result.output - adjusted * 1.001 - 0.75;
-        require(std::fabs(result.profit_coin0 - expected) <
-                    1e-10 * std::max(1.0, std::fabs(expected)),
-                "reference profit did not match depth cashflow and costs");
-        const double consumed = direction == 0 ? result.output : result.input;
-        const auto capacity_before = direction == 0
-            ? before.bid_capacity() : before.ask_capacity();
-        const auto capacity_after = direction == 0
-            ? book.bid_capacity() : book.ask_capacity();
-        require(capacity_before && capacity_after &&
-                    std::fabs((*capacity_before - *capacity_after) - consumed) < 1e-10,
-                "committed reference route did not consume the shared book");
-    }
-
-    {
-        Pool pool = make_pool();
-        const Pool pool_before = pool;
-        auto market = ReferenceMarket::fresh_2l(pool, 0.0145, 0.012, TS, 3.0);
-        const auto state_before = market.state();
-        const arb::trading::CexDepthSnapshot snapshot{
-            1, {{20'000.0, 0.001}}, {{30'000.0, 0.001}}};
-        arb::trading::CexDepthBook<double> book(&snapshot);
-        require(book.consume_sell(0.001) && book.consume_buy(0.001),
-                "failed to prepare exhausted reference book");
-        const auto result = market.execute_best(
-            pool, 100'000.0, TS + 86400,
-            harness::YbReference2LCosts<double>{}, true, &book);
-        require(!result.committed && same_pool_state(pool, pool_before) &&
-                    market.state().debt == state_before.debt &&
-                    market.state().stable_balance == state_before.stable_balance &&
-                    !book.bid_capacity() && !book.ask_capacity(),
-                "unfillable reference route mutated pool, market, or book");
     }
 
     bool checked = false;
@@ -328,10 +152,6 @@ int main() {
         );
         if (!result.fired) {
             require(
-                actor.shadow_violations() == 0,
-                "a non-fired route must not record shadow-ledger violations"
-            );
-            require(
                 same_pool_state(pool, pool_before),
                 "a non-fired route must not mutate the pool"
             );
@@ -339,10 +159,6 @@ int main() {
                 actor.state().stable_balance ==
                     actor_state_before.stable_balance,
                 "a non-fired route must not mutate stable balance"
-            );
-            require(
-                pool.donation_shares == pool_before.donation_shares,
-                "a non-fired route must not mutate donation shares"
             );
             continue;
         }
@@ -358,17 +174,10 @@ int main() {
             "committed donation must increase pool donation shares"
         );
         require(
-            actor.shadow_violations() == 0,
-            "cash3 atomic real legs must preserve the shadow-ledger invariant"
-        );
-        require(
-            actor.shadow_checks() > 0,
-            "a fired route must check the shadow-ledger invariant"
-        );
-        require(
-            std::fabs(actor.shadow_gap_max()) <=
+            std::fabs(actor.state().collateral - (pool.totalSupply - pool.donation_shares
+                    - fx::PoolTraits<double>::MINIMUM_LIQUIDITY())) <=
                 1e-6 * std::max(1.0, std::fabs(actor.state().collateral)),
-            "real-leg fill must leave no material shadow-ledger gap"
+            "real-leg fill must leave collateral equal to the circulating LP"
         );
         require(
             actor.state().stable_balance != actor_state_before.stable_balance,
@@ -379,6 +188,24 @@ int main() {
     }
 
     require(checked, "test inputs must produce a cash3 atomic real-leg fill");
+
+    // Around an equilibrium the no-trade band holds the price, and at its edges
+    // neither the gate nor the actor acts.
+    {
+        Pool pool = make_pool();
+        auto actor = Actor::fresh_2l(pool, 0.0145, 0.012, TS, 3.0);
+        pool.set_block_timestamp(TS + 3600);
+        Actor::Costs costs;
+        const double price = pool.get_p();
+        const auto band = actor.no_trade_band(pool, price, TS + 3600, TS + 7200, costs);
+        require(band.valid && band.lo < price && price < band.hi, "equilibrium price outside the no-trade band");
+        for (double p : {band.lo, band.hi}) for (uint64_t ts : {TS + 3600, TS + 7200}) {
+            Pool trial = pool;
+            auto trial_actor = actor;
+            require(!actor.may_trade(pool, p, ts, costs) && !trial_actor.try_fire(trial, p, ts, costs).fired &&
+                        same_pool_state(trial, pool), "the gate or actor acted inside its band");
+        }
+    }
 
     std::puts("YieldBasis 2L atomic route checks: OK");
     return 0;

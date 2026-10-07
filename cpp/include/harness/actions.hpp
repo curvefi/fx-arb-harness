@@ -6,25 +6,10 @@
 #include <cstdint>
 #include <variant>
 #include <vector>
-#include <string>
 
 
 namespace arb {
 namespace harness {
-
-struct ReconciliationSummary {
-    uint64_t observations{}, episodes{}, resets{};
-};
-template<class T> struct StateReconciliationAction {
-    std::string phase;
-    uint64_t wall_ns{}, source_block{}, source_timestamp{}, available_ns{};
-    uint64_t detection_ns{}, deadline_ns{}, apply_ns{}, segment{};
-    bool state_changed{false};
-    std::array<T, 2> balances_before{}, balances_after{};
-    T scale_before{}, scale_after{}, debt_before{}, debt_after{};
-    T collateral_before{}, collateral_after{}, cash_before{}, cash_after{};
-    T vp_before{}, vp_after{}, xcp_before{}, xcp_after{};
-};
 
 // Donation action
 template <typename T>
@@ -80,27 +65,49 @@ struct ExchangeAction {
     T vp_before{0};
     T vp_after{0};
     T balance_indicator{0};
+    std::array<T, 2> balances_after{T(0), T(0)};
+    T D_after{0};
+    T lp_xcp_profit_after{0};
+    T donation_shares_after{0};
+    T total_supply_after{0};
+    T virtual_price_after{0};  // cached virtual_price (vp_after is the donation-boosted vp)
+    T last_donation_release_ts_after{0};
+    T donation_protection_expiry_ts_after{0};
 };
 
-// direction 0 consumes coin0 and returns coin1; direction 1 consumes coin1
-// and returns coin0. Profit, donation, and flash_amount are coin0 quantities.
+// A logged active_2l fill (its index), its input and output, and the public
+// pool state it left.
 template <typename T>
-struct YbRouteAction {
+struct InjectedLog {
     uint64_t ts{0};
-    size_t direction{0};
-    T input{0};
-    T output{0};
-    T profit_coin0{0};
-    T lp_amount{0};
-    T donation{0};
-    T flash_amount{0};
+    uint64_t index{0};
+    std::array<T, 2> out{T(0), T(0)};
+    std::array<T, 2> balances{T(0), T(0)};
+    T D{0};
+    T total_supply{0};
+    T price_scale{0};
+    T price_oracle{0};
+    T last_prices{0};
+    uint64_t last_timestamp{0};
+    T virtual_price{0};
+    T xcp_profit{0};
+    T lp_xcp_profit{0};
+    T donation_shares{0};
+    T last_donation_release_ts{0};
+    T donation_protection_expiry_ts{0};
+    // The LEVAMM state the fill left.
+    uint8_t yb_direction{0};  // 0 LP bought with coin0, 1 LP sold
+    T yb_collateral{0};
+    T yb_debt{0};
+    T yb_stable_balance{0};
+    T yb_price{0};  // LEVAMM get_p
+    T yb_donation{0};
 };
 
 // Variant for all action types
 template <typename T>
 using Action = std::variant<
-    DonationAction<T>, TickAction<T>, ExchangeAction<T>, YbRouteAction<T>,
-    StateReconciliationAction<T>
+    DonationAction<T>, TickAction<T>, ExchangeAction<T>, InjectedLog<T>
 >;
 
 } // namespace harness

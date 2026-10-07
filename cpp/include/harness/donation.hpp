@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <optional>
 
 #include "core/common.hpp"
 #include "harness/metrics.hpp"
@@ -82,8 +81,6 @@ DonationResult<T> make_donation_ex(
             m.n_rebalances += 1;
         }
         m.donations += 1;
-        m.donation_amounts_total[0] += amt0;
-        m.donation_amounts_total[1] += amt1;
         m.donation_coin0_total += coin0_equiv(amt0, amt1, ps_before);
 
         result.success = true;

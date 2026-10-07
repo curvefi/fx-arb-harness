@@ -10,8 +10,8 @@
 #include <utility>
 
 #include "pools/twocrypto_fx/helpers.hpp"
-#include "trading/cex_depth.hpp"
 #include "trading/costs.hpp"
+#include "trading/swap_preview_cache.hpp"
 
 namespace arb {
 namespace trading {
@@ -31,14 +31,14 @@ struct Decision {
     T notional_coin0{};
 };
 
-inline constexpr int MAX_SIZING_EVALS = 24;       // hard eval budget per decision
+
+inline constexpr int MAX_SIZING_EVALS = 24;
 
 template <typename T, typename PoolT>
 Decision<T> decide_trade(
     const PoolT& pool,
     T cex_price,
     const Costs<T>& costs,
-    T volume_cap,
     T min_swap_frac,
     T max_swap_frac,
     T cex_fee_discount,
@@ -46,7 +46,8 @@ Decision<T> decide_trade(
     const T* p_now_hint = nullptr,
     const T* fee_hint = nullptr,
     const std::array<T, 2>* xp_hint = nullptr,
-    const CexDepthBook<T>* depth = nullptr
+    SwapPreviewCache<T>* previews = nullptr,
+    bool trade_only = false
 ) {
     static_assert(std::is_floating_point_v<T>, "decide_trade is floating-only");
 
@@ -73,23 +74,14 @@ Decision<T> decide_trade(
     const T context_floor_01 = pool.context_fee_lower_bound(0);
     const T context_floor_10 = pool.context_fee_lower_bound(1);
     if (context_floor_01 > global_floor || context_floor_10 > global_floor) {
-        const T bid = depth ? static_cast<T>(depth->bid_price().value_or(0.0)) : cex_price;
-        const T ask = depth ? static_cast<T>(depth->ask_price().value_or(0.0)) : cex_price;
-        if (!(std::max(T(1) - context_floor_01, T(1e-12)) * (cex_fee_discount * bid) > p_now) &&
-            !(ask > T(0) && std::max(T(1) - context_floor_10, T(1e-12)) * p_now > cex_fee_markup * ask))
+        if (!(std::max(T(1) - context_floor_01, T(1e-12)) * (cex_fee_discount * cex_price) > p_now) &&
+            !(std::max(T(1) - context_floor_10, T(1e-12)) * p_now > cex_fee_markup * cex_price))
             return d;
     }
 
     const T one_minus_f0 = std::max(T(1) - fee_pool, T(1e-12));
-    T p_cex_bid = cex_fee_discount * cex_price;
-    T p_cex_ask = cex_fee_markup * cex_price;
-    std::optional<double> top_bid, top_ask;
-    if (depth != nullptr) {
-        top_bid = depth->bid_price();
-        top_ask = depth->ask_price();
-        p_cex_bid = top_bid ? cex_fee_discount * static_cast<T>(*top_bid) : T(0);
-        p_cex_ask = top_ask ? cex_fee_markup * static_cast<T>(*top_ask) : T(0);
-    }
+    const T p_cex_bid = cex_fee_discount * cex_price;
+    const T p_cex_ask = cex_fee_markup * cex_price;
 
     // Per-direction path-floor fee: the lowest fee any size of trade in
     // that direction can pay. For the native fee with the conventional
@@ -123,63 +115,36 @@ Decision<T> decide_trade(
 
     // Required price-move ratios (rho > 1 means a profitable direction
     // exists at that fee level).
-    const T rho_01_floor = depth != nullptr && !top_bid
-        ? T(0)
-        : std::max(T(1) - gate_fee_01, T(1e-12)) * p_cex_bid / p_now;
-    const T rho_10_floor = depth != nullptr && !top_ask
-        ? T(0)
-        : std::max(T(1) - gate_fee_10, T(1e-12)) * p_now / p_cex_ask;
+    const T rho_01_floor = std::max(T(1) - gate_fee_01, T(1e-12)) * p_cex_bid / p_now;
+    const T rho_10_floor = std::max(T(1) - gate_fee_10, T(1e-12)) * p_now / p_cex_ask;
 
     if (rho_01_floor <= T(1) && rho_10_floor <= T(1)) return d;
     int sel_i = -1, sel_j = -1;
     if (rho_01_floor >= rho_10_floor) { sel_i = 0; sel_j = 1; } else { sel_i = 1; sel_j = 0; }
     d.i = sel_i;
     d.j = sel_j;
+    // A caller that discards unprofitable decisions needs no sizing once the
+    // policy proves every size of this direction unprofitable.
+    if (trade_only && !pool.context_may_profit(
+            static_cast<size_t>(sel_i), p_now, sel_i == 0 ? p_cex_bid : p_cex_ask))
+        return d;
 
     const T avail = pool.balances[static_cast<size_t>(sel_i)];
     if (!(avail > T(0))) return d;
+
+    const auto prepared_fee = pool.prepare_fee();
+    const auto preview = [&](size_t i, size_t j, T dx) {
+        if (previews) return previews->quote(pool, i, j, dx, prepared_fee);
+        auto [xp, dy] = fx::post_swap_xp(pool, i, j, dx, pool.cached_price_scale);
+        const T gross = fx::xp_to_tokens_j(pool, j, dy, pool.cached_price_scale);
+        const T fee = prepared_fee(xp) * gross / fx::PoolTraits<T>::FEE_PRECISION();
+        return std::pair<T, T>{gross - fee, fee};
+    };
 
     // Sizing bounds
     T dx_lo = std::max(T(1e-18), avail * std::max(T(1e-12), min_swap_frac));
     T dx_hi = avail * max_swap_frac;
 
-    if (std::isfinite(static_cast<double>(volume_cap)) && volume_cap > T(0)) {
-        T cap = volume_cap;
-        if (costs.volume_cap_is_coin1) {
-            if (sel_i == 0) {
-                cap *= cex_price; // coin1 -> coin0
-            }
-        } else {
-            if (sel_i == 1) {
-                cap /= cex_price; // coin0 -> coin1
-            }
-        }
-        dx_hi = std::min(dx_hi, cap);
-    }
-    if (depth != nullptr) {
-        if (sel_i == 1) {
-            const auto capacity = depth->ask_capacity();
-            if (!capacity) return d;
-            dx_hi = std::min(dx_hi, *capacity);
-        } else {
-            const auto capacity = depth->bid_capacity();
-            if (!capacity) return d;
-            bool current_bound_fits = false;
-            try {
-                const auto at_bound = fx::simulate_exchange_once(pool, 0, 1, dx_hi);
-                current_bound_fits = depth->sell_base(at_bound.first).has_value();
-            } catch (...) {
-                // Fall through to the bounded inverse or fail closed below.
-            }
-            if (!current_bound_fits && *capacity < pool.balances[1]) {
-                try {
-                    dx_hi = std::min(dx_hi, pool.get_dx(0, 1, *capacity, 5));
-                } catch (const std::exception&) {
-                    return d;
-                }
-            }
-        }
-    }
     if (!(dx_hi > dx_lo)) {
         return d;
     }
@@ -193,24 +158,10 @@ Decision<T> decide_trade(
 
     const T value_coeff = (sel_i == 0) ? cex_price * cex_fee_discount : T(1);
     const T cost_coeff  = (sel_i == 0) ? T(1) : cex_price * cex_fee_markup;
-    const T depth_value_coeff = (sel_i == 0 && top_bid) ? static_cast<T>(*top_bid) * cex_fee_discount : value_coeff;
-    const T depth_cost_coeff = (sel_i == 1 && top_ask) ? static_cast<T>(*top_ask) * cex_fee_markup : cost_coeff;
 
     auto evaluate_candidate = [&](T dx) -> Candidate {
-        auto sim = fx::simulate_exchange_once(pool, static_cast<size_t>(sel_i), static_cast<size_t>(sel_j), dx);
-        T profit;
-        if (depth == nullptr) {
-            profit = sim.first * value_coeff - dx * cost_coeff - costs.gas_coin0;
-        } else if (sel_i == 0) {
-            const auto proceeds = depth->sell_base(sim.first);
-            profit = proceeds ? *proceeds * cex_fee_discount - dx - costs.gas_coin0
-                              : -std::numeric_limits<T>::infinity();
-        } else {
-            const auto purchase = depth->buy_base(dx);
-            profit = purchase ? sim.first - *purchase * cex_fee_markup - costs.gas_coin0
-                              : -std::numeric_limits<T>::infinity();
-        }
-        return Candidate{dx, sim.first, profit, sim.second};
+        auto sim = preview(static_cast<size_t>(sel_i), static_cast<size_t>(sel_j), dx);
+        return Candidate{dx, sim.first, sim.first * value_coeff - dx * cost_coeff - costs.gas_coin0, sim.second};
     };
 
     // ------------------------------------------------------------------
@@ -230,8 +181,7 @@ Decision<T> decide_trade(
     //      interpolation with golden-section safeguards (Brent-style):
     //      superlinear on smooth fees, still convergent on kinks/jumps.
     // The answer is the best of *all* evaluations; total full evaluations
-    // are capped at MAX_SIZING_EVALS = 24 by construction (ladder <= 20,
-    // refine consumes the remainder).
+    // are capped at 24 (ladder <= 20, refine uses the remainder).
     // Fee-free envelope probes are extra but ~half-cost (no policy call).
     // All stepping is multiplicative in dx (no log/exp calls).
     // ------------------------------------------------------------------
@@ -268,9 +218,8 @@ Decision<T> decide_trade(
     //     seed goes nonpositive, all larger sizes are dominated. The walk
     //     uses fee-free evaluations (one sqrt, no policy call).
     const T floor_fee_sel = (sel_i == 0) ? floor_fee_01 : floor_fee_10;
-    const T floor_value_coeff = std::max(T(1) - floor_fee_sel, T(1e-12)) *
-        (depth != nullptr ? depth_value_coeff : value_coeff);
-    const T envelope_cost_coeff = depth != nullptr ? depth_cost_coeff : cost_coeff;
+    const T floor_value_coeff = std::max(T(1) - floor_fee_sel, T(1e-12)) * value_coeff;
+    const T envelope_cost_coeff = cost_coeff;
     auto p_floor_at = [&](T dx) -> T {
         dx = std::min(std::max(dx, dx_lo), dx_hi);
         const T b0 = pool.balances[0] + (sel_i == 0 ? dx : T(0));
@@ -286,6 +235,64 @@ Decision<T> decide_trade(
             pool.cached_price_scale);
         return dy_tokens * floor_value_coeff - dx * envelope_cost_coeff - costs.gas_coin0;
     };
+
+    // Presizing screen for callers that discard unprofitable decisions. At the context fee
+    // floor, selling or buying every unit at the top external level, P_screen(dx) bounds the
+    // profit of every size and is concave in dx (the curve output is concave). A golden-section
+    // bracket in log size keeps four samples; for a concave function the secants through them
+    // bound the maximum over the whole range, so the search stops at the first positive sample
+    // (size normally) or once that bound is negative (no size can clear gas).
+    if (trade_only) {
+        const T screen_fee = std::max(floor_fee_sel, pool.context_fee_lower_bound(static_cast<size_t>(sel_i)));
+        const T screen_value_coeff = std::max(T(1) - screen_fee, T(1e-12)) * value_coeff;
+        const auto screen_at = [&](T dx) {
+            const T b0 = pool.balances[0] + (sel_i == 0 ? dx : T(0));
+            const T b1 = pool.balances[1] + (sel_i == 1 ? dx : T(0));
+            const std::array<T, 2> xq{
+                b0 * pool.precisions[0],
+                b1 * pool.precisions[1] * pool.cached_price_scale / fx::PoolTraits<T>::PRECISION()
+            };
+            const T y = fx::MathOps<T>::get_y_unchecked(
+                pool.A, pool.gamma, xq, pool.D, static_cast<size_t>(sel_j));
+            const T dy_tokens = fx::xp_to_tokens_j(
+                pool, static_cast<size_t>(sel_j), xq[static_cast<size_t>(sel_j)] - y,
+                pool.cached_price_scale);
+            return dy_tokens * screen_value_coeff - dx * envelope_cost_coeff - costs.gas_coin0;
+        };
+        // Upper bound of a concave f on [x0, x3] from samples at x0 < x1 < x2 < x3: the chord
+        // through the inner pair bounds f outside it; inside, the outer chords extended inward do.
+        const auto concave_bound = [](T x0, T x1, T x2, T x3, T f0, T f1, T f2, T f3) {
+            const auto line = [](T xa, T fa, T xb, T fb, T x) { return fa + (fb - fa) * (x - xa) / (xb - xa); };
+            T bound = std::max({line(x1, f1, x2, f2, x0), line(x1, f1, x2, f2, x3), f0, f1, f2, f3});
+            const auto inner = [&](T x) { return std::min(line(x0, f0, x1, f1, x), line(x2, f2, x3, f3, x)); };
+            bound = std::max({bound, inner(x1), inner(x2)});
+            const T s01 = (f1 - f0) / (x1 - x0), s23 = (f3 - f2) / (x3 - x2);
+            if (s01 != s23) {
+                const T xc = (f2 - f0 + s01 * x0 - s23 * x2) / (s01 - s23);
+                if (xc > x1 && xc < x2) bound = std::max(bound, inner(xc));
+            }
+            return bound;
+        };
+        constexpr T GOLD = T(0.6180339887498949);
+        T lo = std::log(dx_lo), hi = std::log(dx_hi);
+        T u1 = hi - GOLD * (hi - lo), u2 = lo + GOLD * (hi - lo);
+        T xlo = std::exp(lo), xhi = std::exp(hi), x1 = std::exp(u1), x2 = std::exp(u2);
+        T flo = screen_at(xlo), fhi = screen_at(xhi), f1 = screen_at(x1), f2 = screen_at(x2);
+        bool may = flo > T(0) || fhi > T(0) || f1 > T(0) || f2 > T(0), screened = false;
+        for (int k = 0; !may && !screened && k < 40; ++k) {
+            const T bound = concave_bound(xlo, x1, x2, xhi, flo, f1, f2, fhi);
+            if (std::isfinite(bound) && bound < T(0)) { screened = true; break; }
+            if (f1 < f2) {
+                lo = u1; xlo = x1; flo = f1; u1 = u2; x1 = x2; f1 = f2;
+                u2 = lo + GOLD * (hi - lo); x2 = std::exp(u2); f2 = screen_at(x2);
+            } else {
+                hi = u2; xhi = x2; fhi = f2; u2 = u1; x2 = x1; f2 = f1;
+                u1 = hi - GOLD * (hi - lo); x1 = std::exp(u1); f1 = screen_at(x1);
+            }
+            may = f1 > T(0) || f2 > T(0);
+        }
+        if (screened) return d;
+    }
 
     T dx_cap = dx_hi;
     if (p_floor_at(dx_seed) > T(0)) {
@@ -342,11 +349,11 @@ Decision<T> decide_trade(
     //     to dx_lo. Rung counts are bounded so the scan plus a minimal
     //     refine always fits the MAX_SIZING_EVALS budget (extreme ranges
     //     get coarser tails).
-    const T low_cover = depth != nullptr ? dx_lo : (native_fee_mode && fee_ordered)
+    const T low_cover = (native_fee_mode && fee_ordered)
         ? std::max(dx_lo, std::min(dx_seed, dx_dip > T(0) ? dx_dip : dx_seed) / T(27))
         : dx_lo;
 
-    T pts[24];
+    T pts[MAX_SIZING_EVALS];
     int n_pts = 0;
     pts[n_pts++] = low_cover;
     pts[n_pts++] = dx_cap;
@@ -360,7 +367,8 @@ Decision<T> decide_trade(
     }
     for (T v = dx_seed / T(9); v > low_cover && n_pts < 14; v /= T(9)) pts[n_pts++] = v;
     for (T v = dx_seed * T(9); v < dx_cap && n_pts < 20; v *= T(9)) pts[n_pts++] = v;
-    std::sort(pts, pts + n_pts);
+    for (int k = 1; k < n_pts; ++k)  // At most 20 rungs: insertion sort.
+        for (int m = k; m > 0 && pts[m] < pts[m - 1]; --m) std::swap(pts[m], pts[m - 1]);
     int m_pts = 0;
     for (int k = 0; k < n_pts; ++k) {
         if (m_pts == 0 || pts[k] > pts[m_pts - 1] * (T(1) + T(1e-9))) {
@@ -372,7 +380,7 @@ Decision<T> decide_trade(
     // (dx_cap < dx_hi), so spend no full evaluation there: use the envelope
     // value itself as its bracket ordinate.
     const bool cap_is_hi = (dx_cap >= dx_hi * (T(1) - T(1e-9)));
-    Candidate scan[24];
+    Candidate scan[MAX_SIZING_EVALS];
     int best_idx = 0;
     for (int k = 0; k < m_pts; ++k) {
         if (k == m_pts - 1 && !cap_is_hi && m_pts > 1) {

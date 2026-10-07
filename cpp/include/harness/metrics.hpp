@@ -14,6 +14,7 @@
 #include <deque>
 #include <functional>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -50,6 +51,8 @@ template <typename T>
 struct Metrics {
     // Trade execution
     size_t trades{0};
+    size_t arb_offered_report_trades{0};
+    size_t arb_withheld_report_trades{0};
     T notional{0};              // Total notional in coin0 units
     T lp_fee_coin0{0};          // Total LP fees in coin0 units
     T arb_pnl_coin0{0};         // Arbitrageur profit in coin0 units
@@ -59,9 +62,9 @@ struct Metrics {
     // Donations
     size_t donations{0};
     T donation_coin0_total{0};
-    std::array<T, 2> donation_amounts_total{T(0), T(0)};
 
     size_t yb_2l_fires{0};
+    T yb_levamm_profit_coin0{0};      // actor net profit of committed LEVAMM fills
 };
 
 struct TimeWeightedSummary {
@@ -93,6 +96,7 @@ struct RollingGeoApyWindow {
     uint64_t last_sample_ts{0};
     bool have_sample{false};
     F sum_log_apy{F(0)};
+    F sum_log_unfloored_apy{F(0)};
     size_t n_windows{0};
     size_t n_floored_windows{0};
 
@@ -142,10 +146,13 @@ struct RollingGeoApyWindow {
             }
         }
 
-        sum_log_apy += std::log(annualized_apy);
+        const F log_apy = std::log(annualized_apy);
+        sum_log_apy += log_apy;
         n_windows += 1;
         if (floored) {
             n_floored_windows += 1;
+        } else {
+            sum_log_unfloored_apy += log_apy;
         }
     }
 
@@ -154,6 +161,12 @@ struct RollingGeoApyWindow {
             return -1.0;
         }
         return static_cast<double>(std::exp(sum_log_apy / static_cast<F>(n_windows)));
+    }
+
+    // Diagnostic only: never used to replace the requested floored GM score.
+    double unfloored_value() const {
+        const size_t count = n_windows - n_floored_windows;
+        return count ? static_cast<double>(std::exp(sum_log_unfloored_apy / F(count))) : -1.0;
     }
 
     double floor_share() const {
@@ -305,10 +318,6 @@ struct TimeWeightedMetrics {
     std::array<F, PRICE_DIFF_BUCKETS> rel_bucket_dt{};
     std::array<uint64_t, PRICE_DIFF_BUCKETS> rel_bucket_id{};
     std::array<bool, PRICE_DIFF_BUCKETS> rel_bucket_live{};
-    F rel_window_sum_dt{F(0)};
-    F rel_window_dt{F(0)};
-    uint64_t rel_oldest_bucket{0};
-    bool have_rel_oldest_bucket{false};
     uint64_t last_7d_eval_bucket{0};
     F max_7d_rel_abs{F(0)};
     bool have_7d_rel_abs{false};
@@ -357,7 +366,6 @@ struct TimeWeightedMetrics {
         return summary;
     }
 
-    template <bool GridCore = false>
     void sample_price_error(uint64_t ts, T price_scale, T p_cex) {
         if (!have_err) {
             first_ts_err = ts;
@@ -382,15 +390,9 @@ struct TimeWeightedMetrics {
                 const F ex = g - th_in;
                 detach_ungated_total += ex * ex * dt / F(86400);
             }
-            if constexpr (GridCore) {
-                sample_7d_price_error_incremental(
-                    last_ts_err, ts, static_cast<F>(last_rel_abs)
-                );
-            } else {
-                sample_7d_price_error(
-                    last_ts_err, ts, static_cast<F>(last_rel_abs)
-                );
-            }
+            sample_7d_price_error(
+                last_ts_err, ts, static_cast<F>(last_rel_abs)
+            );
         }
 
         if (static_cast<F>(cur_rel_abs) > max_rel_abs) {
@@ -459,76 +461,6 @@ struct TimeWeightedMetrics {
         }
     }
 
-    void sample_7d_price_error_incremental(
-        uint64_t start_ts,
-        uint64_t end_ts,
-        F rel_abs
-    ) {
-        while (start_ts < end_ts) {
-            const uint64_t bucket_id = start_ts / PRICE_DIFF_BUCKET_S;
-            const uint64_t bucket_end = (bucket_id + 1) * PRICE_DIFF_BUCKET_S;
-            const uint64_t segment_end = end_ts < bucket_end ? end_ts : bucket_end;
-            const size_t idx = static_cast<size_t>(bucket_id % PRICE_DIFF_BUCKETS);
-
-            if (!rel_bucket_live[idx] || rel_bucket_id[idx] != bucket_id) {
-                if (rel_bucket_live[idx]) {
-                    rel_window_sum_dt -= rel_bucket_sum_dt[idx];
-                    rel_window_dt -= rel_bucket_dt[idx];
-                }
-                rel_bucket_live[idx] = true;
-                rel_bucket_id[idx] = bucket_id;
-                rel_bucket_sum_dt[idx] = F(0);
-                rel_bucket_dt[idx] = F(0);
-            }
-            if (!have_rel_oldest_bucket) {
-                rel_oldest_bucket = bucket_id;
-                have_rel_oldest_bucket = true;
-            }
-
-            const F dt = static_cast<F>(segment_end - start_ts);
-            const F weighted = rel_abs * dt;
-            rel_bucket_sum_dt[idx] += weighted;
-            rel_bucket_dt[idx] += dt;
-            rel_window_sum_dt += weighted;
-            rel_window_dt += dt;
-            start_ts = segment_end;
-        }
-
-        const uint64_t eval_bucket = end_ts / PRICE_DIFF_BUCKET_S;
-        if (have_7d_rel_abs && eval_bucket == last_7d_eval_bucket) {
-            return;
-        }
-        last_7d_eval_bucket = eval_bucket;
-        if (end_ts < first_ts_err + PRICE_DIFF_WINDOW_S) {
-            return;
-        }
-
-        const uint64_t cutoff = end_ts - PRICE_DIFF_WINDOW_S;
-        const uint64_t keep_from = cutoff / PRICE_DIFF_BUCKET_S;
-        while (have_rel_oldest_bucket && rel_oldest_bucket < keep_from) {
-            const size_t idx = static_cast<size_t>(
-                rel_oldest_bucket % PRICE_DIFF_BUCKETS
-            );
-            if (
-                rel_bucket_live[idx] &&
-                rel_bucket_id[idx] == rel_oldest_bucket
-            ) {
-                rel_window_sum_dt -= rel_bucket_sum_dt[idx];
-                rel_window_dt -= rel_bucket_dt[idx];
-                rel_bucket_live[idx] = false;
-            }
-            ++rel_oldest_bucket;
-        }
-
-        if (rel_window_dt > F(0)) {
-            const F avg = rel_window_sum_dt / rel_window_dt;
-            if (!have_7d_rel_abs || avg > max_7d_rel_abs) {
-                max_7d_rel_abs = avg;
-                have_7d_rel_abs = true;
-            }
-        }
-    }
-
     void sample_imbalance(uint64_t ts, T x0p, T x1p) {
         T current = T(0);
         const T denominator = x0p + x1p;
@@ -566,6 +498,21 @@ struct TimeWeightedMetrics {
 
 inline double tvl_growth(double tvl_start, double tvl_end) {
     return tvl_start > 0.0 ? tvl_end / tvl_start : -1.0;
+}
+
+// Gross endpoint assets versus holding the initial tokens. Use the same
+// external coin0/coin1 mark for both portfolios; include all capital flows.
+template <typename T>
+double pool_nav_vs_hold(const std::array<T, 2>& initial,
+                        const std::array<T, 2>& final, T market_price) {
+    using F = MetricF<T>;
+    const F price = static_cast<F>(market_price);
+    const F hold = static_cast<F>(initial[0]) + price * static_cast<F>(initial[1]);
+    const F nav = static_cast<F>(final[0]) + price * static_cast<F>(final[1]);
+    if (!(price > F(0)) || !(hold > F(0)) || !std::isfinite(price) ||
+        !std::isfinite(hold) || !std::isfinite(nav))
+        throw std::invalid_argument("NAV versus hold requires a finite positive market price and hold value");
+    return static_cast<double>(nav / hold - F(1));
 }
 
 template <typename T>
@@ -609,14 +556,26 @@ struct SlippageProbes {
         return static_cast<double>((tw_real_s01_sum_dt[k] + tw_real_s10_sum_dt[k]) / (F(2) * tw_real_dt[k]));
     }
 
-    double tw_slippage_0to1(size_t k) const {
-        if (k >= N_SIZES || tw_real_dt[k] <= F(0)) return -1.0;
-        return static_cast<double>(tw_real_s01_sum_dt[k] / tw_real_dt[k]);
-    }
+};
 
-    double tw_slippage_1to0(size_t k) const {
-        if (k >= N_SIZES || tw_real_dt[k] <= F(0)) return -1.0;
-        return static_cast<double>(tw_real_s10_sum_dt[k] / tw_real_dt[k]);
+// Called on the existing settled hourly YB sampling clock, never per event.
+template <typename F>
+struct SampledLogVariation {
+    F previous{0}, squared_log_sum{0};
+    uint64_t first_ts{0}, last_ts{0};
+    void sample(uint64_t ts, F value) {
+        if (!(value > F(0)) || !std::isfinite(value)) return;
+        if (previous > F(0)) {
+            const F change = std::log(value / previous);
+            squared_log_sum += change * change;
+        } else first_ts = ts;
+        previous = value;
+        last_ts = ts;
+    }
+    double annualized() const {
+        return last_ts > first_ts
+            ? static_cast<double>(squared_log_sum * F(365ULL * 86400) / F(last_ts - first_ts))
+            : -1.0;
     }
 };
 
@@ -625,20 +584,32 @@ struct EventLoopResult {
     Metrics<T> metrics{};
     TimeWeightedMetrics<T> tw_metrics{};
     SlippageProbes<T> slippage_probes{};
-    ReconciliationSummary reconciliation{};
 
     uint64_t t_start{0};
     uint64_t t_end{0};
+    uint64_t early_stop_ts{0};  // Nonzero when a divergence stop ended the run.
     T tvl_start{0};
     T donation_apy{0};
     double apy_net_gm{-1.0};
     double apy_net_robust_90d{-1.0};
+    double pool_nav_vs_hold{-1.0};
 
-    // YieldBasis metric family. Filled by the state-mutating active_2l or
-    // reference_2l actor.
+    // YieldBasis metric family. Filled by the state-mutating active_2l actor.
     T yb_releverage_fee{T(0)};
     double yb_releverage_apy{-1.0};
     double yb_releverage_apy_gm{-1.0};
+    double yb_external_equity_eth{-1.0};
+    double yb_external_growth_eth{-1.0};
+    double yb_external_max_drawdown_hourly{-1.0};
+    double yb_exposure_return{-1.0};
+    double yb_exposure_rms{-1.0};
+    double yb_gm30{-1.0};
+    double yb_gm60{-1.0};
+    double yb_gm30_floor_share{-1.0};
+    double yb_gm30_unfloored{-1.0};
+    uint64_t yb_gm30_windows{0};
+    double yb_gm60_floor_share{-1.0};
+    double yb_price_scale_hourly_qv{-1.0};
     double yb_releverage_final_growth{-1.0};
     uint64_t yb_releverage_trades{0};
     uint64_t yb_releverage_gm_windows{0};

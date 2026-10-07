@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <initializer_list>
 #include <optional>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -42,30 +41,6 @@ inline void reject_unknown_fields(
     }
 }
 
-// Lossless scalar -> string for the uint256 parity path: integer literals stay
-// exact and doubles round-trip at full precision (matches the parity harness).
-inline std::string policy_scalar_to_string(const boost::json::value& v) {
-    if (v.is_string()) return std::string(v.as_string().c_str());
-    if (v.is_int64()) return std::to_string(v.as_int64());
-    if (v.is_uint64()) return std::to_string(v.as_uint64());
-    if (v.is_double()) {
-        std::ostringstream oss;
-        oss.precision(17);
-        oss << v.as_double();
-        return oss.str();
-    }
-    return "0";
-}
-
-template <typename T>
-T parse_config_wad(const boost::json::value& v) {
-    if constexpr (std::is_same_v<T, twocrypto_fx::uint256>) {
-        return twocrypto_fx::uint256(policy_scalar_to_string(v));
-    } else {
-        return parse_scaled_1e18<T>(v);
-    }
-}
-
 enum class PoolEntryUnits {
     ContractScaled,
     CandidateHuman,
@@ -77,61 +52,37 @@ T parse_ratio_wad(
     PoolEntryUnits units,
     std::string_view field
 ) {
-    if constexpr (std::is_same_v<T, twocrypto_fx::uint256>) {
-        return parse_config_wad<T>(v);
-    } else {
-        const T value = units == PoolEntryUnits::CandidateHuman
-            ? parse_plain_real<T>(v)
-            : parse_config_wad<T>(v);
-        if (value < T(0) || value > T(1)) {
-            throw std::runtime_error(
-                std::string(field) + " must be a fraction in [0, 1]"
-            );
-        }
-        if (value != T(0) && value < T(1e-18)) {
-            throw std::runtime_error(
-                std::string(field) +
-                " is below one WAD unit; check candidate/template units"
-            );
-        }
-        return value;
+    const T value = units == PoolEntryUnits::CandidateHuman
+        ? parse_plain_real<T>(v)
+        : parse_scaled_1e18<T>(v);
+    if (value < T(0) || value > T(1)) {
+        throw std::runtime_error(
+            std::string(field) + " must be a fraction in [0, 1]"
+        );
     }
-}
-
-template <typename T>
-T parse_config_plain(const boost::json::value& v) {
-    if constexpr (std::is_same_v<T, twocrypto_fx::uint256>) {
-        return twocrypto_fx::uint256(policy_scalar_to_string(v));
-    } else {
-        return parse_plain_real<T>(v);
+    if (value != T(0) && value < T(1e-18)) {
+        throw std::runtime_error(
+            std::string(field) +
+            " is below one WAD unit; check candidate/template units"
+        );
     }
-}
-
-template <typename T>
-T parse_config_fee(const boost::json::value& v) {
-    if constexpr (std::is_same_v<T, twocrypto_fx::uint256>) {
-        return twocrypto_fx::uint256(policy_scalar_to_string(v));
-    } else {
-        return parse_fee_1e10<T>(v);
-    }
+    return value;
 }
 
 template <typename T>
 T parse_fee_value(const boost::json::value& v, std::string_view field) {
-    const T value = parse_config_fee<T>(v);
+    const T value = parse_fee_1e10<T>(v);
     const T precision = twocrypto_fx::PoolTraits<T>::FEE_PRECISION();
     if (value < T(0) || value > precision) {
         throw std::runtime_error(
             std::string(field) + " must be a fraction in [0, 1]"
         );
     }
-    if constexpr (std::is_floating_point_v<T>) {
-        if (value != T(0) && value < T(1e-10)) {
-            throw std::runtime_error(
-                std::string(field) +
-                " is below one fee-precision unit; check candidate/template units"
-            );
-        }
+    if (value != T(0) && value < T(1e-10)) {
+        throw std::runtime_error(
+            std::string(field) +
+            " is below one fee-precision unit; check candidate/template units"
+        );
     }
     return value;
 }
@@ -141,11 +92,7 @@ T parse_historical_wad(const boost::json::value& v) {
     if (!is_number_or_string(v)) {
         throw std::runtime_error("historical_state WAD values must be numbers or strings");
     }
-    if constexpr (std::is_same_v<T, twocrypto_fx::uint256>) {
-        return twocrypto_fx::uint256(policy_scalar_to_string(v));
-    } else {
-        return parse_scaled_1e18<T>(v);
-    }
+    return parse_scaled_1e18<T>(v);
 }
 
 template <typename T>
@@ -153,11 +100,7 @@ T parse_historical_plain(const boost::json::value& v) {
     if (!is_number_or_string(v)) {
         throw std::runtime_error("historical_state plain values must be numbers or strings");
     }
-    if constexpr (std::is_same_v<T, twocrypto_fx::uint256>) {
-        return twocrypto_fx::uint256(policy_scalar_to_string(v));
-    } else {
-        return parse_plain_real<T>(v);
-    }
+    return parse_plain_real<T>(v);
 }
 
 inline const boost::json::value& required_historical_field(
@@ -189,7 +132,7 @@ PoolHistoricalState<T> parse_historical_state(const boost::json::value& value) {
             "donation_protection_expiry_ts", "donation_protection_period",
             "donation_protection_lp_threshold",
             "donation_protection_extension_remainder",
-            "donation_shares_max_ratio"
+            "donation_shares_max_ratio", "policy_state"
         },
         "pool historical_state"
     );
@@ -232,6 +175,20 @@ PoolHistoricalState<T> parse_historical_state(const boost::json::value& value) {
     state.donation_protection_extension_remainder = parse_historical_wad<T>(required_historical_field(obj, "donation_protection_extension_remainder"));
     state.donation_shares_max_ratio = parse_historical_wad<T>(required_historical_field(obj, "donation_shares_max_ratio"));
 
+    if (const auto* policy = obj.if_contains("policy_state")) {
+        if (!policy->is_object()) throw std::runtime_error("pool historical_state policy_state must be an object");
+        const auto& p = policy->as_object();
+        reject_unknown_fields(p, {"last_update_ts", "last_prices", "fast_ema", "slow_ema", "price_scale"},
+                              "pool historical_state policy_state");
+        state.has_policy_state = true;
+        state.policy_last_update_ts = get_u64_opt(p, "last_update_ts", 0);
+        state.policy_last_prices = parse_historical_wad<T>(required_historical_field(p, "last_prices"));
+        state.policy_fast_ema = parse_historical_wad<T>(required_historical_field(p, "fast_ema"));
+        state.policy_slow_ema = parse_historical_wad<T>(required_historical_field(p, "slow_ema"));
+        state.policy_price_scale = parse_historical_wad<T>(required_historical_field(p, "price_scale"));
+        if (state.policy_last_update_ts > state.source_timestamp)
+            throw std::runtime_error("pool historical_state policy_state is later than its source");
+    }
     if (state.source_timestamp == 0 || state.last_timestamp == 0) {
         throw std::runtime_error("pool historical_state requires nonzero source_timestamp and last_timestamp");
     }
@@ -281,11 +238,7 @@ twocrypto_fx::PolicyConfig<T> parse_policy_config(const boost::json::value& poli
             if (!is_number_or_string(arr[i])) {
                 throw std::runtime_error("pool policy params entries must be numbers or strings");
             }
-            if constexpr (std::is_same_v<T, twocrypto_fx::uint256>) {
-                cfg.params[i] = twocrypto_fx::uint256(policy_scalar_to_string(arr[i]));
-            } else {
-                cfg.params[i] = parse_plain_real<T>(arr[i]);
-            }
+            cfg.params[i] = parse_plain_real<T>(arr[i]);
         }
         cfg.n_params = arr.size();
     }
@@ -331,20 +284,16 @@ void parse_pool_entry(
     );
 
 
-    if (auto* v = entry.if_contains("tag")) {
-        if (v->is_string()) out_pool.tag = v->as_string().c_str();
-    }
-
     if (auto* v = pool.if_contains("initial_liquidity")) {
         const auto& a = v->as_array();
         if (a.size() >= 2) {
-            out_pool.initial_liq[0] = parse_config_wad<T>(a[0]);
-            out_pool.initial_liq[1] = parse_config_wad<T>(a[1]);
+            out_pool.initial_liq[0] = parse_scaled_1e18<T>(a[0]);
+            out_pool.initial_liq[1] = parse_scaled_1e18<T>(a[1]);
         }
     }
 
-    if (auto* v = pool.if_contains("A")) out_pool.A = parse_config_plain<T>(*v);
-    if (auto* v = pool.if_contains("gamma")) out_pool.gamma = parse_config_plain<T>(*v);
+    if (auto* v = pool.if_contains("A")) out_pool.A = parse_plain_real<T>(*v);
+    if (auto* v = pool.if_contains("gamma")) out_pool.gamma = parse_plain_real<T>(*v);
     if (auto* v = pool.if_contains("mid_fee")) {
         out_pool.mid_fee = parse_fee_value<T>(*v, "pool.mid_fee");
     }
@@ -371,7 +320,7 @@ void parse_pool_entry(
         out_pool.adjustment_step_max = parse_ratio_wad<T>(
             *v, units, "pool.adjustment_step_max");
     }
-    if (auto* v = pool.if_contains("ma_time")) out_pool.ma_time = parse_config_plain<T>(*v);
+    if (auto* v = pool.if_contains("ma_time")) out_pool.ma_time = parse_plain_real<T>(*v);
     if (auto* v = pool.if_contains("reserved_profit_fraction")) {
         out_pool.reserved_profit_fraction = parse_fee_value<T>(
             *v, "pool.reserved_profit_fraction");
@@ -383,7 +332,7 @@ void parse_pool_entry(
         out_pool.policy_config = parse_policy_config<T>(*v);
         out_pool.policy_kind = out_pool.policy_config.kind;
     }
-    if (auto* v = pool.if_contains("initial_price")) out_pool.initial_price = parse_config_wad<T>(*v);
+    if (auto* v = pool.if_contains("initial_price")) out_pool.initial_price = parse_scaled_1e18<T>(*v);
     if (auto* v = pool.if_contains("start_timestamp")) {
         out_pool.start_ts = static_cast<uint64_t>(parse_plain_real<T>(*v));
         if (out_pool.start_ts > 10000000000ULL) {
@@ -419,17 +368,20 @@ void parse_pool_entry(
         const auto& co = c->as_object();
         reject_unknown_fields(
             co,
-            {"arb_fee_bps", "gas_coin0", "use_volume_cap", "volume_cap_mult", "volume_cap_is_coin_1"},
+            {"arb_fee_bps", "gas_coin0", "entry_edge_bps", "report_coin0"},
             "pool costs override"
         );
         if (auto* v = co.if_contains("arb_fee_bps")) out_costs.arb_fee_bps = parse_plain_real<T>(*v);
         if (auto* v = co.if_contains("gas_coin0")) out_costs.gas_coin0 = parse_plain_real<T>(*v);
-        if (auto* v = co.if_contains("use_volume_cap")) out_costs.use_volume_cap = v->as_bool();
-        if (auto* v = co.if_contains("volume_cap_mult")) out_costs.volume_cap_mult = parse_plain_real<T>(*v);
-        if (auto* v = co.if_contains("volume_cap_is_coin_1")) {
-            out_costs.volume_cap_is_coin1 = v->is_bool()
-                ? v->as_bool()
-                : (parse_plain_real<T>(*v) != T(0));
+        if (auto* v = co.if_contains("report_coin0")) {
+            out_costs.report_coin0 = parse_plain_real<T>(*v);
+            if (!(out_costs.report_coin0 >= T(0)) || !std::isfinite(static_cast<double>(out_costs.report_coin0)))
+                throw std::runtime_error("report_coin0 must be finite and nonnegative");
+        }
+        if (auto* v = co.if_contains("entry_edge_bps")) {
+            out_costs.entry_edge_bps = parse_plain_real<T>(*v);
+            if (!(out_costs.entry_edge_bps >= T(0)) || !std::isfinite(static_cast<double>(out_costs.entry_edge_bps)))
+                throw std::runtime_error("entry_edge_bps must be finite and nonnegative");
         }
     }
 }
@@ -440,7 +392,6 @@ void parse_pool_entry(
 template <typename T>
 struct PoolOverride {
     enum PoolField : uint32_t {
-        Tag = 1u << 0,
         InitialLiquidity = 1u << 1,
         A = 1u << 2,
         Gamma = 1u << 3,
@@ -466,20 +417,22 @@ struct PoolOverride {
     enum CostField : uint32_t {
         ArbFeeBps = 1u << 0,
         GasCoin0 = 1u << 1,
-        UseVolumeCap = 1u << 2,
-        VolumeCapMult = 1u << 3,
-        VolumeCapIsCoin1 = 1u << 4,
+        EntryEdgeBps = 1u << 5,
+        ReportCoin0 = 1u << 10,
     };
 
     PoolInit<T> pool{};
     arb::trading::Costs<T> costs{};
     std::optional<T> yb_releverage_fee{};
     std::optional<T> arb_report_rate{};
+    std::optional<T> arb_report_max_age_s{};
+    std::optional<T> arb_report_count{};
+    std::optional<T> arb_report_random_count{};
+    std::optional<T> arb_report_offset{};
     uint32_t pool_fields{0};
     uint32_t cost_fields{0};
 
     void apply(PoolInit<T>& target_pool, arb::trading::Costs<T>& target_costs) const {
-        if (pool_fields & Tag) target_pool.tag = pool.tag;
         if (pool_fields & InitialLiquidity) target_pool.initial_liq = pool.initial_liq;
         if (pool_fields & A) target_pool.A = pool.A;
         if (pool_fields & Gamma) target_pool.gamma = pool.gamma;
@@ -507,15 +460,18 @@ struct PoolOverride {
 
         if (cost_fields & ArbFeeBps) target_costs.arb_fee_bps = costs.arb_fee_bps;
         if (cost_fields & GasCoin0) target_costs.gas_coin0 = costs.gas_coin0;
-        if (cost_fields & UseVolumeCap) target_costs.use_volume_cap = costs.use_volume_cap;
-        if (cost_fields & VolumeCapMult) target_costs.volume_cap_mult = costs.volume_cap_mult;
-        if (cost_fields & VolumeCapIsCoin1) target_costs.volume_cap_is_coin1 = costs.volume_cap_is_coin1;
+        if (cost_fields & EntryEdgeBps) target_costs.entry_edge_bps = costs.entry_edge_bps;
+        if (cost_fields & ReportCoin0) target_costs.report_coin0 = costs.report_coin0;
     }
 
     void overlay(const PoolOverride& patch) {
         patch.apply(pool, costs);
         pool_fields |= patch.pool_fields;
         cost_fields |= patch.cost_fields;
+        if (patch.arb_report_max_age_s.has_value()) arb_report_max_age_s = patch.arb_report_max_age_s;
+        if (patch.arb_report_count.has_value()) arb_report_count = patch.arb_report_count;
+        if (patch.arb_report_random_count.has_value()) arb_report_random_count = patch.arb_report_random_count;
+        if (patch.arb_report_offset.has_value()) arb_report_offset = patch.arb_report_offset;
         if (patch.arb_report_rate.has_value()) arb_report_rate = patch.arb_report_rate;
         if (patch.yb_releverage_fee.has_value()) {
             yb_releverage_fee = patch.yb_releverage_fee;
@@ -538,7 +494,6 @@ PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
     const bool wrapped_pool = pool_entry.contains("pool");
     const auto& pool = wrapped_pool ? pool_entry.at("pool").as_object() : pool_entry;
     const auto has = [&](const char* key) { return pool.if_contains(key) != nullptr; };
-    if (auto* tag = entry.if_contains("tag"); tag != nullptr && tag->is_string()) out.pool_fields |= PoolOverride<T>::Tag;
     if (auto* liq = pool.if_contains("initial_liquidity"); liq != nullptr &&
         liq->is_array() && liq->as_array().size() >= 2) out.pool_fields |= PoolOverride<T>::InitialLiquidity;
     if (has("A")) out.pool_fields |= PoolOverride<T>::A;
@@ -566,16 +521,42 @@ PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
         const auto& co = costs->as_object();
         if (co.if_contains("arb_fee_bps")) out.cost_fields |= PoolOverride<T>::ArbFeeBps;
         if (co.if_contains("gas_coin0")) out.cost_fields |= PoolOverride<T>::GasCoin0;
-        if (co.if_contains("use_volume_cap")) out.cost_fields |= PoolOverride<T>::UseVolumeCap;
-        if (co.if_contains("volume_cap_mult")) out.cost_fields |= PoolOverride<T>::VolumeCapMult;
-        if (co.if_contains("volume_cap_is_coin_1")) out.cost_fields |= PoolOverride<T>::VolumeCapIsCoin1;
+        if (co.if_contains("entry_edge_bps")) out.cost_fields |= PoolOverride<T>::EntryEdgeBps;
+        if (co.if_contains("report_coin0")) out.cost_fields |= PoolOverride<T>::ReportCoin0;
     }
     if (auto* run = entry.if_contains("run"); run != nullptr) {
         if (!run->is_object()) {
             throw std::runtime_error("candidate run override must be an object");
         }
         const auto& ro = run->as_object();
-        reject_unknown_fields(ro, {"yb_releverage_fee", "arb_report_rate"}, "candidate run override");
+        reject_unknown_fields(ro, {"yb_releverage_fee", "arb_report_rate", "arb_report_max_age_s", "arb_report_count", "arb_report_random_count", "arb_report_offset"}, "candidate run override");
+        if (auto* count = ro.if_contains("arb_report_count"); count != nullptr) {
+            const T value = parse_plain_real<T>(*count);
+            const double number = static_cast<double>(value);
+            if (!std::isfinite(number) || number < 0 || number > 1024 || std::floor(number) != number)
+                throw std::runtime_error("arb_report_count must be an integer in [0, 1024]");
+            out.arb_report_count = value;
+        }
+        if (auto* count = ro.if_contains("arb_report_random_count"); count != nullptr) {
+            const T value = parse_plain_real<T>(*count);
+            const double number = static_cast<double>(value);
+            if (!std::isfinite(number) || number < 0 || number > 6 || std::floor(number) != number)
+                throw std::runtime_error("arb_report_random_count must be an integer in [0, 6]");
+            out.arb_report_random_count = value;
+        }
+        if (auto* offset = ro.if_contains("arb_report_offset"); offset != nullptr) {
+            const T value = parse_plain_real<T>(*offset);
+            const double number = static_cast<double>(value);
+            if (!std::isfinite(number) || number < -1 || number > 1023 || std::floor(number) != number)
+                throw std::runtime_error("arb_report_offset must be -1 or an integer in [0, 1023]");
+            out.arb_report_offset = value;
+        }
+        if (auto* age = ro.if_contains("arb_report_max_age_s"); age != nullptr) {
+            const T value = parse_plain_real<T>(*age);
+            if (!(value >= T(0)) || !std::isfinite(static_cast<double>(value)))
+                throw std::runtime_error("arb_report_max_age_s must be finite and nonnegative");
+            out.arb_report_max_age_s = value;
+        }
         if (auto* rate = ro.if_contains("arb_report_rate"); rate != nullptr) {
             const T value = parse_plain_real<T>(*rate);
             if (!(value >= T(0) && value <= T(1))) {

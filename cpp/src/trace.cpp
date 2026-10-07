@@ -41,6 +41,17 @@ json::object detailed_entry_to_json(const arb::harness::DetailedEntry<RealT>& e)
     o["p_cex"] = static_cast<double>(e.p_cex);
     o["p_price_feed"] = static_cast<double>(e.p_price_feed);
     o["fee"] = static_cast<double>(e.fee);
+    o["policy_base_fee"] = e.policy_base_fee;
+    o["policy_fallback_fee"] = e.policy_fallback_fee;
+    o["policy_fee_signal"] = e.policy_fee_signal;
+    o["policy_pressure_base"] = e.policy_pressure_base;
+    o["policy_pressure_fallback"] = e.policy_pressure_fallback;
+    o["policy_pressure_fresh_bumps"] = e.policy_pressure_fresh_bumps;
+    o["policy_pressure_cached_bumps"] = e.policy_pressure_cached_bumps;
+
+    o["policy_target_calls"] = e.policy_target_calls;
+    o["policy_actuator_holds"] = e.policy_actuator_holds;
+    o["policy_gate_rejections"] = e.policy_gate_rejections;
     o["slippage_1pct_0to1"] = static_cast<double>(e.slippage_1pct_0to1);
     o["slippage_1pct_1to0"] = static_cast<double>(e.slippage_1pct_1to0);
     o["n_trades"] = e.n_trades;
@@ -109,44 +120,44 @@ json::object action_to_json(const arb::harness::Action<RealT>& action) {
             o["xcp_profit_after"] = static_cast<double>(act.xcp_profit_after);
             o["vp_before"] = static_cast<double>(act.vp_before);
             o["vp_after"] = static_cast<double>(act.vp_after);
-        } else if constexpr (std::is_same_v<ActionType, arb::harness::YbRouteAction<RealT>>) {
-            o["type"] = "yb_route";
-            o["route"] = "virtual_pool";
+            o["balance0_after"] = static_cast<double>(act.balances_after[0]);
+            o["balance1_after"] = static_cast<double>(act.balances_after[1]);
+            o["D_after"] = static_cast<double>(act.D_after);
+            o["lp_xcp_profit_after"] = static_cast<double>(act.lp_xcp_profit_after);
+            o["donation_shares_after"] = static_cast<double>(act.donation_shares_after);
+            o["total_supply_after"] = static_cast<double>(act.total_supply_after);
+            o["virtual_price_after"] = static_cast<double>(act.virtual_price_after);
+            o["last_timestamp_after"] = act.last_ts_after;
+            o["last_donation_release_ts_after"] = static_cast<double>(act.last_donation_release_ts_after);
+            o["donation_protection_expiry_ts_after"] = static_cast<double>(act.donation_protection_expiry_ts_after);
+        } else if constexpr (std::is_same_v<ActionType, arb::harness::InjectedLog<RealT>>) {
+            o["type"] = "injected";
             o["ts"] = act.ts;
-            o["direction"] = act.direction;
-            o["input"] = static_cast<double>(act.input);
-            o["output"] = static_cast<double>(act.output);
-            o["profit_coin0"] = static_cast<double>(act.profit_coin0);
-            o["lp_amount"] = static_cast<double>(act.lp_amount);
-            o["donation"] = static_cast<double>(act.donation);
-            o["flash_amount"] = static_cast<double>(act.flash_amount);
-        } else if constexpr (std::is_same_v<ActionType, arb::harness::StateReconciliationAction<RealT>>) {
-            o["type"] = "state_reconciliation"; o["phase"] = act.phase;
-            o["wall_ns"] = act.wall_ns; o["source_block"] = act.source_block;
-            o["source_timestamp"] = act.source_timestamp; o["available_ns"] = act.available_ns;
-            o["detection_ns"] = act.detection_ns; o["deadline_ns"] = act.deadline_ns;
-            o["apply_ns"] = act.apply_ns; o["segment"] = act.segment;
-            o["state_changed"] = act.state_changed;
-            o["scale_before"] = static_cast<double>(act.scale_before);
-            o["scale_after"] = static_cast<double>(act.scale_after);
-            if (act.phase == "apply" || act.phase == "equal") {
-                o["balances_before"] = json::array{static_cast<double>(act.balances_before[0]),static_cast<double>(act.balances_before[1])};
-                o["balances_after"] = json::array{static_cast<double>(act.balances_after[0]),static_cast<double>(act.balances_after[1])};
-                o["scale_before"] = static_cast<double>(act.scale_before);
-                o["scale_after"] = static_cast<double>(act.scale_after);
-                o["debt_before"] = static_cast<double>(act.debt_before);
-                o["debt_after"] = static_cast<double>(act.debt_after);
-                o["collateral_before"] = static_cast<double>(act.collateral_before);
-                o["collateral_after"] = static_cast<double>(act.collateral_after);
-                o["cash_before"] = static_cast<double>(act.cash_before);
-                o["cash_after"] = static_cast<double>(act.cash_after);
-                o["vp_before"] = static_cast<double>(act.vp_before);
-                o["vp_after"] = static_cast<double>(act.vp_after);
-                o["xcp_before"] = static_cast<double>(act.xcp_before);
-                o["xcp_after"] = static_cast<double>(act.xcp_after);
-                o["lp_metrics_comparison_only"] = true;
-                o["accounting_warning"] = "Copied public state is not simulated profit; LP metrics across resets are comparison-only.";
-            }
+            o["index"] = act.index;
+            o["kind"] = "yb_fill";  // only committed active_2l fills are logged
+            o["success"] = true;
+            o["out0"] = static_cast<double>(act.out[0]);
+            o["out1"] = static_cast<double>(act.out[1]);
+            o["balance0"] = static_cast<double>(act.balances[0]);
+            o["balance1"] = static_cast<double>(act.balances[1]);
+            o["D"] = static_cast<double>(act.D);
+            o["total_supply"] = static_cast<double>(act.total_supply);
+            o["price_scale"] = static_cast<double>(act.price_scale);
+            o["price_oracle"] = static_cast<double>(act.price_oracle);
+            o["last_prices"] = static_cast<double>(act.last_prices);
+            o["last_timestamp"] = act.last_timestamp;
+            o["virtual_price"] = static_cast<double>(act.virtual_price);
+            o["xcp_profit"] = static_cast<double>(act.xcp_profit);
+            o["lp_xcp_profit"] = static_cast<double>(act.lp_xcp_profit);
+            o["donation_shares"] = static_cast<double>(act.donation_shares);
+            o["last_donation_release_ts"] = static_cast<double>(act.last_donation_release_ts);
+            o["donation_protection_expiry_ts"] = static_cast<double>(act.donation_protection_expiry_ts);
+            o["yb_direction"] = act.yb_direction;
+            o["yb_collateral"] = static_cast<double>(act.yb_collateral);
+            o["yb_debt"] = static_cast<double>(act.yb_debt);
+            o["yb_stable_balance"] = static_cast<double>(act.yb_stable_balance);
+            o["yb_price"] = static_cast<double>(act.yb_price);
+            o["yb_donation"] = static_cast<double>(act.yb_donation);
         }
     }, action);
     return o;

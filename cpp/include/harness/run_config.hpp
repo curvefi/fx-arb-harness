@@ -4,11 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <vector>
 
-#include "events/cex_depth.hpp"
 #include "harness/yb_initial_state.hpp"
-#include "harness/state_reconciliation.hpp"
 
 namespace arb {
 namespace harness {
@@ -17,20 +14,16 @@ namespace harness {
 enum class YbMode : uint8_t {
     Off = 0,   // no YieldBasis: the yb metric family stays empty
     Active2l,  // state-mutating 2L contract model (the original yb path)
-    Reference2l,   // contract-derived VirtualPool/LevAMM reference candidate
 };
 
 enum class EventCursor : uint8_t {
     Scalar = 0,
-    ExactSkip,
+    FastSkip,
 };
 
-enum class MetricProfile : uint8_t {
-    FullSummary = 0,
-    GridCore,
-};
 
-enum class ActorTimingMode : uint8_t { LegacyEvent = 0, MinuteSequential };
+// Whether the modeled YieldBasis actor trades the LEVAMM (its fee-paying exchange) or not at all (active_2l only).
+enum class YbArb : uint8_t { Levamm = 0, None };
 
 template <typename T>
 struct RunConfig {
@@ -42,36 +35,34 @@ struct RunConfig {
     T user_swap_size_frac{T(0.01)};
     T user_swap_thresh{T(0.05)};
     T arb_report_rate{T(1)};
-    const events::CexDepthTape* cex_depth{nullptr};
-    bool candle_fallback{false};
-    const events::ObservedStateTape<T>* observed_state{nullptr};
-    StateReconciliationMode state_reconciliation_mode{StateReconciliationMode::Off};
-    uint64_t equalization_delay_s{60};
-    T reset_threshold_bps{T(100)};
-    uint64_t observation_interval_s{60};
-    uint64_t cex_depth_max_age_s{30};
-    ActorTimingMode actor_timing_mode{ActorTimingMode::LegacyEvent};
-    bool save_actions{false};
+    T arb_report_max_age_s{T(0)};
+    T arb_report_count{T(0)}; // 0 preserves time-window mode; >0 selects last N reports.
+    T arb_report_random_count{T(0)}; // 0 disables; 1..6 samples one of the last N reports.
+    T arb_report_offset{T(-1)}; // -1 preserves window/count mode; 0 is latest, 1 is previous.
 
     // Detailed per-event logging
-    bool detailed_log{false};
     size_t detailed_interval{1};  // log every N-th event (1 = all)
 
-    // Optional YieldBasis 2L model. Existing modes retain their behavior;
-    // reference_2l adds full represented VirtualPool route arithmetic.
+    // Optional YieldBasis 2L model.
     YbMode yb_mode{YbMode::Off};
     T yb_releverage_fee{T(0.012)};
     T yb_cash_multiplier{T(1)};
     T yb_min_net_profit_coin0{T(1)};
+    YbArb yb_arb{YbArb::Levamm};
+    // active_2l: the actor values coin 1 at the event price -/+ this many bp (bid/ask), i.e. it closes short of
+    // the LEVAMM fee-band edge by about half that in LP terms.
+    T yb_execution_bps{T(5)};
     std::optional<YbInitialState<T>> yb_initial_state;
 
     // Slippage probe sampling
     bool enable_slippage_probes{false};
 
-    // Scalar remains the reference cursor. ExactSkip is admitted only when
-    // skipped events are provably observationally irrelevant.
+    // Scalar remains the reference cursor. FastSkip bypasses only events that
+    // are provably observationally irrelevant.
     EventCursor event_cursor{EventCursor::Scalar};
-    MetricProfile metric_profile{MetricProfile::FullSummary};
+
+    // Positive: end the run once max_7d_rel_price_diff exceeds this value.
+    double early_stop_max_7d_rel_price_diff{0.0};
 
 };
 

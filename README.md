@@ -47,17 +47,15 @@ cd /path/to/curve-fx-arb-harness
 cmake -S . -B build/compiled -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH=/path/to/twocrypto-cpp/_install \
   -DPOLICY_ID=your_policy_id \
-  -DPOLICY_ABI=twocrypto_policy_v1 \
   -DPOLICY_HEADER_PATH="$POLICY"
 cmake --build build/compiled \
   --target arb_evaluator_f64 arb_evaluator_ld --parallel
 ```
 
-Before use, inspect the executable's protocol identity and describe output. The optimizer run record stores the configured evaluator path and the validated policy ID, ABI, and parameter-count contract; it does not replace this executable inspection:
+Before use, inspect the executable's protocol identity. The optimizer run record stores the configured evaluator path and the validated policy ID, ABI, and parameter-count contract; it does not replace this executable inspection:
 
 ```sh
 /path/to/curve-fx-arb-harness/build/compiled/arb_evaluator_ld --identity-json
-/path/to/curve-fx-arb-harness/build/compiled/arb_evaluator_ld --describe-json
 ```
 
 ## Python client package
@@ -81,10 +79,6 @@ Identity emits one `hello` frame and exits:
 /path/to/curve-fx-arb-harness/build/native/arb_evaluator_ld --identity-json
 ```
 
-`--describe-json` is not a protocol frame. It is the canonical inspectable
-artifact description: source/build identity plus the compiled policy descriptor
-and exact lowering paths for policy, pool, session, and observation parameters.
-
 For a one-candidate smoke, start a short-lived `serve` process, open one
 session, evaluate once, and shut it down through the same protocol as
 a persistent run. There is no divergent one-shot request path.
@@ -99,7 +93,7 @@ The evaluator defaults to one worker per process so an orchestrator can allocate
 
 ## Protocol and artifact contract
 
-Every frame is one UTF-8 JSON object terminated by a newline. The lifecycle is `hello` -> `open_session`/`session_ready` -> optional `register_grid`/`grid_ready` -> one or more `evaluate_batch`/`batch_result` exchanges -> `close_session` and `shutdown`. All real-valued request inputs materialize once as finite IEEE-754 binary64 values, then widen to the evaluator arithmetic type when needed. One session admits exactly one scenario. `open_session` supplies `template_path`, `scenario_id`, `market_path`, and optional `price_feed_path`; `yb_mode` is the canonical YB selector. `event_cursor=scalar` is the permanent reference. `exact_skip` requires `metric_profile=grid_core` and falls back to scalar whenever its remaining exactness preconditions are absent. `metric_profile` selects `full_summary` or the exact no-YB `grid_core` field set; the latter rejects unsupported fields instead of returning approximations. GridCore reports `apy_net_robust_90d`, the APY whose log-growth rate gives equal weight to the mean and worst-5% mean of daily-sampled trailing-90-day net log returns. Negative weak regimes remain finite and rankable. The full profile retains legacy `apy_net_gm`. `observation.kind` (`summary` or `full_trace`) controls trace capture.
+Every frame is one UTF-8 JSON object terminated by a newline. The lifecycle is `hello` -> `open_session`/`session_ready` -> optional `register_grid`/`grid_ready` -> one or more `evaluate_batch`/`batch_result` exchanges -> `close_session` and `shutdown`. All real-valued request inputs materialize once as finite IEEE-754 binary64 values, then widen to the evaluator arithmetic type when needed. One session admits exactly one scenario. `open_session` supplies `template_path`, `scenario_id`, `market_path` (candles) or `block_tape_path` (block), and optional `price_feed_path`; `yb_mode` is the canonical YB selector. `event_cursor=scalar` is the permanent reference; `fast_skip` bypasses only provably inactive events. `apy_net_robust_90d` is the APY whose log-growth rate gives equal weight to the mean and worst-5% mean of daily-sampled trailing-90-day net log returns. Negative weak regimes remain finite and rankable. Legacy `apy_net_gm` is retained. `observation.kind` (`summary` or `full_trace`) controls trace capture.
 
 Full observation writes an atomic trace sidecar and, when requested, an action sidecar. The response returns `trace_path`, optional `actions_path`, and `effective_inputs`, a finite numeric map of the resolved pool/run controls used to initialize the replay. The evaluator returns raw metrics; objective scoring, plotting, replay, and placement remain in the optimizer.
 
@@ -107,21 +101,19 @@ See [`protocol/protocol_spec.md`](protocol/protocol_spec.md) for frame schemas a
 
 ## Ownership, inputs, and private data
 
-The harness owns price-feed parsers, `EventSoA`, arbitrage/user flow, donations, the optional YieldBasis 2L model, fixed-cadence idle ticks, metrics, summary/full traces, compiled-policy identity, and the evaluator executable. `dustswap_freq_s` controls the fixed cadence, while `user_swap_freq_s` keeps synthetic user swaps independently configurable. Arbitrage is always evaluated; `arb_fee_bps`, gas, sizing bounds, and volume caps model its economic friction. An attached generic price feed is exposed to compiled policies as the latest causal value and timestamp, regardless of whether its source is an oracle, internal model, or external venue. `yb_mode` selects `off`, established Observer2-equivalent `active_2l`, or contract-derived candidate `reference_2l`; `yb_releverage_fee` and `yb_cash_multiplier` configure enabled modes. Active and reference evaluate after every causal event. Summary-mode YB valuation runs hourly for GM accounting and once at the final endpoint for raw APY, while detailed replay additionally values logged rows. `reference_2l` executes represented VirtualPool/LevAMM/native route arithmetic and uses either default synthetic fresh-L2 state or a `yb_initial_state` checkpoint matched to native historical state; source-free event timing remains, so it is not proven contract parity, a full LT model, or a historical-onchain replay. Each reference decision scans 24 complete routes per direction and admits profit above 1 coin0, so the mode is intended for finalist diagnostics rather than large discovery grids. The pool owns the installed pool SDK; the optimizer owns TOML/run.json/results.npz, scoring, plotting, replay, and placement.
+The harness owns price-feed parsers, `EventSoA`, arbitrage/user flow, donations, the optional YieldBasis 2L model, fixed-cadence idle ticks, metrics, summary/full traces, compiled-policy identity, and the evaluator executable. `dustswap_freq_s` controls the fixed cadence, while `user_swap_freq_s` keeps synthetic user swaps independently configurable. Arbitrage is always evaluated; `arb_fee_bps`, gas, sizing bounds and the entry threshold model its economic friction. An attached generic price feed is exposed to compiled policies as the latest causal value and timestamp, regardless of whether its source is an oracle, internal model, or external venue. `yb_mode` selects `off` or established Observer2-equivalent `active_2l`; `yb_releverage_fee` and `yb_cash_multiplier` configure it. The active actor evaluates after every causal event. Summary-mode YB valuation runs hourly for GM accounting and once at the final endpoint for raw APY, while detailed replay additionally values logged rows. The pool owns the installed pool SDK; the optimizer owns TOML/run.json/results.npz, scoring, plotting, replay, and placement.
 
 Inputs are ordinary paths supplied by the optimizer TOML. Acquisition of private or Git-LFS data is user-owned; do not assume redistribution or license rights. Do not copy historical binaries, generated runs, or obsolete checkout paths into a build.
 
 Candle input is a JSON array of six numeric OHLCV fields per row. Invalid rows fail the load; timestamps accept seconds or milliseconds, and the configured clipping remains applied. Each result contains one candidate's metrics directly. Terminal APYs measure growth relative to the pool state at the start of the simulation window, including historical checkpoints.
 
-Depth inputs use the canonical numeric NPZ archive; v1 archives remain readable.
-Use `event_mode="depth"` with `cex_depth_path` and `observation_interval_s` to
-run directly from the book, omitting `market_path`. Candle runs continue to use
-`event_mode="candle_path"` and `market_path`. Optional traces and summaries are
-available for both. See [the protocol](protocol/protocol_spec.md#open_session)
-for the array contract and non-overwriting JSONL conversion command.
+Native arbitrage and the `active_2l` YieldBasis actor obey [`docs/arbitrage_rules.md`](docs/arbitrage_rules.md);
+the defaults are its standard settings (`arb_settle_offset_s` 1, `entry_edge_bps` 1.5, `arb_fee_bps` 0,
+`gas_coin0` 0, `yb_execution_bps` 5, `yb_min_net_profit_coin0` 1).
+Native arbitrage trades the pool against one external price per event, in any size, net of `arb_fee_bps`,
+and enters only above `entry_edge_bps`. The event price comes from one of two market modes:
+- **`event_mode="candles"`** (default): the close of each `market_path` OHLCV candle.
+- **`event_mode="block"`**: the price `arb_settle_offset_s` seconds after each block of `block_tape_path`,
+  built by `data/market/build_block_tape.py`.
 
-For the depth clock, set `actor_timing_mode="minute_sequential"` and choose
-`yb_mode="reference_2l"` or `"active_2l"`. The observation interval is configurable;
-the mode name does not force 60 seconds. Reference mode executes finite-depth
-hedges; active mode retains its midpoint-based YB model. Resets require reference
-mode. Native CEX fees/gas are not forwarded to either YB actor.
+See [the protocol](protocol/protocol_spec.md#open_session).

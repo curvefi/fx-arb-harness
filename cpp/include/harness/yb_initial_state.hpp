@@ -27,9 +27,7 @@ struct YbInitialState {
     T redeemed{};
     T stable_balance{};
     T lt_stable_balance{};
-    T flash_max_loan{};
     T stable_aggregator{};
-    T rounding_discount{};
     T lt_donation_discount{};
     bool killed{false};
 };
@@ -60,12 +58,10 @@ void validate_yb_initial_state(const YbInitialState<T>& state) {
         !finite_positive(state.stable_aggregator) || !finite_nonnegative(state.rate) ||
         !finite_nonnegative(state.minted) || !finite_nonnegative(state.redeemed) ||
         !finite_nonnegative(state.stable_balance) ||
-        !finite_nonnegative(state.lt_stable_balance) ||
-        !finite_nonnegative(state.flash_max_loan)) {
+        !finite_nonnegative(state.lt_stable_balance)) {
         throw std::invalid_argument("yb_initial_state contains invalid state quantities");
     }
     if (!finite_nonnegative(state.fee) || state.fee > T(1) ||
-        !finite_nonnegative(state.rounding_discount) || state.rounding_discount >= T(1) ||
         !finite_nonnegative(state.lt_donation_discount) || state.lt_donation_discount > T(1)) {
         throw std::invalid_argument("yb_initial_state contains invalid fractions");
     }
@@ -80,11 +76,11 @@ template <typename T>
 YbInitialState<T> parse_yb_initial_state(const boost::json::value& value) {
     if (!value.is_object()) throw std::invalid_argument("yb_initial_state must be an object");
     const auto& object = value.as_object();
-    constexpr std::array<std::string_view, 19> fields{
+    constexpr std::array<std::string_view, 17> fields{
         "source_block", "source_timestamp", "block_hash", "leverage", "fee",
         "collateral", "debt", "rate", "rate_mul", "rate_time", "minted", "redeemed",
-        "stable_balance", "lt_stable_balance", "flash_max_loan", "stable_aggregator",
-        "rounding_discount", "lt_donation_discount", "killed",
+        "stable_balance", "lt_stable_balance", "stable_aggregator",
+        "lt_donation_discount", "killed",
     };
     for (const auto& item : object) {
         const std::string_view key(item.key().data(), item.key().size());
@@ -117,9 +113,7 @@ YbInitialState<T> parse_yb_initial_state(const boost::json::value& value) {
     state.redeemed = real_field("redeemed");
     state.stable_balance = real_field("stable_balance");
     state.lt_stable_balance = real_field("lt_stable_balance");
-    state.flash_max_loan = real_field("flash_max_loan");
     state.stable_aggregator = real_field("stable_aggregator");
-    state.rounding_discount = real_field("rounding_discount");
     state.lt_donation_discount = real_field("lt_donation_discount");
     const auto& killed = required_yb_field(object, "killed");
     if (!killed.is_bool()) throw std::invalid_argument("yb_initial_state killed must be boolean");
@@ -137,9 +131,7 @@ boost::json::object yb_initial_state_json(const YbInitialState<T>& state) {
         {"minted", static_cast<double>(state.minted)}, {"redeemed", static_cast<double>(state.redeemed)},
         {"stable_balance", static_cast<double>(state.stable_balance)},
         {"lt_stable_balance", static_cast<double>(state.lt_stable_balance)},
-        {"flash_max_loan", static_cast<double>(state.flash_max_loan)},
         {"stable_aggregator", static_cast<double>(state.stable_aggregator)},
-        {"rounding_discount", static_cast<double>(state.rounding_discount)},
         {"lt_donation_discount", static_cast<double>(state.lt_donation_discount)},
         {"killed", state.killed}};
 }

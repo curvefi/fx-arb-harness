@@ -1,9 +1,7 @@
-#include "curve_fx_evaluator/compiled_policy_identity.hpp"
 #include "curve_fx_evaluator/evaluator.hpp"
 
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -169,6 +167,7 @@ void extract_metrics_from_pool_result(
     m["apy_net"] = apy_net;
     m["apy_net_gm"] = res.apy_net_gm;
     m["apy_net_robust_90d"] = res.apy_net_robust_90d;
+    m["pool_nav_vs_hold"] = res.pool_nav_vs_hold;
 
     m["avg_rel_price_diff"] = tw.avg_rel_price_diff;
     m["max_rel_price_diff"] = tw.max_rel_price_diff;
@@ -190,14 +189,34 @@ void extract_metrics_from_pool_result(
 
     m["yb_apy"] = res.yb_releverage_apy;
     m["yb_apy_gm"] = res.yb_releverage_apy_gm;
+    m["yb_external_equity_eth"] = res.yb_external_equity_eth;
+    m["yb_external_growth_eth"] = res.yb_external_growth_eth;
+    m["yb_external_max_drawdown_hourly"] = res.yb_external_max_drawdown_hourly;
+    m["yb_exposure_return"] = res.yb_exposure_return;
+    m["yb_exposure_rms"] = res.yb_exposure_rms;
+    m["yb_gm30"] = res.yb_gm30;
+    m["yb_gm60"] = res.yb_gm60;
+    m["yb_gm90"] = res.yb_releverage_apy_gm;
+    m["yb_gm30_floor_share"] = res.yb_gm30_floor_share;
+    m["yb_gm30_unfloored"] = res.yb_gm30_unfloored;
+    m["yb_gm30_windows"] = static_cast<double>(res.yb_gm30_windows);
+    m["yb_gm60_floor_share"] = res.yb_gm60_floor_share;
+    m["yb_price_scale_hourly_qv"] = res.yb_price_scale_hourly_qv;
+    m["policy_target_calls"] = res.policy_price_counters[0];
+    m["policy_actuator_holds"] = res.policy_price_counters[1];
+    m["policy_gate_rejections"] = res.policy_price_counters[2];
+    m["arb_offered_report_trades"] = static_cast<double>(rm.arb_offered_report_trades);
+    m["arb_withheld_report_trades"] = static_cast<double>(rm.arb_withheld_report_trades);
     m["yb_final_growth"] = res.yb_releverage_final_growth;
     m["yb_fee"] = static_cast<double>(res.yb_releverage_fee);
     m["yb_releverage_trades"] = static_cast<double>(res.yb_releverage_trades);
+    m["yb_levamm_profit_coin0"] = static_cast<double>(rm.yb_levamm_profit_coin0);
     m["yb_gm_windows"] = static_cast<double>(res.yb_releverage_gm_windows);
     m["yb_gm_floored_windows"] = static_cast<double>(res.yb_releverage_gm_floored_windows);
     m["yb_gm_floor_share"] = res.yb_releverage_gm_floor_share;
 
     m["elapsed_ms"] = res.elapsed_ms;
+    m["early_stop_ts"] = static_cast<double>(res.early_stop_ts);
     m["total_notional_coin0"] = static_cast<double>(rm.notional);
     m["lp_fee_coin0"] = static_cast<double>(rm.lp_fee_coin0);
     m["arb_pnl_coin0"] = static_cast<double>(rm.arb_pnl_coin0);
@@ -281,20 +300,19 @@ void execute_scenario_job(
         run_cfg.user_swap_freq_s = session_cfg.user_swap_freq_s;
         run_cfg.user_swap_size_frac = session_cfg.user_swap_size_frac;
         run_cfg.user_swap_thresh = session_cfg.user_swap_thresh;
+        run_cfg.arb_report_max_age_s = pool_override != nullptr
+            ? pool_override->arb_report_max_age_s.value_or(RealT(0)) : RealT(0);
+        run_cfg.arb_report_count = pool_override != nullptr
+            ? pool_override->arb_report_count.value_or(RealT(0)) : RealT(0);
+        run_cfg.arb_report_random_count = pool_override != nullptr
+            ? pool_override->arb_report_random_count.value_or(RealT(0)) : RealT(0);
+        run_cfg.arb_report_offset = pool_override != nullptr
+            ? pool_override->arb_report_offset.value_or(RealT(-1)) : RealT(-1);
         run_cfg.arb_report_rate = pool_override != nullptr
             ? pool_override->arb_report_rate.value_or(RealT(1)) : RealT(1);
-        run_cfg.cex_depth = scen.cex_depth ? &*scen.cex_depth : nullptr;
-        run_cfg.candle_fallback = scen.candle_fallback;
-        run_cfg.observed_state = scen.observed_state ? &*scen.observed_state : nullptr;
-        run_cfg.equalization_delay_s = session_cfg.equalization_delay_s;
-        run_cfg.reset_threshold_bps = session_cfg.reset_threshold_bps;
-        run_cfg.observation_interval_s = session_cfg.observation_interval_s;
-        run_cfg.cex_depth_max_age_s = session_cfg.cex_depth_max_age_s;
         run_cfg.enable_slippage_probes = session_cfg.enable_slippage_probes;
-        run_cfg.state_reconciliation_mode = session_cfg.state_reconciliation_mode;
-        run_cfg.actor_timing_mode = session_cfg.actor_timing_mode;
         run_cfg.event_cursor = session_cfg.event_cursor;
-        run_cfg.metric_profile = session_cfg.metric_profile;
+        run_cfg.early_stop_max_7d_rel_price_diff = session_cfg.early_stop_max_7d_rel_price_diff;
         run_cfg.yb_mode = session_cfg.yb_mode;
         run_cfg.yb_releverage_fee =
             pool_override != nullptr && pool_override->yb_releverage_fee.has_value()
@@ -302,6 +320,8 @@ void execute_scenario_job(
                 : session_cfg.yb_releverage_fee;
         run_cfg.yb_cash_multiplier = session_cfg.yb_cash_multiplier;
         run_cfg.yb_min_net_profit_coin0 = session_cfg.yb_min_net_profit_coin0;
+        run_cfg.yb_arb = session_cfg.yb_arb;
+        run_cfg.yb_execution_bps = session_cfg.yb_execution_bps;
         run_cfg.yb_initial_state = session_cfg.yb_initial_state;
 
         std::vector<arb::harness::Action<RealT>>* actions_ptr = nullptr;
@@ -335,11 +355,16 @@ void execute_scenario_job(
                 static_cast<double>(costs.arb_fee_bps);
             effective["pool.costs.gas_coin0"] =
                 static_cast<double>(costs.gas_coin0);
+            effective["pool.costs.report_coin0"] = static_cast<double>(costs.report_coin0);
+            effective["pool.costs.entry_edge_bps"] =
+                static_cast<double>(costs.entry_edge_bps);
             effective["run.yb_min_net_profit_coin0"] = static_cast<double>(run_cfg.yb_min_net_profit_coin0);
-            effective["run.reset_threshold_bps"] = static_cast<double>(run_cfg.reset_threshold_bps);
-            effective["run.equalization_delay_s"] = run_cfg.equalization_delay_s;
             effective["pool.run.yb_releverage_fee"] =
                 static_cast<double>(run_cfg.yb_releverage_fee);
+            effective["pool.run.arb_report_count"] = static_cast<double>(run_cfg.arb_report_count);
+            effective["pool.run.arb_report_random_count"] = static_cast<double>(run_cfg.arb_report_random_count);
+            effective["pool.run.arb_report_offset"] = static_cast<double>(run_cfg.arb_report_offset);
+            effective["pool.run.arb_report_max_age_s"] = static_cast<double>(run_cfg.arb_report_max_age_s);
             effective["pool.run.arb_report_rate"] =
                 static_cast<double>(run_cfg.arb_report_rate);
             if (run_cfg.yb_initial_state && run_cfg.yb_mode != arb::harness::YbMode::Off) {
@@ -350,18 +375,11 @@ void execute_scenario_job(
             }
 
             trace_lease.emplace(TraceArena::global_instance().acquire());
-            run_cfg.detailed_log = true;
             run_cfg.detailed_interval = std::max<size_t>(1, obs_spec.trace_interval);
-            run_cfg.save_actions = obs_spec.trace_actions;
             detailed_ptr = &trace_lease->detailed_entries();
-            if (run_cfg.save_actions) {
+            if (obs_spec.trace_actions) {
                 actions_ptr = &trace_lease->actions();
             }
-        } else {
-            // Summary mode: keep both output pointers null so the detailed
-            // logger stays disabled (enabled() == out_entries_ != nullptr)
-            // and the per-worker vectors never fill with per-event entries.
-            run_cfg.detailed_log = false;
         }
 
         auto pool_res = arb::harness::run_single_pool<RealT>(
@@ -383,17 +401,8 @@ void execute_scenario_job(
         sc_res.success = true;
         auto tw_summary = pool_res.tw_metrics.summarize();
         extract_metrics_from_pool_result(pool_res, tw_summary, sc_res.metrics);
-        if (scen.observed_state) {
-            const auto& r = pool_res.reconciliation;
-            sc_res.actor_metrics["state_reconciliation"] = boost::json::object{
-                {"observations", r.observations}, {"episodes", r.episodes}, {"resets", r.resets},
-                {"lp_metrics_comparison_only",r.resets != 0},
-                {"accounting_warning","Copied public state is not simulated profit; LP metrics across resets are comparison-only."}};
-        }
         if (trace_lease.has_value()) {
             sc_res.has_trace = true;
-            sc_res.trace_record_count = trace_lease->detailed_entries().size();
-            sc_res.action_count = trace_lease->actions().size();
             sc_res.trace_json = serialize_detailed_entries_json(
                 trace_lease->detailed_entries());
 
@@ -431,8 +440,6 @@ BatchEvaluationResult evaluate_batch_candidates(
     const std::vector<EvaluationCandidate<RealT>>& candidates,
     const ObservationSpec& obs_spec
 ) {
-    auto t_start = std::chrono::high_resolution_clock::now();
-
     const size_t n_candidates = candidates.size();
     const auto& scenario = store.scenario();
 
@@ -464,19 +471,14 @@ BatchEvaluationResult evaluate_batch_candidates(
     }
 
 
-    if (n_candidates > 0) {
-        // Each job owns one candidate result. TraceArena serializes full traces.
-        WorkerPool::global().run_jobs(n_candidates, [&](size_t cand_idx) {
-            execute_scenario_job(
-                candidates[cand_idx], scenario, session_cfg, obs_spec,
-                parsed_overrides[cand_idx] ? &*parsed_overrides[cand_idx] : nullptr,
-                override_errors[cand_idx], batch_result.candidate_results[cand_idx]
-            );
-        });
-    }
-
-    auto t_end = std::chrono::high_resolution_clock::now();
-    batch_result.elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+    // Each job owns one candidate result. TraceArena serializes full traces.
+    WorkerPool::global().run_jobs(n_candidates, [&](size_t cand_idx) {
+        execute_scenario_job(
+            candidates[cand_idx], scenario, session_cfg, obs_spec,
+            parsed_overrides[cand_idx] ? &*parsed_overrides[cand_idx] : nullptr,
+            override_errors[cand_idx], batch_result.candidate_results[cand_idx]
+        );
+    });
 
     return batch_result;
 }
