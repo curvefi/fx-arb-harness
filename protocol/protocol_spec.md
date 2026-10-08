@@ -37,14 +37,17 @@ evaluator process is required for another session.
   "metric_schema": "twocrypto-summary-v1",
   "metric_fields": [
     "vp", "lp_xcp_profit", "apy", "apy_net", "apy_net_gm",
+    "apy_net_gm30", "apy_net_gm60", "apy_net_gm90", "apy_net_gm30_floor_share",
+    "apy_net_gm60_floor_share", "apy_net_gm90_floor_share",
     "apy_net_robust_90d", "avg_rel_price_diff", "max_rel_price_diff",
     "max_7d_rel_price_diff", "final_rel_price_diff", "detach_energy_ungated",
     "avg_imbalance", "tw_avg_pool_fee", "min_pool_fee", "max_pool_fee",
     "tw_real_slippage_1pct", "tw_real_slippage_5pct",
     "tw_real_slippage_10pct", "trades", "n_rebalances",
-    "arb_guarded_loss_coin0", "yb_apy", "yb_apy_gm", "yb_gm30", "yb_gm60", "yb_gm90", "yb_final_growth",
-    "yb_fee", "yb_releverage_trades", "yb_gm_windows",
-    "yb_gm_floored_windows", "yb_gm_floor_share", "elapsed_ms",
+    "arb_guarded_loss_coin0", "yb_apy", "yb_apy_gm", "yb_apy_gm30", "yb_apy_gm60",
+    "yb_apy_gm90", "yb_apy_gm30_floor_share", "yb_apy_gm60_floor_share",
+    "yb_apy_gm90_floor_share", "yb_final_growth",
+    "yb_fee", "yb_releverage_trades", "elapsed_ms",
     "total_notional_coin0", "lp_fee_coin0", "arb_pnl_coin0",
     "fee_capture_rate", "donations", "donation_coin0_total", "tvl_growth"
   ],
@@ -376,28 +379,20 @@ and session mismatches are reported as errors without changing the active
 session.
 
 
-### YB rolling geometric-mean APY horizons
+### Rolling geometric-mean APY
 
-`yb_gm30`, `yb_gm60`, and `yb_gm90` summarize 30-, 60-, and 90-day
-rolling annualized YB growth returns, sampled hourly using the same YB valuation.
-Each is the geometric mean of annualized APYs across all eligible windows in
-the evaluated history, not merely the last window. Non-positive or invalid
-annualized returns are floored at `1e-20` before taking logs. A horizon with no
-eligible windows, or YB disabled, returns `-1`. Samples use the latest stored
+`apy_net_gm30`, `apy_net_gm60`, `apy_net_gm90` (pool net growth, the series of
+`apy_net`) and `yb_apy_gm30`, `yb_apy_gm60`, `yb_apy_gm90` (YB growth, the series
+of `yb_apy`) share one rule. Each hour, once a full window exists, the window's
+annualised return is taken, a window with a non-positive return counting as
+`1e-20`; the metric is the geometric mean over all windows of the run. The
+matching `_floor_share` is the share of windows floored; both are `-1` when no
+full window exists (or, for the YB family, YB is off). Samples use the latest stored
 observation at or before the window boundary and annualize by actual elapsed time.
+`apy_net_gm` and `yb_apy_gm` are the 90-day values under their legacy names.
 
-`yb_apy_gm` remains an exact alias of `yb_gm90`; existing `yb_gm_windows`,
-`yb_gm_floored_windows`, and `yb_gm_floor_share` remain 90-day diagnostics.
-The two additional bounded queues advance only at the existing hourly sample
-times, with amortized constant work per sample and no additional YB valuation.
-Existing stored results do not acquire new horizons without reevaluation.
+### Report-selection diagnostics
 
-### GM floor and report-selection diagnostics
-
-`yb_gm30_floor_share` and `yb_gm60_floor_share` count the fraction of eligible
-hourly windows floored before geometric averaging. `yb_gm30_windows` is the
-eligible count. `yb_gm30_unfloored` is the geometric mean among windows not
-floored, or -1 when none exist; it is diagnostic and does not replace GM30.
 `arb_offered_report_trades` / `arb_withheld_report_trades` count successful
 arbitrage swaps in report-capable policies whose winning context respectively
 contains an offered report / withholds it. These describe the selected action,
@@ -412,7 +407,7 @@ It is variance per year (not volatility); take its square root for annualized
 volatility. Returns -1 when YB is off or fewer than two distinct-time samples
 exist. It follows the run's event availability and truncation, excludes the
 partial final hour, and adds one log calculation per hourly YB sample. It is a
-diagnostic, not a yield adjustment or a substitute for GM30.
+diagnostic, not a yield adjustment or a substitute for the GM metrics.
 
 ### Post-trade pressure research diagnostics (2026-09-25)
 
@@ -422,7 +417,7 @@ subtract projected debt, include pending LT cash, and divide by the external
 coin0/coin1 price. Names target the ETHUSD research scenario (coin1=ETH). Growth
 starts at the initial pre-trade mark; drawdown samples the settled hourly clock
 plus endpoint, not every event. Negative equity is retained. The existing
-`yb_gm30`/60/90 metrics and their valuation are unchanged. Missing/disabled YB
+`yb_apy_gm30`/60/90 metrics and their valuation are unchanged. Missing/disabled YB
 uses−1. Stopped histories do not represent full-period endpoint returns.
 
 For policies exposing post-trade pressure state, detailed traces also include

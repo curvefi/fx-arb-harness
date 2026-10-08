@@ -90,30 +90,21 @@ struct PoolResult {
     T tvl_start{0};
     T donation_apy{0};
     T donation_frequency{0};
-    double apy_net_gm{-1.0};
+    RollingGeoApySummary apy_net_gm{};
     double apy_net_robust_90d{-1.0};
     double pool_nav_vs_hold{-1.0};
     T yb_releverage_fee{T(0)};
     double yb_releverage_apy{-1.0};
-    double yb_releverage_apy_gm{-1.0};
+    RollingGeoApySummary yb_apy_gm{};
     double yb_external_equity_eth{-1.0};
     double yb_external_growth_eth{-1.0};
     double yb_external_max_drawdown_hourly{-1.0};
     double yb_exposure_return{-1.0};
     double yb_exposure_rms{-1.0};
-    double yb_gm30{-1.0};
-    double yb_gm60{-1.0};
-    double yb_gm30_floor_share{-1.0};
-    double yb_gm30_unfloored{-1.0};
-    uint64_t yb_gm30_windows{0};
-    double yb_gm60_floor_share{-1.0};
     double yb_price_scale_hourly_qv{-1.0};
     std::array<double,3> policy_price_counters{-1,-1,-1};
     double yb_releverage_final_growth{-1.0};
     uint64_t yb_releverage_trades{0};
-    uint64_t yb_releverage_gm_windows{0};
-    uint64_t yb_releverage_gm_floored_windows{0};
-    double yb_releverage_gm_floor_share{-1.0};
 
     T initial_virtual_price{1};
     T initial_lp_xcp_profit{1};
@@ -309,29 +300,18 @@ PoolResult<T> run_single_pool(
         result.pool_nav_vs_hold = loop_result.pool_nav_vs_hold;
         result.yb_releverage_fee = loop_result.yb_releverage_fee;
         result.yb_releverage_apy = loop_result.yb_releverage_apy;
-        result.yb_releverage_apy_gm = loop_result.yb_releverage_apy_gm;
+        result.yb_apy_gm = loop_result.yb_apy_gm;
         result.yb_external_equity_eth = loop_result.yb_external_equity_eth;
         result.yb_external_growth_eth = loop_result.yb_external_growth_eth;
         result.yb_external_max_drawdown_hourly = loop_result.yb_external_max_drawdown_hourly;
         result.yb_exposure_return = loop_result.yb_exposure_return;
         result.yb_exposure_rms = loop_result.yb_exposure_rms;
-        result.yb_gm30 = loop_result.yb_gm30;
-        result.yb_gm60 = loop_result.yb_gm60;
-        result.yb_gm30_floor_share = loop_result.yb_gm30_floor_share;
-        result.yb_gm30_unfloored = loop_result.yb_gm30_unfloored;
-        result.yb_gm30_windows = loop_result.yb_gm30_windows;
-        result.yb_gm60_floor_share = loop_result.yb_gm60_floor_share;
         result.yb_price_scale_hourly_qv = loop_result.yb_price_scale_hourly_qv;
 #ifdef TWOCRYPTO_POLICY_HEADER
         result.policy_price_counters = policy_price_diagnostics<pools::twocrypto_fx::ChallengeFeePolicy<T>>(pool.policy,0);
 #endif
         result.yb_releverage_final_growth = loop_result.yb_releverage_final_growth;
         result.yb_releverage_trades = loop_result.yb_releverage_trades;
-        result.yb_releverage_gm_windows = loop_result.yb_releverage_gm_windows;
-        result.yb_releverage_gm_floored_windows =
-            loop_result.yb_releverage_gm_floored_windows;
-        result.yb_releverage_gm_floor_share =
-            loop_result.yb_releverage_gm_floor_share;
         result.balances[0] = pool.balances[0];
         result.balances[1] = pool.balances[1];
         result.price_scale = pool.cached_price_scale;

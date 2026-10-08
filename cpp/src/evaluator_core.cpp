@@ -165,7 +165,17 @@ void extract_metrics_from_pool_result(
     m["lp_xcp_profit"] = lp_xcp_end;
     m["apy"] = apy;
     m["apy_net"] = apy_net;
-    m["apy_net_gm"] = res.apy_net_gm;
+    // Rolling geometric-mean APY family; the legacy name is the 90-day value.
+    const auto put_gm = [&m](const std::string& name, const arb::harness::RollingGeoApySummary& gm) {
+        m[name] = gm.gm90;
+        m[name + "30"] = gm.gm30;
+        m[name + "60"] = gm.gm60;
+        m[name + "90"] = gm.gm90;
+        m[name + "30_floor_share"] = gm.floor_share30;
+        m[name + "60_floor_share"] = gm.floor_share60;
+        m[name + "90_floor_share"] = gm.floor_share90;
+    };
+    put_gm("apy_net_gm", res.apy_net_gm);
     m["apy_net_robust_90d"] = res.apy_net_robust_90d;
     m["pool_nav_vs_hold"] = res.pool_nav_vs_hold;
 
@@ -188,19 +198,12 @@ void extract_metrics_from_pool_result(
     m["arb_guarded_loss_coin0"] = static_cast<double>(rm.arb_guarded_loss_coin0);
 
     m["yb_apy"] = res.yb_releverage_apy;
-    m["yb_apy_gm"] = res.yb_releverage_apy_gm;
+    put_gm("yb_apy_gm", res.yb_apy_gm);
     m["yb_external_equity_eth"] = res.yb_external_equity_eth;
     m["yb_external_growth_eth"] = res.yb_external_growth_eth;
     m["yb_external_max_drawdown_hourly"] = res.yb_external_max_drawdown_hourly;
     m["yb_exposure_return"] = res.yb_exposure_return;
     m["yb_exposure_rms"] = res.yb_exposure_rms;
-    m["yb_gm30"] = res.yb_gm30;
-    m["yb_gm60"] = res.yb_gm60;
-    m["yb_gm90"] = res.yb_releverage_apy_gm;
-    m["yb_gm30_floor_share"] = res.yb_gm30_floor_share;
-    m["yb_gm30_unfloored"] = res.yb_gm30_unfloored;
-    m["yb_gm30_windows"] = static_cast<double>(res.yb_gm30_windows);
-    m["yb_gm60_floor_share"] = res.yb_gm60_floor_share;
     m["yb_price_scale_hourly_qv"] = res.yb_price_scale_hourly_qv;
     m["policy_target_calls"] = res.policy_price_counters[0];
     m["policy_actuator_holds"] = res.policy_price_counters[1];
@@ -211,9 +214,6 @@ void extract_metrics_from_pool_result(
     m["yb_fee"] = static_cast<double>(res.yb_releverage_fee);
     m["yb_releverage_trades"] = static_cast<double>(res.yb_releverage_trades);
     m["yb_levamm_profit_coin0"] = static_cast<double>(rm.yb_levamm_profit_coin0);
-    m["yb_gm_windows"] = static_cast<double>(res.yb_releverage_gm_windows);
-    m["yb_gm_floored_windows"] = static_cast<double>(res.yb_releverage_gm_floored_windows);
-    m["yb_gm_floor_share"] = res.yb_releverage_gm_floor_share;
 
     m["elapsed_ms"] = res.elapsed_ms;
     m["early_stop_ts"] = static_cast<double>(res.early_stop_ts);

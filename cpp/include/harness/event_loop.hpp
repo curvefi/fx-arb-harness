@@ -59,11 +59,9 @@ struct YbLoopState {
     Yb2LActor<T> actor;
     Yb2LApyTracker<T> apy_tracker;
     YbExternalEquity external_equity;
-    RollingGeoApy90d<F> apy_gm;
-    // Reuse the hourly valuation and sampling clock; bounded queues are only
-    // advanced once per hour, never scanned across the simulation history.
-    RollingGeoApyWindow<F> apy_gm30{30ULL * 86400, RollingGeoApy90d<F>::FLOOR_APY};
-    RollingGeoApyWindow<F> apy_gm60{60ULL * 86400, RollingGeoApy90d<F>::FLOOR_APY};
+    // Bounded queues, advanced once per hour on the valuation clock and never
+    // scanned across the simulation history.
+    RollingGeoApy<F> apy_gm;
     Yb2LCosts<T> actor_costs{};
     uint64_t last_valuation_ts{0};
     SampledLogVariation<F> price_scale_variation;
@@ -152,7 +150,7 @@ EventLoopResult<T> run_event_loop_impl(
     const auto initial_balances = pool.balances;
     result.donation_apy = dcfg.apy;
 
-    RollingGeoApy90d<F> apy_net_gm;
+    RollingGeoApy<F> apy_net_gm;
     NetApyRobust90d<F> apy_net_robust_90d;
     apy_net_robust_90d.reserve_duration(result.t_end - result.t_start);
     std::optional<YbLoopState<T>> yb;
@@ -555,17 +553,17 @@ EventLoopResult<T> run_event_loop_impl(
             apy_net_robust_90d.last_sample_ts,
             NetApyRobust90d<F>::SAMPLE_S
         ));
-        if (!apy_net_gm.have_sample) {
+        if (!apy_net_gm.gm90.have_sample) {
             return result.t_start;
         }
         include_due(due_after(
-            apy_net_gm.last_sample_ts,
-            RollingGeoApy90d<F>::SAMPLE_S
+            apy_net_gm.gm90.last_sample_ts,
+            RollingGeoApy<F>::SAMPLE_S
         ));
         if constexpr (EnableYb) {
             if (yb_2l_on) {
-                if (!yb->apy_gm.have_sample) return result.t_start;
-                include_due(due_after(yb->apy_gm.last_sample_ts, RollingGeoApy90d<F>::SAMPLE_S));
+                if (!yb->apy_gm.gm90.have_sample) return result.t_start;
+                include_due(due_after(yb->apy_gm.gm90.last_sample_ts, RollingGeoApy<F>::SAMPLE_S));
             }
         }
         if (donation_on && dcfg.next_ts != 0) {
@@ -730,8 +728,6 @@ EventLoopResult<T> run_event_loop_impl(
         if (hourly_due && initialized) {
             yb->price_scale_variation.sample(ts, static_cast<F>(pool.cached_price_scale));
             yb->apy_gm.sample(ts, growth_now);
-            yb->apy_gm30.sample(ts, growth_now);
-            yb->apy_gm60.sample(ts, growth_now);
         }
         if (!detailed_row_logged) return;
 
@@ -870,7 +866,7 @@ EventLoopResult<T> run_event_loop_impl(
         sample_net_apy(ev_ts);
         ev_idx = next_event_index(ev_idx + 1);
     }
-    result.apy_net_gm = apy_net_gm.value();
+    result.apy_net_gm = apy_net_gm.summary();
     result.apy_net_robust_90d = apy_net_robust_90d.value();
     // Fast skip may omit the last no-trade event; mark at its price anyway.
     const T final_market_price = static_cast<T>(events.p_cex[final_event_idx]);
@@ -898,22 +894,11 @@ EventLoopResult<T> run_event_loop_impl(
         result.yb_releverage_fee = yb_2l_on ? yb->actor.state().fee : T(0);
         result.yb_releverage_apy =
             yb_2l_on ? yb->apy_tracker.apy() : -1.0;
-        result.yb_releverage_apy_gm = yb->apy_gm.value();
-        result.yb_gm30 = yb->apy_gm30.value();
-        result.yb_gm60 = yb->apy_gm60.value();
-        result.yb_gm30_floor_share = yb->apy_gm30.floor_share();
-        result.yb_gm30_unfloored = yb->apy_gm30.unfloored_value();
-        result.yb_gm30_windows = static_cast<uint64_t>(yb->apy_gm30.n_windows);
-        result.yb_gm60_floor_share = yb->apy_gm60.floor_share();
+        result.yb_apy_gm = yb->apy_gm.summary();
         result.yb_price_scale_hourly_qv = yb->price_scale_variation.annualized();
         result.yb_releverage_final_growth = yb_2l_on
             ? yb->apy_tracker.final_growth() : -1.0;
         result.yb_releverage_trades = yb_2l_on ? m.yb_2l_fires : 0;
-        result.yb_releverage_gm_windows =
-            static_cast<uint64_t>(yb->apy_gm.n_windows);
-        result.yb_releverage_gm_floored_windows =
-            static_cast<uint64_t>(yb->apy_gm.n_floored_windows);
-        result.yb_releverage_gm_floor_share = yb->apy_gm.floor_share();
     }
     return result;
 }

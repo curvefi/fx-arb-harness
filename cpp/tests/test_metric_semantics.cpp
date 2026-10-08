@@ -71,15 +71,15 @@ int main() {
 
     // Independent batch oracle: profitable first 50 days, then a flat tail.
     // The shorter horizons must see more zero-return windows, without extra
-    // intrahour samples changing the hourly stream or the legacy 90-day value.
+    // intrahour samples changing the hourly stream or the three-window family.
     using Window = arb::harness::RollingGeoApyWindow<double>;
     Window horizons[] = {{30 * day, 1e-20}, {60 * day, 1e-20}, {90 * day, 1e-20}};
-    arb::harness::RollingGeoApy90d<double> legacy;
+    arb::harness::RollingGeoApy<double> family;
     std::vector<double> hourly_growth;
     for (uint64_t hour = 0; hour <= 120 * 24; ++hour) {
         const double growth = std::exp(0.0004 * std::min(double(hour) / 24, 50.0));
         hourly_growth.push_back(growth);
-        legacy.sample(hour * 3600, growth);
+        family.sample(hour * 3600, growth);
         for (auto& horizon : horizons) {
             horizon.sample(hour * 3600, growth);
             horizon.sample(hour * 3600 + 1, growth * 2); // Not due.
@@ -89,14 +89,13 @@ int main() {
     }
     for (auto& horizon : horizons) {
         const size_t hours = horizon.WINDOW_S / 3600;
-        double sum_log = 0, sum_positive_log = 0;
+        double sum_log = 0;
         size_t floored = 0;
         for (size_t end = hours; end < hourly_growth.size(); ++end) {
             const double apy = std::pow(hourly_growth[end] / hourly_growth[end-hours],
                                         365.0 * 24 / hours) - 1;
             sum_log += std::log(std::max(apy, 1e-20));
             floored += apy < 1e-20;
-            if (apy >= 1e-20) sum_positive_log += std::log(apy);
         }
         const size_t count = hourly_growth.size() - hours;
         require(near(horizon.value(), std::exp(sum_log / count)),
@@ -104,14 +103,15 @@ int main() {
         require(horizon.n_windows == count && horizon.n_floored_windows == floored,
                 "GM window and flat-tail floor counts must match");
         require(near(horizon.floor_share(), double(floored) / count), "GM floor share mismatch");
-        require(near(horizon.unfloored_value(), std::exp(sum_positive_log / (count - floored))),
-                "unfloored GM diagnostic must match the positive-window oracle");
         require(horizon.samples.size() <= hours + 1, "GM storage must be bounded");
     }
     require(horizons[0].value() < horizons[1].value() &&
             horizons[1].value() < horizons[2].value(),
             "shorter horizons must expose the flat tail sooner");
-    require(horizons[2].value() == legacy.value(), "90-day legacy alias must be exact");
+    const auto gm = family.summary();
+    require(gm.gm30 == horizons[0].value() && gm.gm60 == horizons[1].value() && gm.gm90 == horizons[2].value() &&
+            gm.floor_share30 == horizons[0].floor_share() && gm.floor_share90 == horizons[2].floor_share(),
+            "the family must equal its three windows");
 
     arb::harness::SampledLogVariation<double> variation;
     require(variation.annualized() == -1, "QV needs a positive duration");

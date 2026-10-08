@@ -96,7 +96,6 @@ struct RollingGeoApyWindow {
     uint64_t last_sample_ts{0};
     bool have_sample{false};
     F sum_log_apy{F(0)};
-    F sum_log_unfloored_apy{F(0)};
     size_t n_windows{0};
     size_t n_floored_windows{0};
 
@@ -151,8 +150,6 @@ struct RollingGeoApyWindow {
         n_windows += 1;
         if (floored) {
             n_floored_windows += 1;
-        } else {
-            sum_log_unfloored_apy += log_apy;
         }
     }
 
@@ -161,12 +158,6 @@ struct RollingGeoApyWindow {
             return -1.0;
         }
         return static_cast<double>(std::exp(sum_log_apy / static_cast<F>(n_windows)));
-    }
-
-    // Diagnostic only: never used to replace the requested floored GM score.
-    double unfloored_value() const {
-        const size_t count = n_windows - n_floored_windows;
-        return count ? static_cast<double>(std::exp(sum_log_unfloored_apy / F(count))) : -1.0;
     }
 
     double floor_share() const {
@@ -179,13 +170,34 @@ struct RollingGeoApyWindow {
 
 };
 
+struct RollingGeoApySummary {
+    double gm30{-1.0}, gm60{-1.0}, gm90{-1.0};
+    double floor_share30{-1.0}, floor_share60{-1.0}, floor_share90{-1.0};
+};
+
+// 30-, 60- and 90-day windows of one growth series on one hourly sampling clock.
 template <typename F>
-struct RollingGeoApy90d : RollingGeoApyWindow<F> {
-    static constexpr uint64_t WINDOW_S = 90ULL * 24ULL * 60ULL * 60ULL;
+struct RollingGeoApy {
+    static constexpr uint64_t SAMPLE_S = RollingGeoApyWindow<F>::SAMPLE_S;
     static constexpr F FLOOR_APY =
         std::is_same_v<F, long double> ? F(1e-20L) : F(1e-20);
 
-    RollingGeoApy90d() : RollingGeoApyWindow<F>(WINDOW_S, FLOOR_APY) {}
+    RollingGeoApyWindow<F> gm30{30ULL * 86400, FLOOR_APY};
+    RollingGeoApyWindow<F> gm60{60ULL * 86400, FLOOR_APY};
+    RollingGeoApyWindow<F> gm90{90ULL * 86400, FLOOR_APY};
+
+    bool should_sample(uint64_t ts) const { return gm90.should_sample(ts); }
+
+    void sample(uint64_t ts, F growth) {
+        gm30.sample(ts, growth);
+        gm60.sample(ts, growth);
+        gm90.sample(ts, growth);
+    }
+
+    RollingGeoApySummary summary() const {
+        return {gm30.value(), gm60.value(), gm90.value(),
+                gm30.floor_share(), gm60.floor_share(), gm90.floor_share()};
+    }
 };
 
 // Daily 90-day robust net-return score for exhaustive discovery grids. Each
@@ -590,31 +602,22 @@ struct EventLoopResult {
     uint64_t early_stop_ts{0};  // Nonzero when a divergence stop ended the run.
     T tvl_start{0};
     T donation_apy{0};
-    double apy_net_gm{-1.0};
+    RollingGeoApySummary apy_net_gm{};
     double apy_net_robust_90d{-1.0};
     double pool_nav_vs_hold{-1.0};
 
     // YieldBasis metric family. Filled by the state-mutating active_2l actor.
     T yb_releverage_fee{T(0)};
     double yb_releverage_apy{-1.0};
-    double yb_releverage_apy_gm{-1.0};
+    RollingGeoApySummary yb_apy_gm{};
     double yb_external_equity_eth{-1.0};
     double yb_external_growth_eth{-1.0};
     double yb_external_max_drawdown_hourly{-1.0};
     double yb_exposure_return{-1.0};
     double yb_exposure_rms{-1.0};
-    double yb_gm30{-1.0};
-    double yb_gm60{-1.0};
-    double yb_gm30_floor_share{-1.0};
-    double yb_gm30_unfloored{-1.0};
-    uint64_t yb_gm30_windows{0};
-    double yb_gm60_floor_share{-1.0};
     double yb_price_scale_hourly_qv{-1.0};
     double yb_releverage_final_growth{-1.0};
     uint64_t yb_releverage_trades{0};
-    uint64_t yb_releverage_gm_windows{0};
-    uint64_t yb_releverage_gm_floored_windows{0};
-    double yb_releverage_gm_floor_share{-1.0};
 };
 
 } // namespace harness
