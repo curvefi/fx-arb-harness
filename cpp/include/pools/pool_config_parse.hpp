@@ -544,7 +544,7 @@ PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
         reject_unknown_fields(ro, {"yb_releverage_fee", "arb_report_rate", "arb_report_max_age_s", "arb_report_count", "arb_report_random_count", "arb_report_offset", "arb_settle_offset_s", "keeper_report"}, "candidate run override");
         if (auto* keeper = ro.if_contains("keeper_report"); keeper != nullptr) {
             const T value = parse_plain_real<T>(*keeper);
-            if (!(value == T(0) || value == T(2))) throw std::runtime_error("keeper_report must be 0 or 2");
+            if (!(value == T(0) || value == T(2) || value == T(3))) throw std::runtime_error("keeper_report must be 0, 2 or 3");
             out.keeper_report = value;
         }
         if (auto* delay = ro.if_contains("arb_settle_offset_s"); delay != nullptr) {

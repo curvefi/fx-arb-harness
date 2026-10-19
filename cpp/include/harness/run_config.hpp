@@ -41,8 +41,10 @@ struct RunConfig {
     T arb_report_offset{T(-1)}; // -1 preserves window/count mode; 0 is latest, 1 is previous.
     // Block mode: seconds after the block at which this run's event price is taken (0, 1 or 2); -1 = the session's.
     int arb_settle_offset_s{-1};
-    // Research: 2 makes the due touch (dustswap_freq_s since the last one) carry the latest report, after the
-    // arbitrageur, in the place of the report-less touch. 0: off.
+    // Research report keeper (a touch that carries the latest report: deliver_oracle_report plus a dust swap).
+    // 0: off. 2: legacy, the due idle touch (dustswap_freq_s since the last pool touch) carries the report, after the
+    // arbitrageur. 3: due on a block nobody touched yet once the stored report or the last pool touch is
+    // dustswap_freq_s old, or once the latest report has moved the policy's fallback fee from the stored one.
     int keeper_report{0};
 
     // Detailed per-event logging

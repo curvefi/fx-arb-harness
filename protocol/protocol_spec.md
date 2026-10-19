@@ -169,7 +169,8 @@ input and output), the public pool state it left, and `yb_direction`, `yb_collat
 order has coin0-equivalent notional `fair_tvl * user_swap_size_frac *
 user_swap_freq_s / 86400`, converted into the alternating input coin at the
 current event price. Thus `1.0` means 100% attempted fair-TVL turnover per day,
-not 100% of one reserve per swap.
+not 100% of one reserve per swap. A due order waits for a block in which nothing
+has touched the pool yet.
 
 `yb_mode` is `off` or `active_2l`.
 - `active_2l` uses `yb_releverage_fee` and `yb_cash_multiplier`, evaluates
@@ -310,12 +311,23 @@ it. Ties retain the withholding action when it was considered first.
 `[event - 12 s, event + L s]`; the arb sizes each and keeps the most profitable
 (the rational report-picking arb). Offsets `1000` through `1999` are rejected.
 
-`pool.run.keeper_report = 2` makes the due idle touch (`dustswap_freq_s` after
-the last pool touch) carry the latest report, after the arbitrageur and in place
-of the report-less touch; `0` (default) keeps report-less idle touches.
+`pool.run.keeper_report` selects a report keeper, a touch that carries the latest
+report: `0` (default) none, report-less idle touches only; `2` makes the due idle
+touch (`dustswap_freq_s` after the last pool touch) carry the latest report,
+after the arbitrageur and in place of the report-less touch; `3` touches the
+pool on a block nobody has touched yet once the stored report's observation time
+or the last pool touch is `dustswap_freq_s` old, or once the latest report has
+moved the policy's fallback fee from the stored one,
+`|ln(latest / stored)| >= fallback_fee`. Mode `3` carries only a report the
+policy admits: newer than the stored one, observed within
+`[block - 12 s, block + 6 s]`.
 
-The `report_lean` policy uses eight parameters: base fee, capture, fallback fee,
-relax time, fast and slow EMA half-lives, trend gate and step cap.
+The `report_lean` policy uses nine parameters: base fee, capture, fallback fee,
+relax time, fast and slow EMA half-lives, trend gate, step cap and report
+lifetime. A touch's price-scale observation is the report (the one submitted
+with the touch, else the stored one) while its age is below the report lifetime,
+else the pool's `last_prices`; lifetime `0` never uses a report, and a negative
+lifetime uses only a report submitted with the touch.
 Its fee component computes `q = min(F, base + capture*max(edge-base,0))`, then
 `(1-w)*q + w*F` with `w = sqrt(clamp(age / relax, 0, 1))`. No usable reference, a
 reference more than 6 s ahead, or age at/above the relax time returns fallback.

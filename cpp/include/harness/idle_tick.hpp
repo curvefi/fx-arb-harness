@@ -21,21 +21,10 @@ struct IdleTickCfg {
     bool enabled() const { return freq_s > 0; }
 };
 
-// Try to perform an idle tick (EMA/oracle update) if enough time has passed.
-// Called when no arb trade was executed for this event.
-// Returns true if tick was performed.
+// Poke the pool (tweak_price and the policy callback, no tokens move) and count a price_scale move.
+// Returns true if the tick committed.
 template <typename T, typename Pool>
-bool try_idle_tick(
-    Pool& pool,
-    const IdleTickCfg<T>& cfg,
-    uint64_t ev_ts,
-    Metrics<T>& m
-) {
-    if (!cfg.enabled()) return false;
-
-    // Check if enough time has passed since last pool update
-    if (!cfg.due(pool.last_timestamp, ev_ts)) return false;
-
+bool tick_pool(Pool& pool, Metrics<T>& m) {
     const T ps_before = pool.cached_price_scale;
 
     try {
@@ -51,6 +40,32 @@ bool try_idle_tick(
         // Ignore failed tick
         return false;
     }
+}
+
+// Try to perform an idle tick (EMA/oracle update) if enough time has passed.
+// Called when no arb trade was executed for this event.
+// Returns true if tick was performed.
+template <typename T, typename Pool>
+bool try_idle_tick(
+    Pool& pool,
+    const IdleTickCfg<T>& cfg,
+    uint64_t ev_ts,
+    Metrics<T>& m
+) {
+    if (!cfg.enabled()) return false;
+
+    // Check if enough time has passed since last pool update
+    if (!cfg.due(pool.last_timestamp, ev_ts)) return false;
+
+    return tick_pool(pool, m);
+}
+
+// A report keeper's touch (deliver_oracle_report and a dust swap in one transaction): it needs only the block's first
+// touch (dt > 0), not freq_s of pool idle time, so a reportless touch shortly before cannot cancel a due report.
+template <typename T, typename Pool>
+bool try_keeper_tick(Pool& pool, uint64_t ev_ts, Metrics<T>& m) {
+    if (!(pool.last_timestamp < ev_ts)) return false;
+    return tick_pool(pool, m);
 }
 
 } // namespace harness

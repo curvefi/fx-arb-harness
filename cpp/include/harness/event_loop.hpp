@@ -52,6 +52,20 @@ inline uint64_t arb_report_sample_draw(size_t event_index) {
     return draw ^ (draw >> 31);
 }
 
+// The policy's stored report as (price, observation time in seconds), {0, 0} for a policy that keeps none: what an
+// on-chain keeper reads from policy.report() before deciding to deliver.
+template <typename Pool, typename = void>
+struct StoredReport {
+    static std::pair<double, double> of(const Pool&) { return {0.0, 0.0}; }
+};
+template <typename Pool>
+struct StoredReport<Pool, std::void_t<decltype(std::declval<const Pool&>().policy.compiled_state.report.timestamp)>> {
+    static std::pair<double, double> of(const Pool& pool) {
+        const auto& report = pool.policy.compiled_state.report;
+        return {static_cast<double>(report.price), report.timestamp};
+    }
+};
+
 template <typename T>
 struct YbLoopState {
     using F = MetricF<T>;
@@ -119,6 +133,8 @@ EventLoopResult<T> run_event_loop_impl(
         throw std::invalid_argument("report selection requires a swap-report policy and price_feed_path");
     if (events.report_ts.size() != events.report_prices.size())
         throw std::invalid_argument("report timestamp and price counts differ");
+    if (!(cfg.keeper_report == 0 || cfg.keeper_report == 2 || cfg.keeper_report == 3))
+        throw std::invalid_argument("keeper_report must be 0, 2 or 3");
     // Zero selects the latest independent observation, with its true age.
     // Positive values select the best admissible submission in that window.
     pool.policy.research.report_max_age_s = report_max_age_s == 0 && !events.report_ts.empty()
@@ -626,16 +642,48 @@ EventLoopResult<T> run_event_loop_impl(
         return true;
     };
 
-    // Research (keeper_report): a due touch that carries the latest report. It is not logged: at one touch per
-    // block the action log would be the tape.
+    // Research report keeper (keeper_report): a touch that carries the latest report, the model of an on-chain bundle of
+    // deliver_oracle_report and a dust swap. It is not logged: at one touch per block the action log would be the tape.
     // With a report window (the arbitrageur chooses among recent reports) the keeper still carries the latest one.
-    const bool keeper_on = cfg.keeper_report != 0 && pool.uses_swap_reports() && search_reports;
-    const auto keeper_touch = [&](size_t index, uint64_t ts) {
+    const bool keeper_reports = pool.uses_swap_reports() && search_reports;
+    const bool keeper_on = keeper_reports && cfg.keeper_report == 2;  // legacy: the due idle touch carries the report
+    const bool keeper_fresh = keeper_reports && cfg.keeper_report == 3;
+    const bool keeper_period = keeper_fresh && icfg.enabled();
+    // Mode 3's move threshold is the policy's fallback fee; 0 (no move trigger) for a policy without report terms.
+    double keeper_move = 0.0;
+    if (keeper_fresh) {
+        if (const auto terms = pool.policy.report_terms(pool.policy.research, 0)) keeper_move = static_cast<double>(terms->fallback);
+    }
+    // The report the keeper would carry at this event (the last one visited), {0, 0} when none.
+    const auto latest_report = [&](size_t index, uint64_t ts) {
+        std::pair<double, double> latest{0.0, 0.0};
+        const auto take = [&](double price, double timestamp) { latest = {price, timestamp}; };
+        if (fixed_report) visit_offered_reports(index, ts, take);
+        else report_window.at_offset(ts, 0, take, index);
+        return latest;
+    };
+    // keeper_report 3: due on a block nobody touched yet, holding a report the policy admits (newer than the stored one,
+    // observed within [block - 12 s, block + 6 s] and the run's report age limit), once the stored report or the last
+    // touch is dustswap_freq_s old, or the report has moved the fallback fee from the stored one, |ln| >= fallback.
+    const auto keeper_due = [&](size_t index, uint64_t ts) {
+        if (!(pool.last_timestamp < ts)) return false;
+        const auto [price, timestamp] = latest_report(index, ts);
+        const auto [stored_price, stored_ts] = StoredReport<Pool>::of(pool);
+        const double block = static_cast<double>(ts);
+        const double max_age = std::min(12.0, pool.policy.research.report_max_age_s);
+        if (!(price > 0.0) || !(timestamp > stored_ts) || block - timestamp > max_age || timestamp - block > 6.0)
+            return false;
+        if (keeper_period && (!(stored_price > 0.0) || block >= stored_ts + static_cast<double>(icfg.freq_s) ||
+                              ts - pool.last_timestamp >= icfg.freq_s))
+            return true;
+        return keeper_move > 0 && (!(stored_price > 0.0) || std::abs(std::log(price / stored_price)) >= keeper_move);
+    };
+    const auto keeper_touch = [&](size_t index, uint64_t ts, bool legacy) {
         const auto carry = [&](double price, double timestamp) { pool.refresh_policy_context(static_cast<T>(price), timestamp); };
         if (fixed_report) visit_offered_reports(index, ts, carry);
         else report_window.at_offset(ts, 0, carry, index);
         PoolTransactionSnapshot<Pool> snapshot(pool);
-        if (try_idle_tick(pool, icfg, ts, m)) invalidate_edge_inputs();
+        if (legacy ? try_idle_tick(pool, icfg, ts, m) : try_keeper_tick(pool, ts, m)) invalidate_edge_inputs();
         else snapshot.restore(pool);
         pool.clear_policy_price_feed();
     };
@@ -700,6 +748,12 @@ EventLoopResult<T> run_event_loop_impl(
                 pool.last_timestamp,
                 icfg.freq_s
             ));
+        }
+        if (keeper_period) {
+            // The stored report's deadline; without a stored report the keeper is due at once.
+            const auto [stored_price, stored_ts] = StoredReport<Pool>::of(pool);
+            if (!(stored_price > 0.0)) return result.t_start;
+            include_due(due_after(static_cast<uint64_t>(std::ceil(std::max(0.0, stored_ts))), icfg.freq_s));
         }
         return next;
     };
@@ -774,6 +828,8 @@ EventLoopResult<T> run_event_loop_impl(
         if constexpr (EnableYb) {
             if (yb_2l_trades && yb_may_trade(static_cast<T>(event_prices[index]), ts)) return true;
         }
+        // keeper_report 3: an untouched block whose latest report moved the fallback fee from the stored one.
+        if (keeper_move > 0 && keeper_due(index, ts)) return true;
         return false;
     };
     const auto next_event_index = [&](size_t start) {
@@ -947,12 +1003,15 @@ EventLoopResult<T> run_event_loop_impl(
                 run_yb_2l_once(ev_ts, cex_price, did_any_trade);
             }
         }
-        if (user_swap_on && ucfg.next_ts != 0 && ev_ts >= ucfg.next_ts) {
+        // Retail is a transaction of its own: it waits for a block nobody touched yet, so the EMAs see it (dt > 0).
+        if (user_swap_on && ucfg.next_ts != 0 && ev_ts >= ucfg.next_ts && pool.last_timestamp < ev_ts) {
             apply_user_swap(ev_ts, cex_price);
         }
         bool did_idle_tick = false;
-        if (!did_any_trade && keeper_on && icfg.due(pool.last_timestamp, ev_ts)) {
-            keeper_touch(ev_idx, ev_ts);
+        if (keeper_fresh && keeper_due(ev_idx, ev_ts)) {
+            keeper_touch(ev_idx, ev_ts, false);
+        } else if (!did_any_trade && keeper_on && icfg.due(pool.last_timestamp, ev_ts)) {
+            keeper_touch(ev_idx, ev_ts, true);
         } else if (!did_any_trade && icfg.due(pool.last_timestamp, ev_ts)) {
             did_idle_tick = apply_idle_tick(ev_ts, cex_price);
             did_any_trade = did_idle_tick;
