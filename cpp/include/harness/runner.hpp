@@ -103,13 +103,12 @@ struct PoolResult {
     T yb_releverage_fee{T(0)};
     double yb_releverage_apy{-1.0};
     RollingGeoApySummary yb_apy_gm{};
-    RollingGeoApySummary yb_market_gm{};
+    double yb_market_gm60{-1.0};
     double yb_external_equity_eth{-1.0};
     double yb_external_growth_eth{-1.0};
     double yb_external_max_drawdown_hourly{-1.0};
     double yb_exposure_return{-1.0};
     double yb_exposure_rms{-1.0};
-    double yb_exposure_event{-1.0};
     double yb_price_scale_hourly_qv{-1.0};
     std::array<double,3> policy_price_counters{-1,-1,-1};
     double yb_releverage_final_growth{-1.0};
@@ -322,13 +321,12 @@ PoolResult<T> run_single_pool(
         result.yb_releverage_fee = loop_result.yb_releverage_fee;
         result.yb_releverage_apy = loop_result.yb_releverage_apy;
         result.yb_apy_gm = loop_result.yb_apy_gm;
-        result.yb_market_gm = loop_result.yb_market_gm;
+        result.yb_market_gm60 = loop_result.yb_market_gm60;
         result.yb_external_equity_eth = loop_result.yb_external_equity_eth;
         result.yb_external_growth_eth = loop_result.yb_external_growth_eth;
         result.yb_external_max_drawdown_hourly = loop_result.yb_external_max_drawdown_hourly;
         result.yb_exposure_return = loop_result.yb_exposure_return;
         result.yb_exposure_rms = loop_result.yb_exposure_rms;
-        result.yb_exposure_event = loop_result.yb_exposure_event;
         result.yb_price_scale_hourly_qv = loop_result.yb_price_scale_hourly_qv;
 #ifdef TWOCRYPTO_POLICY_HEADER
         result.policy_price_counters = policy_price_diagnostics<pools::twocrypto_fx::ChallengeFeePolicy<T>>(pool.policy,0);

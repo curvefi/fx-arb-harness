@@ -625,13 +625,12 @@ struct EventLoopResult {
     T yb_releverage_fee{T(0)};
     double yb_releverage_apy{-1.0};
     RollingGeoApySummary yb_apy_gm{};
-    RollingGeoApySummary yb_market_gm{};  // rolling windows of the externally marked equity in coin 1
+    double yb_market_gm60{-1.0};  // 60-day rolling GM of the externally marked equity in coin 1
     double yb_external_equity_eth{-1.0};
     double yb_external_growth_eth{-1.0};
     double yb_external_max_drawdown_hourly{-1.0};
     double yb_exposure_return{-1.0};
     double yb_exposure_rms{-1.0};
-    double yb_exposure_event{-1.0};
     double yb_price_scale_hourly_qv{-1.0};
     double yb_releverage_final_growth{-1.0};
     uint64_t yb_releverage_trades{0};

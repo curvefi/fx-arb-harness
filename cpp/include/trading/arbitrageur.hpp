@@ -46,8 +46,7 @@ Decision<T> decide_trade(
     const T* p_now_hint = nullptr,
     const T* fee_hint = nullptr,
     const std::array<T, 2>* xp_hint = nullptr,
-    SwapPreviewCache<T>* previews = nullptr,
-    bool trade_only = false
+    SwapPreviewCache<T>* previews = nullptr
 ) {
     static_assert(std::is_floating_point_v<T>, "decide_trade is floating-only");
 
@@ -121,9 +120,9 @@ Decision<T> decide_trade(
     if (rho_01_floor >= rho_10_floor) { sel_i = 0; sel_j = 1; } else { sel_i = 1; sel_j = 0; }
     d.i = sel_i;
     d.j = sel_j;
-    // A caller that discards unprofitable decisions needs no sizing once the
+    // Callers discard unprofitable decisions, so no sizing is needed once the
     // policy proves every size of this direction unprofitable.
-    if (trade_only && !pool.context_may_profit(
+    if (!pool.context_may_profit(
             static_cast<size_t>(sel_i), p_now, sel_i == 0 ? p_cex_bid : p_cex_ask))
         return d;
 
@@ -222,7 +221,7 @@ Decision<T> decide_trade(
     // fee floor and the top external level, P_screen(dx) bounds the profit of every size and is concave
     // in dx; a golden-section bracket in log size stops at the first positive sample or once the secant
     // bound over the whole range is negative.
-    if (trade_only && costs.gas_coin0 > T(0)) {
+    if (costs.gas_coin0 > T(0)) {
         const T screen_fee = std::max(floor_fee_sel, pool.context_fee_lower_bound(static_cast<size_t>(sel_i)));
         const T screen_value_coeff = std::max(T(1) - screen_fee, T(1e-12)) * value_coeff;
         const auto screen_at = [&](T dx) {

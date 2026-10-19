@@ -52,16 +52,6 @@ public:
             }
             return;
         }
-        // 1000 + lead: the latest report published by now + lead.
-        if (offset >= 1000) {
-            const double lead_s = static_cast<double>(offset - 1000);
-            auto last = upper(now, event);
-            while (last != events.report_ts.end() && *last <= now + lead_s) ++last;
-            if (last == events.report_ts.begin()) return;
-            const size_t i = static_cast<size_t>(last - events.report_ts.begin()) - 1;
-            visit(events.report_prices[i], events.report_ts[i]);
-            return;
-        }
         const auto available = static_cast<size_t>(upper(now, event) - events.report_ts.begin());
         if (offset >= available) return;
         const size_t i = available - 1 - offset;

@@ -240,26 +240,22 @@ One fixed SplitMix64 draw keyed by original event ordinal selects report/no-repo
 before arb sizing; all probes and execution share that choice. Draws are shared
 across candidates and independent of batch order, workers, and prior trades.
 This is a per-opportunity probability, not a target fraction of executed swaps.
-A negative rate `-r` (in `[-1,0)`) is the sticky skip latch: after each committed
-arb swap the same draw at rate `r` decides whether the next arb may bring a
-report; a skip holds across events until an arb swap commits without a report,
-and only then is drawn again.
 Reports use the attached causal price-feed sample when supplied, otherwise the
 current event price. They are
 cleared after the arb attempt and cannot be reused by YB, user swaps, or idle ticks.
 An attached stale sample remains stale; no current timestamp is fabricated.
 Policies without `USES_SWAP_REPORTS` retain their existing feed behavior.
 
-The `report_dual_ema` policy additionally retains the price and original
+The `report_lean` policy additionally retains the price and original
 timestamp of the last committed report-assisted swap. Later native/YB/user swaps
 can use this cache; clearing the per-attempt report context does not erase it.
 Its fee is `(1 - w) * q + w * fallback`,
-`w = sqrt(clamp((observation_age + age_offset_s) / (aging_s + age_offset_s), 0, 1))`,
+`w = sqrt(clamp(observation_age / relax_time_s, 0, 1))`,
 where `q` is the base-plus-excess-capture fee capped at fallback. The native actor
 compares a supplied report against withholding it by fully sized net profit;
 only the selected executed branch can update report memory. Repeated or older
 publications cannot replace the cached reference. Newly supplied reports still
-pass the admission-age check (12 s); cached reports expire at `aging_s`.
+pass the admission-age check (12 s); cached reports expire at `relax_time_s`.
 Reports may come from an independent `price_feed_path`: CSV, or numeric NPZ
 with exactly `ts` (int64/float64 Unix seconds) and `price` (float64). The NPZ
 reader preserves observation timestamps and requires positive prices and strictly
@@ -310,18 +306,19 @@ and its cached reference. The selected report's actual observation timestamp
 sets its age, even when reports are separated by gaps.
 Only the winning committed swap writes the reference; idle events do not refresh
 it. Ties retain the withholding action when it was considered first.
-`K = 1000 + L` offers the latest report published by event time plus `L` seconds.
-`K = 2000 + L` (`K <= 2023`) offers every report published in
+`K = 2000 + L` (`L` in `[0, 23]`) offers every report published in
 `[event - 12 s, event + L s]`; the arb sizes each and keeps the most profitable
-(the rational report-picking arb).
+(the rational report-picking arb). Offsets `1000` through `1999` are rejected.
 
-The `report_dual_ema` policy uses thirteen parameters: base fee, away capture,
-toward ratio, fallback fee, the unchanged six dual-EMA fields, then age offset,
-future window and aging horizon.
-Its fee component computes `q = min(F, base + capture*max(edge-base,0))`
-with the standard noise floor, then `(1-w)*q + w*F` with the weight above. No usable
-reference, a reference further ahead than the future window, or age at/above the
-aging horizon returns fallback.
+`pool.run.keeper_report = 2` makes the due idle touch (`dustswap_freq_s` after
+the last pool touch) carry the latest report, after the arbitrageur and in place
+of the report-less touch; `0` (default) keeps report-less idle touches.
+
+The `report_lean` policy uses eight parameters: base fee, capture, fallback fee,
+relax time, fast and slow EMA half-lives, trend gate and step cap.
+Its fee component computes `q = min(F, base + capture*max(edge-base,0))`, then
+`(1-w)*q + w*F` with `w = sqrt(clamp(age / relax, 0, 1))`. No usable reference, a
+reference more than 6 s ahead, or age at/above the relax time returns fallback.
 The same effective submitted-or-cached reference and aging formula govern its
 context sizing floor. New submissions do not reset the observation timestamp.
 

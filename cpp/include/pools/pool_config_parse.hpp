@@ -437,21 +437,6 @@ struct PoolOverride {
     std::optional<T> arb_report_offset{};
     std::optional<T> arb_settle_offset_s{};
     std::optional<T> keeper_report{};
-    std::optional<T> keeper_gap{};
-    std::optional<T> keeper_fast_s{};
-    std::optional<T> yb_rate_gap{};
-    std::optional<T> yb_rate_min{};
-    std::optional<T> yb_rate_max{};
-    std::optional<T> yb_rate_target{};
-    std::optional<T> yb_rate_eta{};
-    std::optional<T> yb_rate_k_max{};
-    std::optional<T> yb_rate_k_min{};
-    std::optional<T> yb_rate_aw{};
-    std::optional<T> yb_rate_eta_down{};
-    std::optional<T> yb_rate_fade{};
-    std::optional<T> yb_distribute_s{};
-    std::optional<T> yb_distribute_gap{};
-    std::optional<T> yb_oracle_half_life_s{};
     uint32_t pool_fields{0};
     uint32_t cost_fields{0};
 
@@ -499,21 +484,6 @@ struct PoolOverride {
         if (patch.arb_report_rate.has_value()) arb_report_rate = patch.arb_report_rate;
         if (patch.arb_settle_offset_s.has_value()) arb_settle_offset_s = patch.arb_settle_offset_s;
         if (patch.keeper_report.has_value()) keeper_report = patch.keeper_report;
-        if (patch.keeper_gap.has_value()) keeper_gap = patch.keeper_gap;
-        if (patch.keeper_fast_s.has_value()) keeper_fast_s = patch.keeper_fast_s;
-        if (patch.yb_rate_gap.has_value()) yb_rate_gap = patch.yb_rate_gap;
-        if (patch.yb_rate_min.has_value()) yb_rate_min = patch.yb_rate_min;
-        if (patch.yb_rate_max.has_value()) yb_rate_max = patch.yb_rate_max;
-        if (patch.yb_rate_target.has_value()) yb_rate_target = patch.yb_rate_target;
-        if (patch.yb_rate_eta.has_value()) yb_rate_eta = patch.yb_rate_eta;
-        if (patch.yb_rate_k_max.has_value()) yb_rate_k_max = patch.yb_rate_k_max;
-        if (patch.yb_rate_k_min.has_value()) yb_rate_k_min = patch.yb_rate_k_min;
-        if (patch.yb_rate_aw.has_value()) yb_rate_aw = patch.yb_rate_aw;
-        if (patch.yb_rate_eta_down.has_value()) yb_rate_eta_down = patch.yb_rate_eta_down;
-        if (patch.yb_rate_fade.has_value()) yb_rate_fade = patch.yb_rate_fade;
-        if (patch.yb_distribute_s.has_value()) yb_distribute_s = patch.yb_distribute_s;
-        if (patch.yb_distribute_gap.has_value()) yb_distribute_gap = patch.yb_distribute_gap;
-        if (patch.yb_oracle_half_life_s.has_value()) yb_oracle_half_life_s = patch.yb_oracle_half_life_s;
         if (patch.yb_releverage_fee.has_value()) {
             yb_releverage_fee = patch.yb_releverage_fee;
         }
@@ -571,87 +541,11 @@ PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
             throw std::runtime_error("candidate run override must be an object");
         }
         const auto& ro = run->as_object();
-        reject_unknown_fields(ro, {"yb_releverage_fee", "arb_report_rate", "arb_report_max_age_s", "arb_report_count", "arb_report_random_count", "arb_report_offset", "arb_settle_offset_s", "keeper_report", "keeper_gap", "keeper_fast_s", "yb_rate_gap", "yb_rate_min", "yb_rate_max", "yb_rate_target", "yb_rate_eta", "yb_rate_k_max", "yb_rate_k_min", "yb_rate_aw", "yb_rate_eta_down", "yb_rate_fade", "yb_distribute_s", "yb_distribute_gap", "yb_oracle_half_life_s"}, "candidate run override");
+        reject_unknown_fields(ro, {"yb_releverage_fee", "arb_report_rate", "arb_report_max_age_s", "arb_report_count", "arb_report_random_count", "arb_report_offset", "arb_settle_offset_s", "keeper_report"}, "candidate run override");
         if (auto* keeper = ro.if_contains("keeper_report"); keeper != nullptr) {
             const T value = parse_plain_real<T>(*keeper);
-            if (!(value == T(0) || value == T(1) || value == T(2))) throw std::runtime_error("keeper_report must be 0, 1 or 2");
+            if (!(value == T(0) || value == T(2))) throw std::runtime_error("keeper_report must be 0 or 2");
             out.keeper_report = value;
-        }
-        if (auto* gap = ro.if_contains("keeper_gap"); gap != nullptr) {
-            const T value = parse_plain_real<T>(*gap);
-            if (!(value >= T(0) && value < T(1))) throw std::runtime_error("keeper_gap must be in [0, 1)");
-            out.keeper_gap = value;
-        }
-        if (auto* fast = ro.if_contains("keeper_fast_s"); fast != nullptr) {
-            const T value = parse_plain_real<T>(*fast);
-            if (!(value >= T(1) && value <= T(3600))) throw std::runtime_error("keeper_fast_s must be in [1, 3600]");
-            out.keeper_fast_s = value;
-        }
-        if (auto* half = ro.if_contains("yb_oracle_half_life_s"); half != nullptr) {
-            const T value = parse_plain_real<T>(*half);
-            if (!(value >= T(0) && value <= T(604800))) throw std::runtime_error("yb_oracle_half_life_s must be in [0, 604800]");
-            out.yb_oracle_half_life_s = value;
-        }
-        if (auto* gap = ro.if_contains("yb_rate_gap"); gap != nullptr) {
-            const T value = parse_plain_real<T>(*gap);
-            if (!(value >= T(0) && value < T(1))) throw std::runtime_error("yb_rate_gap must be in [0, 1)");
-            out.yb_rate_gap = value;
-        }
-        if (auto* lo = ro.if_contains("yb_rate_min"); lo != nullptr) {
-            const T value = parse_plain_real<T>(*lo);
-            if (!(value >= T(0) && value <= T(1))) throw std::runtime_error("yb_rate_min must be in [0, 1]");
-            out.yb_rate_min = value;
-        }
-        if (auto* hi = ro.if_contains("yb_rate_max"); hi != nullptr) {
-            const T value = parse_plain_real<T>(*hi);
-            if (!(value >= T(1) && value <= T(100))) throw std::runtime_error("yb_rate_max must be in [1, 100]");
-            out.yb_rate_max = value;
-        }
-        if (auto* target = ro.if_contains("yb_rate_target"); target != nullptr) {
-            const T value = parse_plain_real<T>(*target);
-            if (!(value >= T(0) && value < T(1))) throw std::runtime_error("yb_rate_target must be in [0, 1)");
-            out.yb_rate_target = value;
-        }
-        if (auto* eta = ro.if_contains("yb_rate_eta"); eta != nullptr) {
-            const T value = parse_plain_real<T>(*eta);
-            if (!(value >= T(0) && value <= T(1))) throw std::runtime_error("yb_rate_eta must be in [0, 1]");
-            out.yb_rate_eta = value;
-        }
-        if (auto* k = ro.if_contains("yb_rate_k_max"); k != nullptr) {
-            const T value = parse_plain_real<T>(*k);
-            if (!(value >= T(1) && value <= T(100))) throw std::runtime_error("yb_rate_k_max must be in [1, 100]");
-            out.yb_rate_k_max = value;
-        }
-        if (auto* k = ro.if_contains("yb_rate_k_min"); k != nullptr) {
-            const T value = parse_plain_real<T>(*k);
-            if (!(value >= T(0) && value <= T(1))) throw std::runtime_error("yb_rate_k_min must be in [0, 1]");
-            out.yb_rate_k_min = value;
-        }
-        if (auto* aw = ro.if_contains("yb_rate_aw"); aw != nullptr) {
-            const T value = parse_plain_real<T>(*aw);
-            if (!(value == T(0) || value == T(1))) throw std::runtime_error("yb_rate_aw must be 0 or 1");
-            out.yb_rate_aw = value;
-        }
-        if (auto* eta = ro.if_contains("yb_rate_eta_down"); eta != nullptr) {
-            const T value = parse_plain_real<T>(*eta);
-            if (!(value >= T(0) && value <= T(1))) throw std::runtime_error("yb_rate_eta_down must be in [0, 1]");
-            out.yb_rate_eta_down = value;
-        }
-        if (auto* fade = ro.if_contains("yb_rate_fade"); fade != nullptr) {
-            const T value = parse_plain_real<T>(*fade);
-            if (!(value >= T(0) && value < T(1))) throw std::runtime_error("yb_rate_fade must be in [0, 1)");
-            out.yb_rate_fade = value;
-        }
-        if (auto* period = ro.if_contains("yb_distribute_s"); period != nullptr) {
-            const T value = parse_plain_real<T>(*period);
-            if (!(value >= T(0) && value <= T(604800)) || std::floor(static_cast<double>(value)) != static_cast<double>(value))
-                throw std::runtime_error("yb_distribute_s must be an integer in [0, 604800]");
-            out.yb_distribute_s = value;
-        }
-        if (auto* gap = ro.if_contains("yb_distribute_gap"); gap != nullptr) {
-            const T value = parse_plain_real<T>(*gap);
-            if (!(value >= T(0) && value < T(1))) throw std::runtime_error("yb_distribute_gap must be in [0, 1)");
-            out.yb_distribute_gap = value;
         }
         if (auto* delay = ro.if_contains("arb_settle_offset_s"); delay != nullptr) {
             const T value = parse_plain_real<T>(*delay);
@@ -677,8 +571,9 @@ PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
         if (auto* offset = ro.if_contains("arb_report_offset"); offset != nullptr) {
             const T value = parse_plain_real<T>(*offset);
             const double number = static_cast<double>(value);
-            if (!std::isfinite(number) || number < -1 || number > 2023 || std::floor(number) != number)
-                throw std::runtime_error("arb_report_offset must be -1 or an integer in [0, 2023]");
+            if (!std::isfinite(number) || number < -1 || number > 2023 || std::floor(number) != number ||
+                (number >= 1000 && number < 2000))
+                throw std::runtime_error("arb_report_offset must be -1, an integer in [0, 999], or 2000 + lead with lead in [0, 23]");
             out.arb_report_offset = value;
         }
         if (auto* age = ro.if_contains("arb_report_max_age_s"); age != nullptr) {
@@ -689,8 +584,8 @@ PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
         }
         if (auto* rate = ro.if_contains("arb_report_rate"); rate != nullptr) {
             const T value = parse_plain_real<T>(*rate);
-            if (!(value >= T(-1) && value <= T(1))) {
-                throw std::runtime_error("arb_report_rate must be in [-1, 1]");
+            if (!(value >= T(0) && value <= T(1))) {
+                throw std::runtime_error("arb_report_rate must be in [0, 1]");
             }
             out.arb_report_rate = value;
         }
