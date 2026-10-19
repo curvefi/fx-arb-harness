@@ -8,7 +8,8 @@ rule is random.
 
 - **One external price per event.** Every actor sees the same event price `P`.
   In block mode `P` is the external price `arb_settle_offset_s` seconds after
-  the block timestamp. Standard setting: 1.
+  the block timestamp. Standard setting: 1. A pool may take its own delay of
+  0, 1 or 2 seconds with `pool.run.arb_settle_offset_s`.
 - **Order within an event.** The native arbitrageur acts first, then the
   YieldBasis actor, both at the same `P`.
 - **At most one trade per actor per event.**
@@ -24,7 +25,10 @@ The native arbitrageur trades the pool against `P`.
 
 1. **Entry.** Let `p` be the pool spot price and `f` its current fee. The first
    unit's edge is `max((1 - f) * P / p, (1 - f) * p / P)`. It trades only if
-   that edge is above `exp(entry_edge_bps / 1e4)`.
+   that edge is above `exp(entry_edge_bps / 1e4)`. With a report-fee policy
+   `f` depends on the report the swap carries, so the test is applied to each
+   choice the arbitrageur weighs (each offered report, and no report): the
+   smallest swap's output after the fee that choice pays, against `P`.
 2. **Size.** It takes the size with the largest profit, valuing the external
    leg at `P` less `arb_fee_bps` and subtracting `gas_coin0`. The size is
    bounded only by `min_swap` and `max_swap` of the input coin's balance.

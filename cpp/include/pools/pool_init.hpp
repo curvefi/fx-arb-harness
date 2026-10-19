@@ -78,6 +78,8 @@ struct PoolInit {
     T donation_duration{T(7 * 86400)};
     T initial_donation_days{T(0)};
     T donation_coins_ratio{T(0.5)};
+    // Largest share of the supply the pool may hold as donation shares; 0 keeps the pool's own limit (10%).
+    T donation_shares_max_ratio{T(0)};
     // Optional per-pool user-swap size (fraction of from-side balance); when
     // unset the run-level RunConfig::user_swap_size_frac applies.
     std::optional<T> user_swap_size_frac{};

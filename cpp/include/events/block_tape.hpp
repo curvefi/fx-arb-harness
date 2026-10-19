@@ -35,7 +35,8 @@ BlockTape load_block_tape(const std::string& path);
 // B + delay_s is known. The event is timestamped B (the pool's clock) and
 // carries the CEX state at B + delay_s, when the arbitrageur's information ends:
 // price P(B + delay_s) and volume V(B + delay_s). Each event gets a synthetic
-// candle (open P(B), high/low over the row's prices, close the event price).
+// candle (open P(B), high/low over the row's prices, close the event price). p_cex_delay keeps P(B + d) for
+// d = 0, 1, 2 s, so a run may price its events at its own delay (RunConfig::arb_settle_offset_s).
 EventSoA gen_block_events(
     const BlockTape& tape, size_t delay_s, std::vector<Candle>& candles,
     uint64_t start_ts, uint64_t end_ts, const TimeRanges& excluded);

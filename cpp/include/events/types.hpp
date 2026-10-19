@@ -1,8 +1,10 @@
 // Events module - data types for candles and price events
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 namespace arb {
@@ -46,6 +48,17 @@ struct EventSoA {
     std::vector<double> report_prices;
     // Optional: reports published at or before each event (empty = search).
     std::vector<uint32_t> report_upper;
+    // Block mode only: the event price at each delay after the block (index = seconds); p_cex is the column of
+    // the session's own delay. Empty otherwise.
+    std::array<std::vector<double>, 3> p_cex_delay;
+
+    // Event prices of one run: the session's (delay_s < 0) or those at an explicit delay after the block.
+    const std::vector<double>& prices(int delay_s) const {
+        if (delay_s < 0) return p_cex;
+        if (delay_s >= 3 || p_cex_delay[static_cast<size_t>(delay_s)].size() != p_cex.size())
+            throw std::invalid_argument("arb_settle_offset_s needs event_mode='block' and a delay of 0, 1 or 2 s");
+        return p_cex_delay[static_cast<size_t>(delay_s)];
+    }
 
     size_t size() const { return ts.size(); }
     bool empty() const { return ts.empty(); }

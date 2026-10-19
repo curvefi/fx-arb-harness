@@ -96,6 +96,8 @@ EventSoA gen_block_events(
         const double volume = tape.volume[k][delay_s];
         events.ts.push_back(ts);
         events.p_cex.push_back(seen);
+        for (size_t d = 0; d < events.p_cex_delay.size(); ++d)  // a delay with no price yet takes the session's
+            events.p_cex_delay[d].push_back(price[d] > 0 ? price[d] : seen);
         events.volume.push_back(volume);
         events.candle_idx.push_back(static_cast<uint32_t>(candles.size()));
         candles.push_back({ts, price[0] > 0 ? price[0] : seen, high, low, seen, volume});

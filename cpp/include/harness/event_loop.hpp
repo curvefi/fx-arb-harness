@@ -62,6 +62,7 @@ struct YbLoopState {
     // Bounded queues, advanced once per hour on the valuation clock and never
     // scanned across the simulation history.
     RollingGeoApy<F> apy_gm;
+    RollingGeoApy<F> market_gm;  // the same windows on the position marked at the market price, in coin 1
     Yb2LCosts<T> actor_costs{};
     uint64_t last_valuation_ts{0};
     SampledLogVariation<F> price_scale_variation;
@@ -83,8 +84,9 @@ EventLoopResult<T> run_event_loop_impl(
     std::vector<DetailedEntry<T>>* out_detailed_entries = nullptr
 ) {
     const T min_swap_frac = cfg.min_swap_frac;
-    if (!(cfg.arb_report_rate >= T(0) && cfg.arb_report_rate <= T(1))) {
-        throw std::invalid_argument("arb_report_rate must be in [0, 1]");
+    // Negative rate: the sticky skip latch at report rate -rate (see can_bring_report).
+    if (!(cfg.arb_report_rate >= T(-1) && cfg.arb_report_rate <= T(1))) {
+        throw std::invalid_argument("arb_report_rate must be in [-1, 1]");
     }
     const double report_max_age_s = static_cast<double>(cfg.arb_report_max_age_s);
     if (!std::isfinite(report_max_age_s) || report_max_age_s < 0)
@@ -105,8 +107,8 @@ EventLoopResult<T> run_event_loop_impl(
         throw std::invalid_argument("arb_report_random_count must be an integer in [0, 6]");
     const size_t random_count = static_cast<size_t>(random_count_value);
     const double offset_value = static_cast<double>(cfg.arb_report_offset);
-    if (!std::isfinite(offset_value) || offset_value < -1 || offset_value > 1023 || std::floor(offset_value) != offset_value)
-        throw std::invalid_argument("arb_report_offset must be -1 or an integer in [0, 1023]");
+    if (!std::isfinite(offset_value) || offset_value < -1 || offset_value > 2023 || std::floor(offset_value) != offset_value)
+        throw std::invalid_argument("arb_report_offset must be -1 or an integer in [0, 2023]");
     const bool fixed_report = offset_value >= 0;
     if (random_count > 0 && (fixed_report || report_count > 0 || report_max_age_s > 0))
         throw std::invalid_argument("random report count, offset, count, and time window are mutually exclusive");
@@ -122,6 +124,14 @@ EventLoopResult<T> run_event_loop_impl(
     pool.policy.research.report_max_age_s = report_max_age_s == 0 && !events.report_ts.empty()
         ? std::numeric_limits<double>::max() : report_max_age_s;
     ReportWindow report_window(events, report_max_age_s, report_count);
+    // Report availability. A rate in [0, 1] draws independently per event. A negative rate is the sticky skip latch: after every
+    // committed arb swap a draw at report rate -rate decides whether the next arb may bring a report; a skip holds, across events,
+    // until an arb swap commits without one, and only then rolls again.
+    bool sticky_skip_armed = false;
+    const auto can_bring_report = [&](size_t index) -> bool {
+        if (cfg.arb_report_rate >= T(0)) return arb_brings_report(index, static_cast<double>(cfg.arb_report_rate));
+        return !sticky_skip_armed;
+    };
     const T max_swap_frac = cfg.max_swap_frac;
     const bool enable_slippage_probes = cfg.enable_slippage_probes;
     const size_t detailed_interval = cfg.detailed_interval;
@@ -136,6 +146,7 @@ EventLoopResult<T> run_event_loop_impl(
 
     const size_t n_events = events.size();
     if (n_events == 0) return result;
+    const std::vector<double>& event_prices = events.prices(cfg.arb_settle_offset_s);
     const size_t first_event_idx = event_start_floor_ts == 0
         ? 0
         : static_cast<size_t>(std::lower_bound(
@@ -148,9 +159,15 @@ EventLoopResult<T> run_event_loop_impl(
 
     result.tvl_start = pool.balances[0] + pool.balances[1] * pool.cached_price_scale;
     const auto initial_balances = pool.balances;
+    const double initial_supply = static_cast<double>(pool.totalSupply);
+    const double initial_vp = static_cast<double>(pool.virtual_price);
+    const double initial_donated_log = pool.donated_supply_log_;
     result.donation_apy = dcfg.apy;
 
     RollingGeoApy<F> apy_net_gm;
+    // Same hourly clock as apy_net_gm; tracks the exact cumulative pool XCP
+    // factor whose endpoint is xcp_growth_apy (lp_xcp_profit never records seed burns).
+    RollingGeoApy<F> xcp_apy_gm;
     NetApyRobust90d<F> apy_net_robust_90d;
     apy_net_robust_90d.reserve_duration(result.t_end - result.t_start);
     std::optional<YbLoopState<T>> yb;
@@ -178,6 +195,14 @@ EventLoopResult<T> run_event_loop_impl(
             static_cast<F>(lp_profit_growth) / donation_growth;
         if (legacy_due) {
             apy_net_gm.sample(ts, net_lp_profit_growth);
+            if constexpr (std::is_floating_point_v<T>) {
+                if (initial_vp > 0.0 && initial_supply > 0.0) {
+                    const F vp_ratio = static_cast<F>(pool.virtual_price) / static_cast<F>(initial_vp);
+                    const F sup_ratio = static_cast<F>(pool.totalSupply) / static_cast<F>(initial_supply);
+                    const F don_log = static_cast<F>(pool.donated_supply_log_ - initial_donated_log);
+                    xcp_apy_gm.sample(ts, vp_ratio * sup_ratio * std::exp(-don_log));
+                }
+            }
         }
         if (robust_due) {
             apy_net_robust_90d.sample(ts, net_lp_profit_growth);
@@ -205,6 +230,8 @@ EventLoopResult<T> run_event_loop_impl(
                         pool, dcfg.apy, yb_releverage_fee, result.t_start,
                         cfg.yb_cash_multiplier
                     );
+                if (cfg.yb_oracle_half_life_s > 0)
+                    yb->actor.set_oracle_half_life(static_cast<T>(cfg.yb_oracle_half_life_s), pool, result.t_start);
             }
         } else {
             throw std::invalid_argument(
@@ -214,8 +241,11 @@ EventLoopResult<T> run_event_loop_impl(
     }
 
     if constexpr (EnableYb && std::is_floating_point_v<T>) {
-        const T initial_mark = static_cast<T>(events.p_cex[first_event_idx]);
-        if (yb->actor.enabled()) yb->external_equity.sample(pool, yb->actor, result.t_start, initial_mark);
+        const T initial_mark = static_cast<T>(event_prices[first_event_idx]);
+        if (yb->actor.enabled()) {
+            yb->external_equity.sample(pool, yb->actor, result.t_start, initial_mark);
+            yb->external_equity.refresh(pool, yb->actor, result.t_start, initial_mark);
+        }
     }
 
     if (detailed_logger.enabled() && candles == nullptr) {
@@ -225,6 +255,14 @@ EventLoopResult<T> run_event_loop_impl(
     const T fee_cex = costs.arb_fee_bps / T(10000);
     const T cex_fee_discount = T(1) - fee_cex;
     const T cex_fee_markup = T(1) + fee_cex;
+    // Entry rule: an arb trades only if its first unit's fee-inclusive edge against the event price exceeds
+    // entry_hurdle (no CEX fee in that test), and the sized trade must also profit after the CEX fee. Both need the
+    // external price to clear the spot by the larger of the two factors, so every gate below tests the event price
+    // scaled by cex_gate_bid / cex_gate_ask; sizing itself keeps the plain CEX fee factors.
+    const bool entry_gate = costs.entry_edge_bps > T(0);
+    const T entry_hurdle = entry_gate ? std::exp(costs.entry_edge_bps / T(10000)) : T(1);
+    const T cex_gate_bid = std::min(cex_fee_discount, T(1) / entry_hurdle);
+    const T cex_gate_ask = std::max(cex_fee_markup, entry_hurdle);
 
     auto sample_slippage_probes = [&](uint64_t ts, T p_cex) {
         if (!enable_slippage_probes || !(p_cex > T(0))) return;
@@ -256,6 +294,7 @@ EventLoopResult<T> run_event_loop_impl(
     // refreshed with the geometry after every pool mutation.
     bool fee_cacheable = pool.uses_native_fee_model();
     bool geometry_valid = false;
+    bool first_unit_valid = false;
     bool fee_valid = false;
     T edge_p_now{};
     T edge_floor_scaled_p{};
@@ -271,7 +310,24 @@ EventLoopResult<T> run_event_loop_impl(
             edge_xp, pool.D, {pool.A, pool.gamma}
         ) * pool.cached_price_scale;
         edge_floor_scaled_p = omf_floor * edge_p_now;
+        first_unit_valid = false;
         geometry_valid = true;
+    };
+    // The entry test's first unit in each direction: its post-swap xp and gross output depend only on the pool's
+    // geometry, so they are solved once per geometry; only the context fee is evaluated per report.
+    std::array<T, 2> first_dx{};
+    std::array<std::array<T, 2>, 2> first_xp{};
+    std::array<T, 2> first_gross_dy{};
+    auto refresh_first_unit = [&]() {
+        refresh_geometry();
+        if (first_unit_valid) return;
+        for (size_t i = 0; i < 2; ++i) {
+            first_dx[i] = std::max(T(1e-18), pool.balances[i] * std::max(T(1e-12), min_swap_frac));
+            const auto [xp_post, dy_xp] = pools::twocrypto_fx::post_swap_xp(pool, i, 1 - i, first_dx[i], pool.cached_price_scale);
+            first_xp[i] = xp_post;
+            first_gross_dy[i] = pools::twocrypto_fx::xp_to_tokens_j(pool, 1 - i, dy_xp, pool.cached_price_scale);
+        }
+        first_unit_valid = true;
     };
     auto refresh_edge_fee = [&]() {
         refresh_geometry();
@@ -369,11 +425,12 @@ EventLoopResult<T> run_event_loop_impl(
         }
     };
 
-    // Whether the event price clears the pool's fee floor in either direction: the gate of per-event sizing.
+    // Whether the event price clears the pool's fee floor in either direction (and the entry hurdle): the gate of
+    // per-event sizing.
     const auto native_may_trade = [&](T cex_price) {
         refresh_geometry();
-        return cex_price > T(0) && (omf_floor * (cex_fee_discount * cex_price) > edge_p_now ||
-                                    edge_floor_scaled_p > cex_fee_markup * cex_price);
+        return cex_price > T(0) && (omf_floor * (cex_gate_bid * cex_price) > edge_p_now ||
+                                    edge_floor_scaled_p > cex_gate_ask * cex_price);
     };
 
     // Commit a previewed native swap of dx coin i at the current research context and record it.
@@ -427,45 +484,105 @@ EventLoopResult<T> run_event_loop_impl(
     ) -> bool {
         if (!native_may_trade(cex_price)) return false;
         refresh_edge_fee();
-        if (costs.entry_edge_bps > T(0)) {
+        // A report policy charges by context, so its entry test runs per sized context below.
+        const bool context_entry = entry_gate && pool.uses_swap_reports();
+        if (entry_gate && !context_entry) {
             // Enter only when the first unit's fee-inclusive edge against the event price clears the threshold.
             const T keep = T(1) - edge_fee;
             const T edge = std::max(keep * cex_price / edge_p_now, keep * edge_p_now / cex_price);
-            if (!(edge > std::exp(costs.entry_edge_bps / T(10000)))) return false;
+            if (!(edge > entry_hurdle)) return false;
         }
+        // The first unit is the smallest swap: its after-fee output against the event price, at the fee the
+        // pool charges in the current report context. Its geometry is cached; a direction whose best price at the
+        // floor fee cannot clear the hurdle is not evaluated.
+        const auto first_unit_clears_entry = [&] {
+            refresh_first_unit();
+            for (size_t i = 0; i < 2; ++i) {
+                if (i == 0 ? !(omf_floor * cex_price > edge_p_now * entry_hurdle * T(1 - 1e-12))
+                           : !(edge_floor_scaled_p > cex_price * entry_hurdle * T(1 - 1e-12)))
+                    continue;
+                const T fee_tokens = pool.fee(first_xp[i]) * first_gross_dy[i] / pools::twocrypto_fx::PoolTraits<T>::FEE_PRECISION();
+                const T dy = first_gross_dy[i] - fee_tokens;
+                const T dx = first_dx[i];
+                if ((i == 0 ? dy * cex_price / dx : dy / (dx * cex_price)) > entry_hurdle) return true;
+            }
+            return false;
+        };
         // Only research context changes while comparing actions. Pool reserves
         // and policy memory are committed once below.
         trading::SwapPreviewCache<T> previews;
         // Single-report runs rarely reuse sizes: avoid memoization overhead.
-        auto* shared_previews = search_reports && !fixed_report && random_count == 0 && report_count != 1 ? &previews : nullptr;
+        auto* shared_previews = search_reports && (!fixed_report || offset_value >= 2000) && random_count == 0 && report_count != 1 ? &previews : nullptr;
         // Fixed costs of a swap at the current context: gas, plus report_coin0 when it offers a report.
         const auto action_costs = [&] {
             auto out = costs;
             if (pool.uses_swap_reports() && pool.policy.research.price_feed > T(0)) out.gas_coin0 += costs.report_coin0;
             return out;
         };
-        const auto size_trade = [&](bool trade_only) {
+        const auto size_trade = [&]() {
             fee_valid = false;
             refresh_edge_fee();
+            if (context_entry && !first_unit_clears_entry()) return trading::Decision<T>{};
             return trading::decide_trade(
                 pool, cex_price, action_costs(), min_swap_frac, max_swap_frac,
-                cex_fee_discount, cex_fee_markup, &edge_p_now, &edge_fee, &edge_xp, shared_previews, trade_only);
+                cex_fee_discount, cex_fee_markup, &edge_p_now, &edge_fee, &edge_xp, shared_previews, true);
         };
         auto winning_context = pool.policy.research;
-        auto dec = size_trade(false);
-        // Alternatives replace dec only with a trade: their losses are unused.
+        // Withholding is sized like the alternatives: only a profitable trade matters.
+        auto dec = size_trade();
+        // Alternatives replace dec only with a strictly more profitable trade.
         const auto consider = [&] {
-            auto candidate = size_trade(true);
+            auto candidate = size_trade();
             if (candidate.do_trade && (!dec.do_trade || candidate.profit > dec.profit)) {
                 dec = candidate;
                 winning_context = pool.policy.research;
             }
         };
-        if (search_reports && arb_brings_report(ev_idx, static_cast<double>(cfg.arb_report_rate))) {
-            visit_offered_reports(ev_idx, ev_ts, [&](double price, double timestamp) {
-                pool.refresh_policy_context(static_cast<T>(price), timestamp);
-                consider();
-            });
+        if (search_reports && can_bring_report(ev_idx)) {
+            const bool may_sell0 = omf_floor * (cex_gate_bid * cex_price) > edge_p_now * T(1 - 1e-12);
+            const bool may_sell1 = edge_floor_scaled_p > cex_gate_ask * cex_price * T(1 - 1e-12);
+            if (offset_value >= 2000 && (may_sell0 || may_sell1)) {
+                const size_t sel_i = may_sell0 ? 0 : 1;
+                const T p_spot = edge_p_now;
+                const T p_gate = sel_i == 0 ? cex_gate_bid * cex_price : cex_gate_ask * cex_price;
+                const auto stored_terms = pool.policy.report_terms(winning_context, sel_i);
+                const T stored_r = stored_terms ? stored_terms->price : T(0);
+                const T stored_w = stored_terms ? stored_terms->weight : T(1);
+                struct CandReport { double price; double ts; T R; T w; };
+                std::array<CandReport, 64> cands{};
+                size_t n_cands = 0;
+                visit_offered_reports(ev_idx, ev_ts, [&](double price, double timestamp) {
+                    if (n_cands >= cands.size()) throw std::length_error("offered report window exceeds 64 candidates");
+                    // Only a report beyond the spot can beat withholding.
+                    if (sel_i == 0 ? !(static_cast<T>(price) > p_spot) : !(static_cast<T>(price) < p_spot)) return;
+                    pool.refresh_policy_context(static_cast<T>(price), timestamp);
+                    const auto t = pool.policy.report_terms(pool.policy.research, sel_i);
+                    if (!t || !t->usable) return;
+                    if (t->price == stored_r && t->weight == stored_w) return;
+                    if (!pool.context_may_profit(pool.policy.research, sel_i, p_spot, p_gate)) return;
+                    const T R = t->price, w = t->weight;
+                    if (sel_i == 0 ? !(R > p_spot) : !(R < p_spot)) return;
+                    cands[n_cands++] = {price, timestamp, R, w};
+                });
+                // Exact dominance only: skip a report when an earlier one has the same effective price and no larger
+                // age weight (the unpruned loop keeps the earlier one on a profit tie).
+                for (size_t a = 0; a < n_cands; ++a) {
+                    const auto& B = cands[a];
+                    bool dominated = false;
+                    for (size_t b = 0; b < a && !dominated; ++b) dominated = cands[b].R == B.R && cands[b].w <= B.w;
+                    if (dominated) continue;
+                    pool.refresh_policy_context(static_cast<T>(B.price), B.ts);
+                    consider();
+                }
+            } else {
+                visit_offered_reports(ev_idx, ev_ts, [&](double price, double timestamp) {
+                    pool.refresh_policy_context(static_cast<T>(price), timestamp);
+                    if (!((may_sell0 && pool.context_may_profit(pool.policy.research, 0, edge_p_now, cex_gate_bid * cex_price)) ||
+                          (may_sell1 && pool.context_may_profit(pool.policy.research, 1, edge_p_now, cex_gate_ask * cex_price))))
+                        return;
+                    consider();
+                });
+            }
         } else if (pool.uses_cached_reports() && winning_context.price_feed > T(0)) {
             // Latest-report delivery is optional too: compare withholding it.
             pool.clear_policy_price_feed();
@@ -483,6 +600,8 @@ EventLoopResult<T> run_event_loop_impl(
         if (!commit_swap(ev_ts, static_cast<size_t>(dec.i), dec.dx, dec.dy_after_fee, dec.fee_tokens,
                          dec.profit, dec.notional_coin0, cex_price, winning_context.price_feed > T(0)))
             return false;
+        if (cfg.arb_report_rate < T(0))
+            sticky_skip_armed = !arb_brings_report(ev_idx, static_cast<double>(-cfg.arb_report_rate));
         return true;
     };
 
@@ -516,6 +635,43 @@ EventLoopResult<T> run_event_loop_impl(
         return true;
     };
 
+    // Research (keeper_report): a due touch that carries the latest report. It is not logged: at one touch per
+    // block the action log would be the tape.
+    // With a report window (the arbitrageur chooses among recent reports) the keeper still carries the latest one.
+    const bool keeper_on = cfg.keeper_report != 0 && pool.uses_swap_reports() && search_reports;
+    const auto keeper_touch = [&](size_t index, uint64_t ts, bool fast = false) {
+        const auto carry = [&](double price, double timestamp) { pool.refresh_policy_context(static_cast<T>(price), timestamp); };
+        if (fixed_report) visit_offered_reports(index, ts, carry);
+        else report_window.at_offset(ts, 0, carry, index);
+        PoolTransactionSnapshot<Pool> snapshot(pool);
+        bool touched = false;
+        if (fast) {
+            const T ps_before = pool.cached_price_scale;
+            try {
+                pool.tick();
+                touched = true;
+                if (differs_rel(pool.cached_price_scale, ps_before)) m.n_rebalances += 1;
+            } catch (...) {
+            }
+        } else {
+            touched = try_idle_tick(pool, icfg, ts, m);
+        }
+        if (touched) invalidate_edge_inputs();
+        else snapshot.restore(pool);
+        pool.clear_policy_price_feed();
+    };
+    // The fast keeper rule (keeper_gap): the latest report is further than keeper_gap from the price scale and
+    // keeper_fast_s have passed since the last touch.
+    const bool keeper_fast_on = keeper_on && cfg.keeper_gap > 0;
+    const auto keeper_fast_due = [&](size_t index, uint64_t ts) {
+        if (!keeper_fast_on || ts < pool.last_timestamp || ts - pool.last_timestamp < cfg.keeper_fast_s) return false;
+        bool open = false;
+        const double scale = static_cast<double>(pool.cached_price_scale);
+        visit_offered_reports(index, ts, [&](double price, double) {
+            open = scale > 0 && std::abs(price / scale - 1.0) > cfg.keeper_gap;
+        });
+        return open;
+    };
     const bool detailed_on = detailed_logger.enabled();
     const bool user_swap_on = ucfg.enabled();
     bool yb_2l_on = false;
@@ -523,6 +679,18 @@ EventLoopResult<T> run_event_loop_impl(
         yb_2l_on = yb->actor.enabled();
     }
     const bool yb_2l_trades = yb_2l_on && cfg.yb_arb != YbArb::None;
+    // Research (yb_rate_gap): the borrow rate that funds the donation follows the gap between the latest report and
+    // the price scale, reset once an hour.
+    const bool yb_rate_on = yb_2l_on && cfg.yb_rate_gap > 0;
+    uint64_t yb_rate_next_ts = result.t_start;
+    T yb_base_rate{};
+    double yb_rate_k = 1.0;  // yb_rate_target: the adaptive gain of the rate rule
+    // Research (yb_distribute_s): the interest distribution on its own clock.
+    const bool yb_dist_on = yb_2l_on && cfg.yb_distribute_s > 0;
+    uint64_t yb_dist_next_ts = result.t_start + cfg.yb_distribute_s;
+    if constexpr (EnableYb) {
+        if (yb_rate_on) yb_base_rate = yb->actor.state().rate;
+    }
     const bool fast_skip = cfg.event_cursor == EventCursor::FastSkip;
     const bool donation_on = dcfg.enabled && !yb_2l_on;
     const bool have_price_feed = !events.p_price_feed.empty();
@@ -569,6 +737,8 @@ EventLoopResult<T> run_event_loop_impl(
         if (donation_on && dcfg.next_ts != 0) {
             include_due(dcfg.next_ts);
         }
+        if (yb_rate_on) include_due(yb_rate_next_ts);
+        if (yb_dist_on) include_due(yb_dist_next_ts);
         if (user_swap_on && ucfg.next_ts != 0) {
             include_due(ucfg.next_ts);
         }
@@ -588,35 +758,37 @@ EventLoopResult<T> run_event_loop_impl(
     const bool report_skip = swap_reports && search_reports;
     const auto reported_sizing_may_act = [&](size_t index, uint64_t ts, T bid, T ask,
                                              bool may_sell0, bool may_sell1) {
-        // execute_arb sizes withholding first, with the feed cleared. Stop
-        // wherever it would size: an unprofitable result is still a metric.
+        // execute_arb sizes withholding first, with the feed cleared, and keeps only a profitable trade: stop
+        // wherever the policy's profit bound admits one (event price scaled by the CEX fee and entry hurdle).
         auto context = pool.policy.research;
         context.block_timestamp = ts;
         context.price_oracle = pool.cached_price_oracle;
         context.price_feed = T(0);
         context.price_feed_timestamp = 0;
-        const T global_floor = pool.fee_lower_bound();
-        const T floor01 = pool.context_fee_lower_bound(context, 0);
-        const T floor10 = pool.context_fee_lower_bound(context, 1);
-        if (!(floor01 > global_floor || floor10 > global_floor) ||
-            std::max(T(1) - floor01, T(1e-12)) * (cex_fee_discount * bid) > edge_p_now ||
-            (ask > T(0) && std::max(T(1) - floor10, T(1e-12)) * edge_p_now > cex_fee_markup * ask))
+        const T p_ext0 = cex_gate_bid * bid;
+        const T p_ext1 = cex_gate_ask * ask;
+        if ((may_sell0 && pool.context_may_profit(context, 0, edge_p_now, p_ext0)) ||
+            (may_sell1 && pool.context_may_profit(context, 1, edge_p_now, p_ext1)))
             return true;
         // Offered reports only replace withholding with a profitable trade.
-        if (!arb_brings_report(index, static_cast<double>(cfg.arb_report_rate))) return false;
+        if (!can_bring_report(index)) return false;
         bool may = false;
         visit_offered_reports(index, ts, [&](double price, double timestamp) {
             if (may) return;
             // Leave invalid reports to set_price_feed, which rejects them.
             if (!(price > 0.0) || !std::isfinite(timestamp) || timestamp < 0 ||
-                timestamp > static_cast<double>(ts)) {
+                timestamp > static_cast<double>(ts) + 12.0) {
                 may = true;
                 return;
             }
-            context.price_feed = static_cast<T>(price);
+            // A report not beyond the spot in a gated direction is not corrective there or, if inadmissible, is the
+            // stored one, which withholding already tested.
+            const T reported = static_cast<T>(price);
+            if (!((may_sell0 && reported > edge_p_now) || (may_sell1 && reported < edge_p_now))) return;
+            context.price_feed = reported;
             context.price_feed_timestamp = timestamp;
-            may = (may_sell0 && pool.context_may_profit(context, 0, edge_p_now, cex_fee_discount * bid)) ||
-                (may_sell1 && pool.context_may_profit(context, 1, edge_p_now, cex_fee_markup * ask));
+            may = (may_sell0 && pool.context_may_profit(context, 0, edge_p_now, p_ext0)) ||
+                (may_sell1 && pool.context_may_profit(context, 1, edge_p_now, p_ext1));
         });
         return may;
     };
@@ -635,19 +807,19 @@ EventLoopResult<T> run_event_loop_impl(
         }
     };
     const auto indexed_may_act = [&](size_t index, uint64_t ts) {
-        const double bid = events.p_cex[index], ask = bid;
+        const double bid = event_prices[index], ask = bid;
         refresh_geometry();
         const T best_bid = static_cast<T>(bid), best_ask = static_cast<T>(ask);
-        if ((omf_floor * (cex_fee_discount * best_bid) > edge_p_now ||
-             (best_ask > T(0) && edge_floor_scaled_p > cex_fee_markup * best_ask)) &&
+        if ((omf_floor * (cex_gate_bid * best_bid) > edge_p_now ||
+             (best_ask > T(0) && edge_floor_scaled_p > cex_gate_ask * best_ask)) &&
             (!report_skip || reported_sizing_may_act(index, ts, best_bid, best_ask,
                 // decide_trade sizes only a direction clearing the global floor;
                 // the slack covers its differently rounded ratio test.
-                omf_floor * (cex_fee_discount * best_bid) > edge_p_now * T(1 - 1e-12),
-                best_ask > T(0) && edge_floor_scaled_p > cex_fee_markup * best_ask * T(1 - 1e-12))))
+                omf_floor * (cex_gate_bid * best_bid) > edge_p_now * T(1 - 1e-12),
+                best_ask > T(0) && edge_floor_scaled_p > cex_gate_ask * best_ask * T(1 - 1e-12))))
             return true;
         if constexpr (EnableYb) {
-            if (yb_2l_trades && yb_may_trade(static_cast<T>(events.p_cex[index]), ts)) return true;
+            if (yb_2l_trades && yb_may_trade(static_cast<T>(event_prices[index]), ts)) return true;
         }
         return false;
     };
@@ -658,7 +830,7 @@ EventLoopResult<T> run_event_loop_impl(
         const uint64_t mandatory = next_mandatory_ts();
         for (; start < n_events; ++start) {
             const auto ts = events.ts[start];
-            if (ts >= mandatory || indexed_may_act(start, ts)) break;
+            if (ts >= mandatory || indexed_may_act(start, ts) || keeper_fast_due(start, ts)) break;
         }
         return start;
     };
@@ -728,6 +900,7 @@ EventLoopResult<T> run_event_loop_impl(
         if (hourly_due && initialized) {
             yb->price_scale_variation.sample(ts, static_cast<F>(pool.cached_price_scale));
             yb->apy_gm.sample(ts, growth_now);
+            if (yb->external_equity.growth > 0) yb->market_gm.sample(ts, static_cast<F>(yb->external_equity.growth));
         }
         if (!detailed_row_logged) return;
 
@@ -764,7 +937,8 @@ EventLoopResult<T> run_event_loop_impl(
     while (ev_idx < n_events) {
         const uint64_t ev_ts = events.ts[ev_idx];
         pool.set_block_timestamp(ev_ts);
-        const T cex_price = static_cast<T>(events.p_cex[ev_idx]);
+        const T cex_price = static_cast<T>(event_prices[ev_idx]);
+        if (cfg.keeper_report == 1 && keeper_on && icfg.due(pool.last_timestamp, ev_ts)) keeper_touch(ev_idx, ev_ts);
         const bool arb_may_trade = native_may_trade(cex_price);
         if (swap_reports) {
             pool.clear_policy_price_feed();
@@ -789,6 +963,32 @@ EventLoopResult<T> run_event_loop_impl(
         if (donation_on && dcfg.next_ts != 0 && ev_ts >= dcfg.next_ts) {
             apply_donation(ev_ts, cex_price);
         }
+        if constexpr (EnableYb) {
+            if constexpr (std::is_floating_point_v<T>) {
+                if (yb_rate_on && ev_ts >= yb_rate_next_ts) {
+                    const double scale = static_cast<double>(pool.cached_price_scale);
+                    double gap = -1;
+                    visit_offered_reports(ev_idx, ev_ts, [&](double price, double) {
+                        if (scale > 0 && price > 0) gap = std::abs(price / scale - 1.0);
+                    });
+                    if (gap >= 0) {
+                        if (cfg.yb_rate_target > 0) {
+                            const double err = std::clamp(gap / cfg.yb_rate_target - 1.0, -1.0, 3.0);
+                            const double raw = yb_rate_k * gap / cfg.yb_rate_gap;
+                            const bool held = cfg.yb_rate_aw != 0 && ((err > 0 && raw >= cfg.yb_rate_max) || (err < 0 && raw <= cfg.yb_rate_min));
+                            if (!held)
+                                yb_rate_k = std::clamp(yb_rate_k * std::exp((err < 0 && cfg.yb_rate_eta_down > 0 ? cfg.yb_rate_eta_down : cfg.yb_rate_eta) * err),
+                                                       cfg.yb_rate_k_min > 0 ? cfg.yb_rate_k_min : 1.0 / cfg.yb_rate_k_max, cfg.yb_rate_k_max);
+                        }
+                        double mult = std::clamp(yb_rate_k * gap / cfg.yb_rate_gap, cfg.yb_rate_min, cfg.yb_rate_max);
+                        if (cfg.yb_rate_fade > 0 && gap > cfg.yb_rate_fade) mult = std::max(cfg.yb_rate_min, mult * cfg.yb_rate_fade / gap);
+                        yb->actor.set_rate(yb_base_rate * static_cast<T>(mult), ev_ts);
+                        yb_band_ready = false;
+                    }
+                    yb_rate_next_ts = ev_ts + 3600;
+                }
+            }
+        }
 
         if (!(cex_price > T(0))) {
             sample_net_apy(ev_ts);
@@ -796,10 +996,12 @@ EventLoopResult<T> run_event_loop_impl(
             continue;
         }
 
+        if constexpr (EnableYb) {
+            if (yb_2l_on) yb->external_equity.mark(cex_price);  // exposure of the holdings carried into this event
+        }
         // Expose a report before sizing. A cache-capable policy also compares
         // withholding it; other swap-report policies retain one-shot semantics.
-        if (swap_reports && arb_brings_report(
-                ev_idx, static_cast<double>(cfg.arb_report_rate))) {
+        if (swap_reports && can_bring_report(ev_idx)) {
             if (search_reports) {
                 // Start from withholding the report. execute_arb compares the
                 // fully sized alternatives before any state is committed.
@@ -819,6 +1021,12 @@ EventLoopResult<T> run_event_loop_impl(
         }
         if constexpr (EnableYb) {
             if (yb_2l_on) {
+                if constexpr (std::is_floating_point_v<T>) {
+                    if (cfg.yb_oracle_half_life_s > 0) {
+                        yb->actor.observe_scale(pool, ev_ts);
+                        yb_band_ready = false;
+                    }
+                }
                 run_yb_2l_once(ev_ts, cex_price, did_any_trade);
             }
         }
@@ -826,9 +1034,56 @@ EventLoopResult<T> run_event_loop_impl(
             apply_user_swap(ev_ts, cex_price);
         }
         bool did_idle_tick = false;
-        if (!did_any_trade && icfg.due(pool.last_timestamp, ev_ts)) {
+        if (!did_any_trade && keeper_fast_due(ev_idx, ev_ts)) {
+            keeper_touch(ev_idx, ev_ts, true);
+        } else if (!did_any_trade && cfg.keeper_report == 2 && keeper_on && icfg.due(pool.last_timestamp, ev_ts)) {
+            keeper_touch(ev_idx, ev_ts);
+        } else if (!did_any_trade && icfg.due(pool.last_timestamp, ev_ts)) {
             did_idle_tick = apply_idle_tick(ev_ts, cex_price);
             did_any_trade = did_idle_tick;
+        }
+        if constexpr (EnableYb) {
+            if constexpr (std::is_floating_point_v<T>) {
+                // yb_distribute_gap: only while the latest report is that far from the price scale (a lag); otherwise the due time passes.
+                bool yb_dist_open = yb_dist_on && ev_ts >= yb_dist_next_ts;
+                if (yb_dist_open && cfg.yb_distribute_gap > 0) {
+                    const double scale = static_cast<double>(pool.cached_price_scale);
+                    double gap = -1;
+                    visit_offered_reports(ev_idx, ev_ts, [&](double price, double) {
+                        if (scale > 0 && price > 0) gap = std::abs(price / scale - 1.0);
+                    });
+                    if (gap < cfg.yb_distribute_gap) {
+                        yb_dist_open = false;
+                        yb_dist_next_ts = ev_ts + cfg.yb_distribute_s;
+                    }
+                }
+                if (yb_dist_open) {
+                    // With the report keeper on, the distribution carries the latest report as a keeper touch does.
+                    if (keeper_on) {
+                        const auto carry = [&](double price, double timestamp) { pool.refresh_policy_context(static_cast<T>(price), timestamp); };
+                        if (fixed_report) visit_offered_reports(ev_idx, ev_ts, carry);
+                        else report_window.at_offset(ev_ts, 0, carry, ev_idx);
+                    }
+                    const auto dist = yb->actor.distribute(pool, ev_ts);
+                    if (keeper_on) pool.clear_policy_price_feed();
+                    if (dist.donation_committed) {
+                        ++m.donations;
+                        m.donation_coin0_total += dist.donation;
+                        if (dist.donation_price_scale_moved) ++m.n_rebalances;
+                        action_logger.log_yb_donation(ev_ts, dist.donation, dist.price_scale_after_donation, dcfg.apy);
+                        invalidate_edge_inputs();
+                    }
+                    yb_dist_next_ts = ev_ts + cfg.yb_distribute_s;
+                }
+            }
+        }
+        if constexpr (EnableYb) {
+            if constexpr (std::is_floating_point_v<T>) {
+                if (yb_2l_on) {
+                    yb->actor.sync_scale(pool);  // what the smoothed oracle holds until the next visited event
+                    yb->external_equity.refresh(pool, yb->actor, ev_ts, cex_price);
+                }
+            }
         }
         bool detailed_row_logged = false;
         if (detailed_on) {
@@ -867,10 +1122,12 @@ EventLoopResult<T> run_event_loop_impl(
         ev_idx = next_event_index(ev_idx + 1);
     }
     result.apy_net_gm = apy_net_gm.summary();
+    result.xcp_apy_gm = xcp_apy_gm.summary();
     result.apy_net_robust_90d = apy_net_robust_90d.value();
     // Fast skip may omit the last no-trade event; mark at its price anyway.
-    const T final_market_price = static_cast<T>(events.p_cex[final_event_idx]);
+    const T final_market_price = static_cast<T>(event_prices[final_event_idx]);
     result.pool_nav_vs_hold = pool_nav_vs_hold(initial_balances, pool.balances, final_market_price);
+    result.supply_ratio = initial_supply > 0 ? static_cast<double>(pool.totalSupply) / initial_supply : -1.0;
     if constexpr (EnableYb) {
         // Raw YB APY is an endpoint metric. If the last event was between
         // hourly reports, mark it once without adding another GM window.
@@ -891,10 +1148,13 @@ EventLoopResult<T> run_event_loop_impl(
         result.yb_external_max_drawdown_hourly = yb_2l_on ? yb->external_equity.max_drawdown : -1;
         result.yb_exposure_return = yb_2l_on ? yb->external_equity.exposure_return : -1;
         result.yb_exposure_rms = yb_2l_on ? yb->external_equity.exposure_rms() : -1;
+        if (yb_2l_on) yb->external_equity.mark(final_market_price);
+        result.yb_exposure_event = yb_2l_on ? yb->external_equity.event_exposure : -1;
         result.yb_releverage_fee = yb_2l_on ? yb->actor.state().fee : T(0);
         result.yb_releverage_apy =
             yb_2l_on ? yb->apy_tracker.apy() : -1.0;
         result.yb_apy_gm = yb->apy_gm.summary();
+        result.yb_market_gm = yb->market_gm.summary();
         result.yb_price_scale_hourly_qv = yb->price_scale_variation.annualized();
         result.yb_releverage_final_growth = yb_2l_on
             ? yb->apy_tracker.final_growth() : -1.0;

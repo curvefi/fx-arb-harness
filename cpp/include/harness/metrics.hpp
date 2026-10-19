@@ -98,6 +98,8 @@ struct RollingGeoApyWindow {
     F sum_log_apy{F(0)};
     size_t n_windows{0};
     size_t n_floored_windows{0};
+    F worst_apy{F(0)};  // lowest annualized window return, unfloored (-1: a window lost everything)
+    uint64_t worst_ts{0};  // end of that window
 
     RollingGeoApyWindow(uint64_t window_s, F floor_apy)
         : WINDOW_S(window_s), FLOOR_APY(floor_apy) {}
@@ -135,6 +137,9 @@ struct RollingGeoApyWindow {
         const F window_growth = net_vp / samples.front().net_vp;
         F annualized_apy = FLOOR_APY;
         bool floored = true;
+        const F raw_apy = std::isfinite(window_growth) && window_growth > F(0)
+            ? std::pow(window_growth, SEC_PER_YEAR / dt) - F(1) : F(-1);
+        if (n_windows == 0 || raw_apy < worst_apy) { worst_apy = raw_apy; worst_ts = ts; }
         if (std::isfinite(window_growth) && window_growth > F(0)) {
             annualized_apy =
                 std::pow(window_growth, SEC_PER_YEAR / dt) - F(1);
@@ -168,11 +173,16 @@ struct RollingGeoApyWindow {
             static_cast<double>(n_windows);
     }
 
+    double worst() const { return n_windows == 0 ? -1.0 : static_cast<double>(worst_apy); }
+    double worst_end() const { return static_cast<double>(worst_ts); }
+
 };
 
 struct RollingGeoApySummary {
     double gm30{-1.0}, gm60{-1.0}, gm90{-1.0};
     double floor_share30{-1.0}, floor_share60{-1.0}, floor_share90{-1.0};
+    double worst30{-1.0}, worst60{-1.0}, worst90{-1.0};  // lowest annualized window return of each length
+    double worst60_end{0};                               // end time of the worst 60-day window
 };
 
 // 30-, 60- and 90-day windows of one growth series on one hourly sampling clock.
@@ -196,7 +206,8 @@ struct RollingGeoApy {
 
     RollingGeoApySummary summary() const {
         return {gm30.value(), gm60.value(), gm90.value(),
-                gm30.floor_share(), gm60.floor_share(), gm90.floor_share()};
+                gm30.floor_share(), gm60.floor_share(), gm90.floor_share(),
+                gm30.worst(), gm60.worst(), gm90.worst(), gm60.worst_end()};
     }
 };
 
@@ -603,18 +614,24 @@ struct EventLoopResult {
     T tvl_start{0};
     T donation_apy{0};
     RollingGeoApySummary apy_net_gm{};
+    // Rolling windows of standalone pool XCP growth: vp ratio x supply ratio x exp(-donated supply log).
+    RollingGeoApySummary xcp_apy_gm{};
     double apy_net_robust_90d{-1.0};
     double pool_nav_vs_hold{-1.0};
+    // LP token supply at the end over the start: with a seeded donation and no other mint, 1 minus the share burned for re-pegs.
+    double supply_ratio{-1.0};
 
     // YieldBasis metric family. Filled by the state-mutating active_2l actor.
     T yb_releverage_fee{T(0)};
     double yb_releverage_apy{-1.0};
     RollingGeoApySummary yb_apy_gm{};
+    RollingGeoApySummary yb_market_gm{};  // rolling windows of the externally marked equity in coin 1
     double yb_external_equity_eth{-1.0};
     double yb_external_growth_eth{-1.0};
     double yb_external_max_drawdown_hourly{-1.0};
     double yb_exposure_return{-1.0};
     double yb_exposure_rms{-1.0};
+    double yb_exposure_event{-1.0};
     double yb_price_scale_hourly_qv{-1.0};
     double yb_releverage_final_growth{-1.0};
     uint64_t yb_releverage_trades{0};

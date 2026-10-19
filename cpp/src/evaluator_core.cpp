@@ -174,10 +174,20 @@ void extract_metrics_from_pool_result(
         m[name + "30_floor_share"] = gm.floor_share30;
         m[name + "60_floor_share"] = gm.floor_share60;
         m[name + "90_floor_share"] = gm.floor_share90;
+        m[name + "30_worst"] = gm.worst30;
+        m[name + "60_worst"] = gm.worst60;
+        m[name + "90_worst"] = gm.worst90;
+        m[name + "60_worst_end"] = gm.worst60_end;
     };
     put_gm("apy_net_gm", res.apy_net_gm);
+    put_gm("xcp_apy_gm", res.xcp_apy_gm);
+    const auto& xgm = res.xcp_apy_gm;
+    m["xcp_apy_gm30_60_90"] = (xgm.gm30 > 0.0 && xgm.gm60 > 0.0 && xgm.gm90 > 0.0)
+        ? std::cbrt(xgm.gm30 * xgm.gm60 * xgm.gm90)
+        : -1.0;
     m["apy_net_robust_90d"] = res.apy_net_robust_90d;
     m["pool_nav_vs_hold"] = res.pool_nav_vs_hold;
+    m["supply_ratio"] = res.supply_ratio;
 
     m["avg_rel_price_diff"] = tw.avg_rel_price_diff;
     m["max_rel_price_diff"] = tw.max_rel_price_diff;
@@ -199,11 +209,13 @@ void extract_metrics_from_pool_result(
 
     m["yb_apy"] = res.yb_releverage_apy;
     put_gm("yb_apy_gm", res.yb_apy_gm);
+    put_gm("yb_market_gm", res.yb_market_gm);
     m["yb_external_equity_eth"] = res.yb_external_equity_eth;
     m["yb_external_growth_eth"] = res.yb_external_growth_eth;
     m["yb_external_max_drawdown_hourly"] = res.yb_external_max_drawdown_hourly;
     m["yb_exposure_return"] = res.yb_exposure_return;
     m["yb_exposure_rms"] = res.yb_exposure_rms;
+    m["yb_exposure_event"] = res.yb_exposure_event;
     m["yb_price_scale_hourly_qv"] = res.yb_price_scale_hourly_qv;
     m["policy_target_calls"] = res.policy_price_counters[0];
     m["policy_actuator_holds"] = res.policy_price_counters[1];
@@ -230,6 +242,28 @@ void extract_metrics_from_pool_result(
     const double tvl_start = static_cast<double>(res.tvl_start);
     const double tvl_end = static_cast<double>(res.balances[0] + res.balances[1] * res.price_scale);
     m["tvl_growth"] = arb::harness::tvl_growth(tvl_start, tvl_end);
+
+    // Pool ledger, annualized log rates (0.05 = 5%/yr): vp growth = xcp growth + donation burn, xcp growth = swap fees - net step cost.
+    const double years = duration_s / SEC_PER_YEAR;
+    const bool ledger_ok = years > 0.0 && vp_end > 0.0 && vp_start > 0.0 && res.supply_ratio > 0.0;
+    const double vp_growth_apy = ledger_ok ? std::log(vp_end / vp_start) / years : -1.0;
+    const double donation_burn_apy = ledger_ok ? (res.donated_supply_log - std::log(res.supply_ratio)) / years : -1.0;
+    const double xcp_growth_apy = ledger_ok ? vp_growth_apy - donation_burn_apy : -1.0;
+    const double net_step_cost_apy = years > 0.0 ? (res.step_cost_log - res.step_gain_log) / years : -1.0;
+    m["vp_growth_apy"] = vp_growth_apy;
+    m["donated_apy"] = years > 0.0 ? res.donated_supply_log / years : -1.0;
+    m["donation_burn_apy"] = donation_burn_apy;
+    m["xcp_growth_apy"] = xcp_growth_apy;
+    m["vp_growth_less_burn_apy"] = xcp_growth_apy;
+    m["step_cost_apy"] = years > 0.0 ? res.step_cost_log / years : -1.0;
+    m["step_gain_apy"] = years > 0.0 ? res.step_gain_log / years : -1.0;
+    m["net_step_cost_apy"] = net_step_cost_apy;
+    m["fee_xcp_apy"] = ledger_ok ? xcp_growth_apy + net_step_cost_apy : -1.0;
+    const bool flow_ok = years > 0.0 && tvl_start > 0.0;
+    m["arb_take_apy"] = flow_ok ? static_cast<double>(rm.arb_pnl_coin0) / tvl_start / years : -1.0;
+    m["fee_coin0_apy"] = flow_ok ? static_cast<double>(rm.lp_fee_coin0) / tvl_start / years : -1.0;
+    m["trades_per_year"] = years > 0.0 ? static_cast<double>(rm.trades) / years : -1.0;
+    m["steps_per_year"] = years > 0.0 ? static_cast<double>(rm.n_rebalances) / years : -1.0;
 }
 
 void execute_scenario_job(
@@ -310,6 +344,24 @@ void execute_scenario_job(
             ? pool_override->arb_report_offset.value_or(RealT(-1)) : RealT(-1);
         run_cfg.arb_report_rate = pool_override != nullptr
             ? pool_override->arb_report_rate.value_or(RealT(1)) : RealT(1);
+        run_cfg.arb_settle_offset_s = pool_override != nullptr && pool_override->arb_settle_offset_s.has_value()
+            ? static_cast<int>(*pool_override->arb_settle_offset_s) : -1;
+        run_cfg.keeper_report = pool_override != nullptr ? static_cast<int>(pool_override->keeper_report.value_or(RealT(0))) : 0;
+        run_cfg.keeper_gap = pool_override != nullptr ? static_cast<double>(pool_override->keeper_gap.value_or(RealT(0))) : 0.0;
+        run_cfg.keeper_fast_s = pool_override != nullptr ? static_cast<uint64_t>(pool_override->keeper_fast_s.value_or(RealT(12))) : 12;
+        run_cfg.yb_rate_gap = pool_override != nullptr ? static_cast<double>(pool_override->yb_rate_gap.value_or(RealT(0))) : 0.0;
+        run_cfg.yb_rate_min = pool_override != nullptr ? static_cast<double>(pool_override->yb_rate_min.value_or(RealT(0.25))) : 0.25;
+        run_cfg.yb_rate_max = pool_override != nullptr ? static_cast<double>(pool_override->yb_rate_max.value_or(RealT(4))) : 4.0;
+        run_cfg.yb_rate_target = pool_override != nullptr ? static_cast<double>(pool_override->yb_rate_target.value_or(RealT(0))) : 0.0;
+        run_cfg.yb_rate_eta = pool_override != nullptr ? static_cast<double>(pool_override->yb_rate_eta.value_or(RealT(0.005))) : 0.005;
+        run_cfg.yb_rate_k_max = pool_override != nullptr ? static_cast<double>(pool_override->yb_rate_k_max.value_or(RealT(8))) : 8.0;
+        run_cfg.yb_rate_k_min = pool_override != nullptr ? static_cast<double>(pool_override->yb_rate_k_min.value_or(RealT(0))) : 0.0;
+        run_cfg.yb_rate_aw = pool_override != nullptr ? static_cast<int>(pool_override->yb_rate_aw.value_or(RealT(0))) : 0;
+        run_cfg.yb_rate_eta_down = pool_override != nullptr ? static_cast<double>(pool_override->yb_rate_eta_down.value_or(RealT(0))) : 0.0;
+        run_cfg.yb_distribute_s = pool_override != nullptr ? static_cast<uint64_t>(pool_override->yb_distribute_s.value_or(RealT(0))) : 0;
+        run_cfg.yb_rate_fade = pool_override != nullptr ? static_cast<double>(pool_override->yb_rate_fade.value_or(RealT(0))) : 0.0;
+        run_cfg.yb_distribute_gap = pool_override != nullptr ? static_cast<double>(pool_override->yb_distribute_gap.value_or(RealT(0))) : 0.0;
+        run_cfg.yb_oracle_half_life_s = pool_override != nullptr ? static_cast<double>(pool_override->yb_oracle_half_life_s.value_or(RealT(0))) : 0.0;
         run_cfg.enable_slippage_probes = session_cfg.enable_slippage_probes;
         run_cfg.event_cursor = session_cfg.event_cursor;
         run_cfg.early_stop_max_7d_rel_price_diff = session_cfg.early_stop_max_7d_rel_price_diff;
@@ -367,6 +419,30 @@ void execute_scenario_job(
             effective["pool.run.arb_report_max_age_s"] = static_cast<double>(run_cfg.arb_report_max_age_s);
             effective["pool.run.arb_report_rate"] =
                 static_cast<double>(run_cfg.arb_report_rate);
+            if (run_cfg.arb_settle_offset_s >= 0)
+                effective["pool.run.arb_settle_offset_s"] = static_cast<double>(run_cfg.arb_settle_offset_s);
+            if (run_cfg.keeper_report) effective["pool.run.keeper_report"] = static_cast<double>(run_cfg.keeper_report);
+            if (run_cfg.keeper_gap > 0) {
+                effective["pool.run.keeper_gap"] = run_cfg.keeper_gap;
+                effective["pool.run.keeper_fast_s"] = static_cast<double>(run_cfg.keeper_fast_s);
+            }
+            if (run_cfg.yb_oracle_half_life_s > 0) effective["pool.run.yb_oracle_half_life_s"] = run_cfg.yb_oracle_half_life_s;
+            if (run_cfg.yb_rate_gap > 0) {
+                effective["pool.run.yb_rate_gap"] = run_cfg.yb_rate_gap;
+                effective["pool.run.yb_rate_min"] = run_cfg.yb_rate_min;
+                effective["pool.run.yb_rate_max"] = run_cfg.yb_rate_max;
+                if (run_cfg.yb_rate_target > 0) {
+                    effective["pool.run.yb_rate_target"] = run_cfg.yb_rate_target;
+                    effective["pool.run.yb_rate_eta"] = run_cfg.yb_rate_eta;
+                    effective["pool.run.yb_rate_k_max"] = run_cfg.yb_rate_k_max;
+                    effective["pool.run.yb_rate_k_min"] = run_cfg.yb_rate_k_min;
+                    effective["pool.run.yb_rate_aw"] = static_cast<double>(run_cfg.yb_rate_aw);
+                    effective["pool.run.yb_rate_eta_down"] = run_cfg.yb_rate_eta_down;
+                }
+            }
+            if (run_cfg.yb_distribute_s > 0) effective["pool.run.yb_distribute_s"] = static_cast<double>(run_cfg.yb_distribute_s);
+            if (run_cfg.yb_distribute_gap > 0) effective["pool.run.yb_distribute_gap"] = run_cfg.yb_distribute_gap;
+            if (run_cfg.yb_rate_fade > 0) effective["pool.run.yb_rate_fade"] = run_cfg.yb_rate_fade;
             if (run_cfg.yb_initial_state && run_cfg.yb_mode != arb::harness::YbMode::Off) {
                 effective["run.yb_initial_state"] =
                     arb::harness::yb_initial_state_json(*run_cfg.yb_initial_state);

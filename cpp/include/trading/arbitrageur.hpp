@@ -106,10 +106,8 @@ Decision<T> decide_trade(
 
     // Gate fee: the gate must never exceed the direction's true path floor
     // (or profitable sizes get pre-filtered), so it gates on floor_fee.
-    // For native pools this admits toward-balance trades whose only profit
-    // is the fee dip at the balance crossing -- on steep fee surfaces
-    // (small fee_gamma) those are the dominant arb mode, so admitting them
-    // is a correctness requirement for fee research.
+    // For native pools this admits toward-balance trades whose only gain
+    // is the fee dip at the balance crossing.
     const T gate_fee_01 = floor_fee_01;
     const T gate_fee_10 = floor_fee_10;
 
@@ -196,22 +194,6 @@ Decision<T> decide_trade(
         return c;
     };
 
-    // 1. Seed: required relative price move over the impact rate. Use the
-    //    spot fee if it leaves an edge, else the direction's gate fee.
-    T rho_seed = (sel_i == 0)
-        ? one_minus_f0 * p_cex_bid / p_now
-        : one_minus_f0 * p_now / p_cex_ask;
-    if (!(rho_seed > T(1))) {
-        rho_seed = (sel_i == 0) ? rho_01_floor : rho_10_floor;
-    }
-    const T eps_edge = rho_seed - T(1);
-    const T lambda = fx::price_impact_rate(pool, static_cast<size_t>(sel_i), static_cast<size_t>(sel_j));
-
-    T dx_seed = (lambda > T(0) && eps_edge > T(0))
-        ? eps_edge / lambda
-        : std::sqrt(dx_lo * dx_hi);
-    dx_seed = std::min(std::max(dx_seed, dx_lo), dx_hi);
-
     // 2a. Rigorous size cap. With f the direction's path-floor fee,
     //     P_floor(dx) = (1-f)*value*dy(dx) - cost*dx - gas is concave and
     //     >= P(dx) for every admissible fee, so once a sample beyond the
@@ -236,13 +218,11 @@ Decision<T> decide_trade(
         return dy_tokens * floor_value_coeff - dx * envelope_cost_coeff - costs.gas_coin0;
     };
 
-    // Presizing screen for callers that discard unprofitable decisions. At the context fee
-    // floor, selling or buying every unit at the top external level, P_screen(dx) bounds the
-    // profit of every size and is concave in dx (the curve output is concave). A golden-section
-    // bracket in log size keeps four samples; for a concave function the secants through them
-    // bound the maximum over the whole range, so the search stops at the first positive sample
-    // (size normally) or once that bound is negative (no size can clear gas).
-    if (trade_only) {
+    // Presizing screen for callers that discard unprofitable decisions (gas > 0 only). At the context
+    // fee floor and the top external level, P_screen(dx) bounds the profit of every size and is concave
+    // in dx; a golden-section bracket in log size stops at the first positive sample or once the secant
+    // bound over the whole range is negative.
+    if (trade_only && costs.gas_coin0 > T(0)) {
         const T screen_fee = std::max(floor_fee_sel, pool.context_fee_lower_bound(static_cast<size_t>(sel_i)));
         const T screen_value_coeff = std::max(T(1) - screen_fee, T(1e-12)) * value_coeff;
         const auto screen_at = [&](T dx) {
@@ -293,98 +273,150 @@ Decision<T> decide_trade(
         }
         if (screened) return d;
     }
-
-    T dx_cap = dx_hi;
-    if (p_floor_at(dx_seed) > T(0)) {
-        int guard = 0;
-        for (T v = dx_seed * T(9); v < dx_hi && guard < 32; v *= T(9), ++guard) {
-            if (!(p_floor_at(v) > T(0))) { dx_cap = v; break; }
-        }
-    } else {
-        // Seed overshot the profitable window: walk down to re-anchor.
-        bool found = false;
-        int guard = 0;
-        for (T v = dx_seed / T(9); guard < 32; v /= T(9), ++guard) {
-            const T vq = std::max(v, dx_lo);
-            if (p_floor_at(vq) > T(0)) {
-                dx_cap = std::min(dx_seed, dx_hi);  // previous sample was <= 0
-                dx_seed = vq;
-                found = true;
-                break;
-            }
-            if (vq <= dx_lo) break;
-        }
-        if (!found) {
-            dx_cap = dx_hi;  // no positive envelope sample: scan everything
-        }
-    }
-
-    // 2a'. Native fee-dip probe. The native fee has its minimum at the
-    //      balance point; on steep surfaces (small fee_gamma) the
-    //      profitable window is centered on the balance-crossing trade
-    //      size, far from the frozen-fee seed and narrower than a ladder
-    //      rung, so without an explicit probe the search misses it
-    //      entirely. The crossing
-    //      sits where post-trade xp equalize: dxp ~ (xp_out - xp_in) / 2.
-    T dx_dip = T(0);
-    if (native_fee_mode && xp_bal[static_cast<size_t>(sel_i)] < xp_bal[static_cast<size_t>(sel_j)]) {
-        const T dxp_in_ddx = (sel_i == 0)
-            ? pool.precisions[0]
-            : pool.precisions[1] * pool.cached_price_scale / fx::PoolTraits<T>::PRECISION();
-        if (dxp_in_ddx > T(0)) {
-            const T cand = (xp_bal[static_cast<size_t>(sel_j)] - xp_bal[static_cast<size_t>(sel_i)])
-                / (T(2) * dxp_in_ddx);
-            if (cand > dx_lo && cand < dx_cap) {
-                dx_dip = cand;
-            }
-        }
-    }
-
-    // 2b. Ladder: seed/3 and 3*seed neighbors (plus the dip probe and its
-    //     neighbors when present) plus factor-9 rungs anchored at the
-    //     seed. Coverage below the seed: with ordered fees the native fee
-    //     only rises away from its dip, so the optimum sits within a small
-    //     factor of the seed or at the dip probe; arbitrary policy fees
-    //     may hide discounts at any scale, so they get the full range down
-    //     to dx_lo. Rung counts are bounded so the scan plus a minimal
-    //     refine always fits the MAX_SIZING_EVALS budget (extreme ranges
-    //     get coarser tails).
-    const T low_cover = (native_fee_mode && fee_ordered)
-        ? std::max(dx_lo, std::min(dx_seed, dx_dip > T(0) ? dx_dip : dx_seed) / T(27))
-        : dx_lo;
-
+    // 1-2. The size ladder: report independent (pool, event price, direction, spot and floor fees,
+    //      fixed costs), so a context of the same event reuses the one built by the first.
+    T dx_cap = dx_hi, dx_dip = T(0), low_cover = dx_lo, cap_envelope = T(0);
     T pts[MAX_SIZING_EVALS];
-    int n_pts = 0;
-    pts[n_pts++] = low_cover;
-    pts[n_pts++] = dx_cap;
-    pts[n_pts++] = dx_seed;
-    if (dx_seed / T(3) > low_cover) pts[n_pts++] = dx_seed / T(3);
-    if (dx_seed * T(3) < dx_cap)    pts[n_pts++] = dx_seed * T(3);
-    if (dx_dip > T(0)) {
-        pts[n_pts++] = dx_dip;
-        if (dx_dip / T(3) > low_cover) pts[n_pts++] = dx_dip / T(3);
-        if (dx_dip * T(3) < dx_cap)    pts[n_pts++] = dx_dip * T(3);
-    }
-    for (T v = dx_seed / T(9); v > low_cover && n_pts < 14; v /= T(9)) pts[n_pts++] = v;
-    for (T v = dx_seed * T(9); v < dx_cap && n_pts < 20; v *= T(9)) pts[n_pts++] = v;
-    for (int k = 1; k < n_pts; ++k)  // At most 20 rungs: insertion sort.
-        for (int m = k; m > 0 && pts[m] < pts[m - 1]; --m) std::swap(pts[m], pts[m - 1]);
     int m_pts = 0;
-    for (int k = 0; k < n_pts; ++k) {
-        if (m_pts == 0 || pts[k] > pts[m_pts - 1] * (T(1) + T(1e-9))) {
-            pts[m_pts++] = pts[k];
+    bool cap_is_hi = false;
+    using Ladder = typename SwapPreviewCache<T>::Ladder;
+    static_assert(Ladder::MAX == MAX_SIZING_EVALS, "ladder cache size");
+    Ladder* ladder = previews ? &previews->ladder : nullptr;
+    const T gas = costs.gas_coin0;
+    if (ladder && ladder->matches(sel_i, fee_pool, floor_fee_sel, gas, cex_price, p_now, dx_lo, dx_hi)) {
+        dx_cap = ladder->dx_cap;
+        dx_dip = ladder->dx_dip;
+        low_cover = ladder->low_cover;
+        cap_envelope = ladder->cap_envelope;
+        cap_is_hi = ladder->cap_is_hi;
+        m_pts = ladder->m_pts;
+        for (int k = 0; k < m_pts; ++k) pts[k] = ladder->pts[k];
+    } else {
+        // 1. Seed: required relative price move over the impact rate. Use the
+        //    spot fee if it leaves an edge, else the direction's gate fee.
+        T rho_seed = (sel_i == 0)
+            ? one_minus_f0 * p_cex_bid / p_now
+            : one_minus_f0 * p_now / p_cex_ask;
+        if (!(rho_seed > T(1))) {
+            rho_seed = (sel_i == 0) ? rho_01_floor : rho_10_floor;
+        }
+        const T eps_edge = rho_seed - T(1);
+        const T lambda = fx::price_impact_rate(pool, static_cast<size_t>(sel_i), static_cast<size_t>(sel_j));
+
+        T dx_seed = (lambda > T(0) && eps_edge > T(0))
+            ? eps_edge / lambda
+            : std::sqrt(dx_lo * dx_hi);
+        dx_seed = std::min(std::max(dx_seed, dx_lo), dx_hi);
+
+        // 2a. Rigorous size cap (see p_floor_at above): once a sample beyond the
+        //     seed goes nonpositive, all larger sizes are dominated.
+        if (p_floor_at(dx_seed) > T(0)) {
+            int guard = 0;
+            for (T v = dx_seed * T(9); v < dx_hi && guard < 32; v *= T(9), ++guard) {
+                if (!(p_floor_at(v) > T(0))) { dx_cap = v; break; }
+            }
+        } else {
+            // Seed overshot the profitable window: walk down to re-anchor.
+            bool found = false;
+            int guard = 0;
+            for (T v = dx_seed / T(9); guard < 32; v /= T(9), ++guard) {
+                const T vq = std::max(v, dx_lo);
+                if (p_floor_at(vq) > T(0)) {
+                    dx_cap = std::min(dx_seed, dx_hi);  // previous sample was <= 0
+                    dx_seed = vq;
+                    found = true;
+                    break;
+                }
+                if (vq <= dx_lo) break;
+            }
+            if (!found) {
+                dx_cap = dx_hi;  // no positive envelope sample: scan everything
+            }
+        }
+
+        // 2a'. Native fee-dip probe. The native fee has its minimum at the
+        //      balance point; on steep surfaces (small fee_gamma) the
+        //      profitable window is centered on the balance-crossing trade
+        //      size, far from the frozen-fee seed and narrower than a ladder
+        //      rung, so without an explicit probe the search misses it
+        //      entirely. The crossing
+        //      sits where post-trade xp equalize: dxp ~ (xp_out - xp_in) / 2.
+        if (native_fee_mode && xp_bal[static_cast<size_t>(sel_i)] < xp_bal[static_cast<size_t>(sel_j)]) {
+            const T dxp_in_ddx = (sel_i == 0)
+                ? pool.precisions[0]
+                : pool.precisions[1] * pool.cached_price_scale / fx::PoolTraits<T>::PRECISION();
+            if (dxp_in_ddx > T(0)) {
+                const T cand = (xp_bal[static_cast<size_t>(sel_j)] - xp_bal[static_cast<size_t>(sel_i)])
+                    / (T(2) * dxp_in_ddx);
+                if (cand > dx_lo && cand < dx_cap) {
+                    dx_dip = cand;
+                }
+            }
+        }
+
+        // 2b. Ladder: seed/3 and 3*seed neighbors (plus the dip probe and its
+        //     neighbors when present) plus factor-9 rungs anchored at the
+        //     seed. Coverage below the seed: with ordered fees the native fee
+        //     only rises away from its dip, so the optimum sits within a small
+        //     factor of the seed or at the dip probe; arbitrary policy fees
+        //     may hide discounts at any scale, so they get the full range down
+        //     to dx_lo. Rung counts are bounded so the scan plus a minimal
+        //     refine always fits the MAX_SIZING_EVALS budget (extreme ranges
+        //     get coarser tails).
+        low_cover = (native_fee_mode && fee_ordered)
+            ? std::max(dx_lo, std::min(dx_seed, dx_dip > T(0) ? dx_dip : dx_seed) / T(27))
+            : dx_lo;
+
+        int n_pts = 0;
+        pts[n_pts++] = low_cover;
+        pts[n_pts++] = dx_cap;
+        pts[n_pts++] = dx_seed;
+        if (dx_seed / T(3) > low_cover) pts[n_pts++] = dx_seed / T(3);
+        if (dx_seed * T(3) < dx_cap)    pts[n_pts++] = dx_seed * T(3);
+        if (dx_dip > T(0)) {
+            pts[n_pts++] = dx_dip;
+            if (dx_dip / T(3) > low_cover) pts[n_pts++] = dx_dip / T(3);
+            if (dx_dip * T(3) < dx_cap)    pts[n_pts++] = dx_dip * T(3);
+        }
+        for (T v = dx_seed / T(9); v > low_cover && n_pts < 14; v /= T(9)) pts[n_pts++] = v;
+        for (T v = dx_seed * T(9); v < dx_cap && n_pts < 20; v *= T(9)) pts[n_pts++] = v;
+        for (int k = 1; k < n_pts; ++k)  // At most 20 rungs: insertion sort.
+            for (int m = k; m > 0 && pts[m] < pts[m - 1]; --m) std::swap(pts[m], pts[m - 1]);
+        for (int k = 0; k < n_pts; ++k) {
+            if (m_pts == 0 || pts[k] > pts[m_pts - 1] * (T(1) + T(1e-9))) {
+                pts[m_pts++] = pts[k];
+            }
+        }
+
+        // The cap point is provably nonpositive when it came from the envelope
+        // (dx_cap < dx_hi), so spend no full evaluation there: use the envelope
+        // value itself as its bracket ordinate.
+        cap_is_hi = (dx_cap >= dx_hi * (T(1) - T(1e-9)));
+        if (!cap_is_hi && m_pts > 1) cap_envelope = p_floor_at(pts[m_pts - 1]);
+        if (ladder) {
+            ladder->valid = true;
+            ladder->sel_i = sel_i;
+            ladder->fee_pool = fee_pool;
+            ladder->floor_fee = floor_fee_sel;
+            ladder->gas = gas;
+            ladder->cex_price = cex_price;
+            ladder->p_now = p_now;
+            ladder->dx_lo = dx_lo;
+            ladder->dx_hi = dx_hi;
+            ladder->m_pts = m_pts;
+            for (int k = 0; k < m_pts; ++k) ladder->pts[k] = pts[k];
+            ladder->cap_is_hi = cap_is_hi;
+            ladder->cap_envelope = cap_envelope;
+            ladder->dx_cap = dx_cap;
+            ladder->dx_dip = dx_dip;
+            ladder->low_cover = low_cover;
         }
     }
-
-    // The cap point is provably nonpositive when it came from the envelope
-    // (dx_cap < dx_hi), so spend no full evaluation there: use the envelope
-    // value itself as its bracket ordinate.
-    const bool cap_is_hi = (dx_cap >= dx_hi * (T(1) - T(1e-9)));
     Candidate scan[MAX_SIZING_EVALS];
     int best_idx = 0;
     for (int k = 0; k < m_pts; ++k) {
         if (k == m_pts - 1 && !cap_is_hi && m_pts > 1) {
-            scan[k] = Candidate{pts[k], T(0), p_floor_at(pts[k]), T(0)};
+            scan[k] = Candidate{pts[k], T(0), cap_envelope, T(0)};
         } else {
             scan[k] = eval_at(pts[k]);
         }

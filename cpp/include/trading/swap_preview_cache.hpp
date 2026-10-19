@@ -20,6 +20,27 @@ class SwapPreviewCache {
     std::array<Entry, 64> entries_;
     uint64_t valid_{0};
 public:
+    // The report-independent part of one sizing (decide_trade): the size ladder and the floor-fee
+    // envelope it was capped with depend only on the pool, the event price, the direction, the
+    // spot fee, the global floor fee and the fixed costs, so every report context of the same
+    // event reuses it.
+    struct Ladder {
+        static constexpr int MAX = 24;
+        bool valid{false};
+        int sel_i{-1};
+        T fee_pool{}, floor_fee{}, gas{}, cex_price{}, p_now{}, dx_lo{}, dx_hi{};
+        int m_pts{0};
+        std::array<T, MAX> pts;
+        bool cap_is_hi{false};
+        T cap_envelope{};  // floor-fee envelope value at the last rung when it is the envelope cap
+        T dx_cap{}, dx_dip{}, low_cover{};
+        bool matches(int i, const T& f0, const T& ff, const T& g, const T& p, const T& pn, const T& lo, const T& hi) const {
+            return valid && sel_i == i && fee_pool == f0 && floor_fee == ff && gas == g && cex_price == p &&
+                   p_now == pn && dx_lo == lo && dx_hi == hi;
+        }
+    };
+    Ladder ladder;
+
     template <typename Pool, typename Fee>
     std::pair<T, T> quote(const Pool& pool, size_t i, size_t j, T dx, const Fee& fee) {
         const size_t slot = (std::hash<T>{}(dx) ^ (i * 31)) & 63;

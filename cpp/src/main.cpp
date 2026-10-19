@@ -112,6 +112,11 @@ static const std::vector<std::string> CANONICAL_METRIC_FIELDS = {
     "vp", "lp_xcp_profit", "apy", "apy_net", "apy_net_gm",
     "apy_net_gm30", "apy_net_gm60", "apy_net_gm90",
     "apy_net_gm30_floor_share", "apy_net_gm60_floor_share", "apy_net_gm90_floor_share",
+    "apy_net_gm30_worst", "apy_net_gm60_worst", "apy_net_gm90_worst", "apy_net_gm60_worst_end",
+    "xcp_apy_gm", "xcp_apy_gm30", "xcp_apy_gm60", "xcp_apy_gm90",
+    "xcp_apy_gm30_floor_share", "xcp_apy_gm60_floor_share", "xcp_apy_gm90_floor_share",
+    "xcp_apy_gm30_worst", "xcp_apy_gm60_worst", "xcp_apy_gm90_worst", "xcp_apy_gm60_worst_end",
+    "xcp_apy_gm30_60_90",
     "apy_net_robust_90d", "avg_rel_price_diff", "max_rel_price_diff",
     "max_7d_rel_price_diff", "final_rel_price_diff", "detach_energy_ungated",
     "avg_imbalance",
@@ -121,10 +126,14 @@ static const std::vector<std::string> CANONICAL_METRIC_FIELDS = {
     "arb_guarded_loss_coin0", "yb_apy", "yb_apy_gm",
     "yb_apy_gm30", "yb_apy_gm60", "yb_apy_gm90",
     "yb_apy_gm30_floor_share", "yb_apy_gm60_floor_share", "yb_apy_gm90_floor_share",
+    "yb_apy_gm30_worst", "yb_apy_gm60_worst", "yb_apy_gm90_worst", "yb_apy_gm60_worst_end",
+    "yb_market_gm", "yb_market_gm30", "yb_market_gm60", "yb_market_gm90",
+    "yb_market_gm30_floor_share", "yb_market_gm60_floor_share", "yb_market_gm90_floor_share",
+    "yb_market_gm30_worst", "yb_market_gm60_worst", "yb_market_gm90_worst", "yb_market_gm60_worst_end",
     "yb_price_scale_hourly_qv",
     "yb_external_equity_eth",
     "yb_external_growth_eth",
-    "yb_external_max_drawdown_hourly", "yb_exposure_return", "yb_exposure_rms",
+    "yb_external_max_drawdown_hourly", "yb_exposure_return", "yb_exposure_rms", "yb_exposure_event",
 
     "policy_target_calls", "policy_actuator_holds", "policy_gate_rejections",
     "arb_offered_report_trades", "arb_withheld_report_trades",
@@ -132,8 +141,11 @@ static const std::vector<std::string> CANONICAL_METRIC_FIELDS = {
     "yb_releverage_trades",
     "yb_levamm_profit_coin0",
     "elapsed_ms", "total_notional_coin0", "lp_fee_coin0", "arb_pnl_coin0",
-    "fee_capture_rate", "donations", "donation_coin0_total", "tvl_growth", "pool_nav_vs_hold",
-    "early_stop_ts"
+    "fee_capture_rate", "donations", "donation_coin0_total", "tvl_growth", "pool_nav_vs_hold", "supply_ratio",
+    "early_stop_ts",
+    "vp_growth_apy", "donated_apy", "donation_burn_apy", "xcp_growth_apy", "vp_growth_less_burn_apy",
+    "step_cost_apy", "step_gain_apy", "net_step_cost_apy", "fee_xcp_apy",
+    "arb_take_apy", "fee_coin0_apy", "trades_per_year", "steps_per_year"
 };
 
 const json::object& canonical_metric_schema() {

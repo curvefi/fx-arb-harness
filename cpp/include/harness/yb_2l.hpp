@@ -44,6 +44,11 @@ struct Yb2LState {
     T lt_stable_balance{};
     bool killed{false};
     T stable_aggregator{T(1)};  // crvUSD in aggregated USD: the LEVAMM oracle's factor
+    // Research (yb_oracle_half_life_s): the LP oracle is read at an EMA of ln(price scale) instead of the scale.
+    T oracle_half_life{};
+    T oracle_ema_log{};
+    T oracle_last_log{};
+    uint64_t oracle_ema_ts{0};
 };
 
 template <typename T>
@@ -154,10 +159,54 @@ public:
     bool enabled() const { return enabled_; }
     const State& state() const { return state_; }
 
+    // Research: change the borrow rate from `timestamp` on; interest up to then accrues at the old rate.
+    void set_rate(const T& rate, uint64_t timestamp) {
+        if (!enabled_ || timestamp < state_.rate_time || rate == state_.rate) return;
+        advance_debt(timestamp);
+        state_.rate = rate;
+    }
+
+    // Research: switch the smoothed LP oracle on and observe the price scale. The EMA holds the scale seen at the previous
+    // observation over the time since then, so calling it at every event integrates the scale's path exactly.
     template <typename Pool>
-    T lp_oracle(const Pool& pool) const {
+    void set_oracle_half_life(const T& half_life, const Pool& pool, uint64_t timestamp) {
+        state_.oracle_half_life = half_life;
+        state_.oracle_ema_log = state_.oracle_last_log = std::log(pool.cached_price_scale);
+        state_.oracle_ema_ts = timestamp;
+    }
+    template <typename Pool>
+    void observe_scale(const Pool& pool, uint64_t timestamp) {
+        if (!(state_.oracle_half_life > T(0)) || timestamp <= state_.oracle_ema_ts) return;
+        const T alpha = std::exp(-T(0.693147180559945309L) * T(timestamp - state_.oracle_ema_ts) / state_.oracle_half_life);
+        state_.oracle_ema_log = alpha * state_.oracle_ema_log + (T(1) - alpha) * state_.oracle_last_log;
+        state_.oracle_last_log = std::log(pool.cached_price_scale);
+        state_.oracle_ema_ts = timestamp;
+    }
+
+    // The scale seen after an event's last action: what the EMA holds until the next observation.
+    template <typename Pool>
+    void sync_scale(const Pool& pool) {
+        if (state_.oracle_half_life > T(0)) state_.oracle_last_log = std::log(pool.cached_price_scale);
+    }
+    // The scale the LP oracle reads at `timestamp`: the EMA carried forward with the scale last seen (exact while the pool is untouched).
+    template <typename Pool>
+    T oracle_scale(const Pool& pool, uint64_t timestamp) const {
+        if (!(state_.oracle_half_life > T(0)) || state_.oracle_ema_ts == 0) return pool.cached_price_scale;
+        T ema = state_.oracle_ema_log;
+        if (timestamp > state_.oracle_ema_ts) {
+            const T alpha = std::exp(-T(0.693147180559945309L) * T(timestamp - state_.oracle_ema_ts) / state_.oracle_half_life);
+            ema = alpha * ema + (T(1) - alpha) * state_.oracle_last_log;
+        }
+        return std::exp(ema);
+    }
+
+    template <typename Pool>
+    T lp_oracle(const Pool& pool) const { return lp_oracle(pool, state_.oracle_ema_ts); }
+    template <typename Pool>
+    T lp_oracle(const Pool& pool, uint64_t timestamp) const {
         // CryptopoolLPOracle.price(): the LP price times the seeded aggregator.
-        const T sqrt_scale = std::sqrt(pool.cached_price_scale * one());
+        const T scale = oracle_scale(pool, timestamp);
+        const T sqrt_scale = std::sqrt(scale * one());
         return T(2) * pool.get_virtual_price() * sqrt_scale / one() * state_.stable_aggregator / one();
     }
 
@@ -197,6 +246,7 @@ public:
                               const Costs& costs) const {
         NoTradeBand band{false, from, to, T(0), T(0)};
         if (!enabled_ || state_.killed || from < state_.rate_time || to < from) return band;
+        if (state_.oracle_half_life > T(0)) return band;  // the smoothed oracle drifts with time: every event is tested by may_trade
         const auto early = marginal_quote(pool, T(1), from, costs);
         const auto late = marginal_quote(pool, T(1), to, costs);
         if (early.hard_abstain || late.hard_abstain) return band;
@@ -350,11 +400,27 @@ public:
         return result;
     }
 
+    // Research (yb_distribute_s): the interest distribution on its own; otherwise it happens only as part of a fill.
+    template <typename Pool>
+    Yb2LResult<T> distribute(Pool& pool, uint64_t timestamp) {
+        Yb2LResult<T> result;
+        if (!enabled_ || state_.killed || timestamp < state_.rate_time) return result;
+        Yb2LActor candidate = *this;
+        PoolTransactionSnapshot<Pool> snapshot(pool);
+        if (!donate_interest(pool, timestamp, result, candidate) || !result.donation_committed) {
+            snapshot.restore(pool);
+            result.donation_committed = false;
+            return result;
+        }
+        *this = std::move(candidate);
+        return result;
+    }
+
     // LEVAMM get_p: (x0 - debt) / collateral at the pool's LP oracle.
     template <typename Pool>
     T levamm_price(const Pool& pool, uint64_t timestamp) const {
         const T debt = projected_debt(timestamp);
-        const auto value = x0(lp_oracle(pool), state_.collateral, debt, false);
+        const auto value = x0(lp_oracle(pool, timestamp), state_.collateral, debt, false);
         return value && state_.collateral > T(0) ? (*value - debt) / state_.collateral : T(0);
     }
 
@@ -456,7 +522,7 @@ private:
     ) const {
         MarginalQuote decision;
         const T debt = projected_debt(timestamp);
-        const T oracle = lp_oracle(pool);
+        const T oracle = lp_oracle(pool, timestamp);
         decision.oracle = oracle;
         const auto old_x0 = x0(oracle, state_.collateral, debt, false);
         if (!old_x0.has_value()) {

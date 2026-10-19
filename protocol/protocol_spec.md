@@ -240,6 +240,10 @@ One fixed SplitMix64 draw keyed by original event ordinal selects report/no-repo
 before arb sizing; all probes and execution share that choice. Draws are shared
 across candidates and independent of batch order, workers, and prior trades.
 This is a per-opportunity probability, not a target fraction of executed swaps.
+A negative rate `-r` (in `[-1,0)`) is the sticky skip latch: after each committed
+arb swap the same draw at rate `r` decides whether the next arb may bring a
+report; a skip holds across events until an arb swap commits without a report,
+and only then is drawn again.
 Reports use the attached causal price-feed sample when supplied, otherwise the
 current event price. They are
 cleared after the arb attempt and cannot be reused by YB, user swaps, or idle ticks.
@@ -306,6 +310,10 @@ and its cached reference. The selected report's actual observation timestamp
 sets its age, even when reports are separated by gaps.
 Only the winning committed swap writes the reference; idle events do not refresh
 it. Ties retain the withholding action when it was considered first.
+`K = 1000 + L` offers the latest report published by event time plus `L` seconds.
+`K = 2000 + L` (`K <= 2023`) offers every report published in
+`[event - 12 s, event + L s]`; the arb sizes each and keeps the most profitable
+(the rational report-picking arb).
 
 The `report_dual_ema` policy uses thirteen parameters: base fee, away capture,
 toward ratio, fallback fee, the unchanged six dual-EMA fields, then age offset,
@@ -382,14 +390,21 @@ session.
 ### Rolling geometric-mean APY
 
 `apy_net_gm30`, `apy_net_gm60`, `apy_net_gm90` (pool net growth, the series of
-`apy_net`) and `yb_apy_gm30`, `yb_apy_gm60`, `yb_apy_gm90` (YB growth, the series
+`apy_net`), `xcp_apy_gm30`, `xcp_apy_gm60`, `xcp_apy_gm90` (standalone pool XCP
+growth) and `yb_apy_gm30`, `yb_apy_gm60`, `yb_apy_gm90` (YB growth, the series
 of `yb_apy`) share one rule. Each hour, once a full window exists, the window's
 annualised return is taken, a window with a non-positive return counting as
 `1e-20`; the metric is the geometric mean over all windows of the run. The
 matching `_floor_share` is the share of windows floored; both are `-1` when no
 full window exists (or, for the YB family, YB is off). Samples use the latest stored
 observation at or before the window boundary and annualize by actual elapsed time.
-`apy_net_gm` and `yb_apy_gm` are the 90-day values under their legacy names.
+`apy_net_gm`, `xcp_apy_gm` and `yb_apy_gm` are the 90-day values under their family names.
+
+The XCP series is `(virtual_price / vp0) * (totalSupply / supply0) * exp(-(donated_supply_log - donated_log0))`
+from the loop start, sampled on the `apy_net_gm` hourly clock. Its endpoint is
+`xcp_growth_apy`; unlike `lp_xcp_profit`, it falls when toward-spot steps burn
+seeded donation shares. `xcp_apy_gm30_60_90` is the cube root of
+`xcp_apy_gm30 * xcp_apy_gm60 * xcp_apy_gm90`, or `-1` unless all three are positive.
 
 ### Report-selection diagnostics
 

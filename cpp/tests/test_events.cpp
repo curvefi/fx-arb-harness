@@ -55,14 +55,14 @@ arb::EventSoA blocks(const std::vector<double>& moves) {
 }
 
 Run run_arb(const arb::EventSoA& events, arb::harness::EventCursor cursor = arb::harness::EventCursor::Scalar,
-            double entry_edge_bps = 0.0) {
+            double entry_edge_bps = 0.0, int delay_s = -1) {
     Run run{{}, make_pool(), {}};
     arb::trading::Costs<double> costs; costs.arb_fee_bps = 0.0; costs.entry_edge_bps = entry_edge_bps;
     arb::harness::DonationCfg<double> donation;
     arb::harness::IdleTickCfg<double> idle; idle.freq_s = 0;
     arb::harness::UserSwapCfg<double> user;
     arb::harness::RunConfig<double> config;
-    config.min_swap_frac = 1e-8; config.event_cursor = cursor;
+    config.min_swap_frac = 1e-8; config.event_cursor = cursor; config.arb_settle_offset_s = delay_s;
     run.result = arb::harness::run_event_loop(run.pool, events, costs, donation, idle, user, config, nullptr, 0, &run.actions);
     return run;
 }
@@ -125,9 +125,42 @@ void fast_skip_matches_scalar() {
                 scalar.pool.cached_price_scale == skipped.pool.cached_price_scale, "fast skip diverged");
     }
 }
+
+// A run priced at its own delay after the block (0, 1 or 2 s) on a session opened at 1 s trades exactly as a
+// session opened at that delay. Prices in coin 0 per coin 1; each delay sees its own +-3% moves.
+void a_run_takes_its_own_price_delay() {
+    arb::events::BlockTape tape;
+    tape.t0 = TS - TS % 12 + 11;
+    tape.block_s = 12;
+    uint64_t state = 11;
+    for (int block = 0; block < 120; ++block) {
+        std::array<double, arb::events::BLOCK_PRICE_OFFSETS> row{};
+        for (double& price : row) {
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            price = 77'235.68 * (1 + (static_cast<double>(state >> 40) / double(1ULL << 24) - 0.5) * 0.06);
+        }
+        tape.price.push_back(row);
+        tape.volume.push_back({1.0, 1.0, 1.0});
+    }
+    std::vector<arb::Candle> candles;
+    const auto session = arb::events::gen_block_events(tape, 1, candles, 0, 0, {});
+    size_t trades[3]{};
+    for (int delay = 0; delay < 3; ++delay) {
+        candles.clear();
+        const auto direct = run_arb(arb::events::gen_block_events(tape, size_t(delay), candles, 0, 0, {}));
+        for (const auto cursor : {arb::harness::EventCursor::Scalar, arb::harness::EventCursor::FastSkip}) {
+            const auto own = run_arb(session, cursor, 0.0, delay);
+            require(own.result.metrics.trades == direct.result.metrics.trades && own.pool.balances == direct.pool.balances &&
+                    own.pool.cached_price_scale == direct.pool.cached_price_scale, "a run's own price delay diverged");
+        }
+        trades[delay] = direct.result.metrics.trades;
+    }
+    require(trades[0] > 1 && (trades[0] != trades[1] || trades[1] != trades[2]), "the delays did not differ");
+}
 } // namespace
 
 int main() {
+    a_run_takes_its_own_price_delay();
     candles_become_a_causal_bin_end_clock();
     block_tape_loads_and_prices_at_the_settle_offset();
     taker_trades_at_the_event_price();

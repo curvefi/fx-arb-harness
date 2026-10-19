@@ -14,6 +14,24 @@ struct YbExternalEquity {
     double initial{0}, equity{-1}, growth{-1}, peak{0}, max_drawdown{0};
     double exposure_return{0}, exposure_sq_time{0}, sampled_time{0}, last_u{0}, last_px{0}, last_x{0};
     uint64_t last_ts{0};
+    // Research: exposure at event resolution, as a share of the equity of the moment (log-like). mark() books the move of 1/price since the last
+    // refresh(); refresh() stores the holdings after an event's actions. Called at every visited event, so skipped events (no action) lose nothing.
+    double event_exposure{0}, ev_u{0}, ev_px{0}, ev_e{0};
+    bool ev_ready{false};
+    template<class Price> void mark(Price price) {
+        const double px = static_cast<double>(price);
+        if (ev_ready && px > 0 && ev_e > 0) event_exposure += ev_u * (1.0 / px - 1.0 / ev_px) / ev_e;
+    }
+    template<class Pool, class Actor, class Price>
+    void refresh(const Pool& pool, const Actor& actor, uint64_t ts, Price price) {
+        const double px = static_cast<double>(price), supply = static_cast<double>(pool.totalSupply);
+        if (!(px > 0) || !(supply > 0)) return;
+        const double collateral = static_cast<double>(actor.state().collateral), debt = static_cast<double>(actor.projected_debt(ts));
+        const double cash = static_cast<double>(actor.state().lt_stable_balance);
+        ev_u = collateral * static_cast<double>(pool.balances[0]) / supply - debt + cash;
+        ev_e = (collateral * (static_cast<double>(pool.balances[0]) + px * static_cast<double>(pool.balances[1])) / supply - debt + cash) / px;
+        ev_px = px; ev_ready = true;
+    }
     double exposure_rms() const { return sampled_time > 0 ? std::sqrt(exposure_sq_time / sampled_time) : -1.0; }
     template<class Pool, class Actor, class Price>
     void sample(const Pool& pool, const Actor& actor, uint64_t ts, Price price) {

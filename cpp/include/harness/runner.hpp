@@ -38,6 +38,7 @@ struct InitialMarketAnchor {
 template <typename T>
 InitialMarketAnchor<T> initial_market_anchor(
     const EventSoA& events,
+    const std::vector<double>& prices,
     const T& fallback_price,
     uint64_t start_ts = 0
 ) {
@@ -45,8 +46,8 @@ InitialMarketAnchor<T> initial_market_anchor(
         if (start_ts != 0 && events.ts[i] < start_ts) {
             continue;
         }
-        if (events.p_cex[i] > 0.0) {
-            return {static_cast<T>(events.p_cex[i]), events.ts[i], true};
+        if (prices[i] > 0.0) {
+            return {static_cast<T>(prices[i]), events.ts[i], true};
         }
     }
     if (fallback_price > T(0)) {
@@ -91,16 +92,24 @@ struct PoolResult {
     T donation_apy{0};
     T donation_frequency{0};
     RollingGeoApySummary apy_net_gm{};
+    RollingGeoApySummary xcp_apy_gm{};
     double apy_net_robust_90d{-1.0};
     double pool_nav_vs_hold{-1.0};
+    double supply_ratio{-1.0};
+    // Pool ledger over the run (natural logs): xcp lost / gained by scale steps at fixed balances, supply donated.
+    double step_cost_log{0.0};
+    double step_gain_log{0.0};
+    double donated_supply_log{0.0};
     T yb_releverage_fee{T(0)};
     double yb_releverage_apy{-1.0};
     RollingGeoApySummary yb_apy_gm{};
+    RollingGeoApySummary yb_market_gm{};
     double yb_external_equity_eth{-1.0};
     double yb_external_growth_eth{-1.0};
     double yb_external_max_drawdown_hourly{-1.0};
     double yb_exposure_return{-1.0};
     double yb_exposure_rms{-1.0};
+    double yb_exposure_event{-1.0};
     double yb_price_scale_hourly_qv{-1.0};
     std::array<double,3> policy_price_counters{-1,-1,-1};
     double yb_releverage_final_growth{-1.0};
@@ -153,6 +162,7 @@ PoolResult<T> run_single_pool(
             }
             : initial_market_anchor<T>(
                 events,
+                events.prices(cfg.arb_settle_offset_s),
                 pool_init.initial_price,
                 requested_start_ts
             );
@@ -175,6 +185,8 @@ PoolResult<T> run_single_pool(
             pool_init.policy_config
         );
         pool.donation_duration = pool_init.donation_duration;
+        if (pool_init.donation_shares_max_ratio > T(0))
+            pool.donation_shares_max_ratio = pool_init.donation_shares_max_ratio;
 
         uint64_t init_ts = requested_start_ts;
         if (init_ts == 0 && !events.empty()) {
@@ -277,6 +289,10 @@ PoolResult<T> run_single_pool(
 
         result.initial_virtual_price = pool.virtual_price;
         result.initial_lp_xcp_profit = pool.lp_xcp_profit;
+        // the ledger counts from here, as virtual price and supply do (the seed donation is before)
+        const double step_cost_log_start = pool.step_cost_log_;
+        const double step_gain_log_start = pool.step_gain_log_;
+        const double donated_supply_log_start = pool.donated_supply_log_;
 
         auto loop_result = run_event_loop(
             pool, events, costs, dcfg, icfg, ucfg, cfg,
@@ -296,16 +312,23 @@ PoolResult<T> run_single_pool(
         result.donation_apy = loop_result.donation_apy;
         result.donation_frequency = pool_init.donation_frequency;
         result.apy_net_gm = loop_result.apy_net_gm;
+        result.xcp_apy_gm = loop_result.xcp_apy_gm;
         result.apy_net_robust_90d = loop_result.apy_net_robust_90d;
         result.pool_nav_vs_hold = loop_result.pool_nav_vs_hold;
+        result.supply_ratio = loop_result.supply_ratio;
+        result.step_cost_log = pool.step_cost_log_ - step_cost_log_start;
+        result.step_gain_log = pool.step_gain_log_ - step_gain_log_start;
+        result.donated_supply_log = pool.donated_supply_log_ - donated_supply_log_start;
         result.yb_releverage_fee = loop_result.yb_releverage_fee;
         result.yb_releverage_apy = loop_result.yb_releverage_apy;
         result.yb_apy_gm = loop_result.yb_apy_gm;
+        result.yb_market_gm = loop_result.yb_market_gm;
         result.yb_external_equity_eth = loop_result.yb_external_equity_eth;
         result.yb_external_growth_eth = loop_result.yb_external_growth_eth;
         result.yb_external_max_drawdown_hourly = loop_result.yb_external_max_drawdown_hourly;
         result.yb_exposure_return = loop_result.yb_exposure_return;
         result.yb_exposure_rms = loop_result.yb_exposure_rms;
+        result.yb_exposure_event = loop_result.yb_exposure_event;
         result.yb_price_scale_hourly_qv = loop_result.yb_price_scale_hourly_qv;
 #ifdef TWOCRYPTO_POLICY_HEADER
         result.policy_price_counters = policy_price_diagnostics<pools::twocrypto_fx::ChallengeFeePolicy<T>>(pool.policy,0);
