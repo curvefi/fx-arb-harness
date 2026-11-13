@@ -58,6 +58,8 @@ json::object detailed_entry_to_json(const arb::harness::DetailedEntry<RealT>& e)
     o["n_rebalances"] = e.n_rebalances;
     o["yb_initialized"] = e.yb_initialized;
     o["yb_growth"] = static_cast<double>(e.yb_growth);
+    o["yb_growth_par"] = static_cast<double>(e.yb_growth_par);
+    o["yb_par_valid"] = e.yb_par_valid;
     o["yb_fee"] = static_cast<double>(e.yb_fee);
     o["yb_releverage_trades"] = e.yb_releverage_trades;
     o["yb_stable_balance"] = static_cast<double>(e.yb_stable_balance);
@@ -65,6 +67,8 @@ json::object detailed_entry_to_json(const arb::harness::DetailedEntry<RealT>& e)
     o["yb_collateral_lp"] = static_cast<double>(e.yb_collateral_lp);
     o["yb_lp_oracle"] = static_cast<double>(e.yb_lp_oracle);
     o["yb_lp_fair"] = static_cast<double>(e.yb_lp_fair);
+    o["yb_lt_stable_balance"] = static_cast<double>(e.yb_lt_stable_balance);
+    o["yb_stable_aggregator"] = static_cast<double>(e.yb_stable_aggregator);
     return o;
 }
 

@@ -1,5 +1,6 @@
 #include "curve_fx_evaluator/evaluator.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -209,6 +210,10 @@ void extract_metrics_from_pool_result(
 
     m["yb_apy"] = res.yb_releverage_apy;
     put_gm("yb_apy_gm", res.yb_apy_gm);
+    m["yb_apy_par"] = res.yb_apy_par;
+    m["yb_final_growth_par"] = res.yb_final_growth_par;
+    m["yb_par_valid"] = res.yb_par_valid;
+    put_gm("yb_apy_par_gm", res.yb_apy_par_gm);
     m["yb_market_gm60"] = res.yb_market_gm60;
     m["yb_external_equity_eth"] = res.yb_external_equity_eth;
     m["yb_external_growth_eth"] = res.yb_external_growth_eth;
@@ -221,10 +226,12 @@ void extract_metrics_from_pool_result(
     m["policy_gate_rejections"] = res.policy_price_counters[2];
     m["arb_offered_report_trades"] = static_cast<double>(rm.arb_offered_report_trades);
     m["arb_withheld_report_trades"] = static_cast<double>(rm.arb_withheld_report_trades);
+    m["oracle_refreshes"] = static_cast<double>(rm.oracle_refreshes);
     m["yb_final_growth"] = res.yb_releverage_final_growth;
     m["yb_fee"] = static_cast<double>(res.yb_releverage_fee);
     m["yb_releverage_trades"] = static_cast<double>(res.yb_releverage_trades);
     m["yb_levamm_profit_coin0"] = static_cast<double>(rm.yb_levamm_profit_coin0);
+    m["yb_touch_fires"] = static_cast<double>(rm.yb_touch_fires);
 
     m["elapsed_ms"] = res.elapsed_ms;
     m["early_stop_ts"] = static_cast<double>(res.early_stop_ts);
@@ -329,6 +336,10 @@ void execute_scenario_job(
         run_cfg.min_swap_frac = session_cfg.min_swap_frac;
         run_cfg.max_swap_frac = session_cfg.max_swap_frac;
         run_cfg.start_ts = session_cfg.start_ts;
+        run_cfg.end_ts = pool_override != nullptr && pool_override->end_timestamp.has_value()
+            ? static_cast<uint64_t>(*pool_override->end_timestamp) : 0;
+        if (run_cfg.end_ts != 0 && run_cfg.end_ts < std::max(run_cfg.start_ts, pool_init.start_ts))
+            throw std::invalid_argument("end_timestamp precedes the run start");
         run_cfg.dustswap_freq_s = session_cfg.dustswap_freq_s;
         run_cfg.user_swap_freq_s = session_cfg.user_swap_freq_s;
         run_cfg.user_swap_size_frac = session_cfg.user_swap_size_frac;
@@ -358,7 +369,11 @@ void execute_scenario_job(
         run_cfg.yb_min_net_profit_coin0 = session_cfg.yb_min_net_profit_coin0;
         run_cfg.yb_arb = session_cfg.yb_arb;
         run_cfg.yb_execution_bps = session_cfg.yb_execution_bps;
-        run_cfg.yb_initial_state = session_cfg.yb_initial_state;
+        run_cfg.yb_self_touch = session_cfg.yb_self_touch;
+        run_cfg.yb_initial_state = pool_override != nullptr && pool_override->yb_initial_state.has_value()
+            ? pool_override->yb_initial_state : session_cfg.yb_initial_state;
+        run_cfg.yb_aggregator_ts = session_cfg.yb_aggregator_ts;
+        run_cfg.yb_aggregator_price = session_cfg.yb_aggregator_price;
 
         std::vector<arb::harness::Action<RealT>>* actions_ptr = nullptr;
         std::vector<arb::harness::DetailedEntry<RealT>>* detailed_ptr = nullptr;
@@ -395,6 +410,7 @@ void execute_scenario_job(
             effective["pool.costs.entry_edge_bps"] =
                 static_cast<double>(costs.entry_edge_bps);
             effective["run.yb_min_net_profit_coin0"] = static_cast<double>(run_cfg.yb_min_net_profit_coin0);
+            if (run_cfg.yb_self_touch) effective["run.yb_self_touch"] = 1.0;
             effective["pool.run.yb_releverage_fee"] =
                 static_cast<double>(run_cfg.yb_releverage_fee);
             effective["pool.run.arb_report_count"] = static_cast<double>(run_cfg.arb_report_count);
@@ -406,12 +422,15 @@ void execute_scenario_job(
             if (run_cfg.arb_settle_offset_s >= 0)
                 effective["pool.run.arb_settle_offset_s"] = static_cast<double>(run_cfg.arb_settle_offset_s);
             if (run_cfg.keeper_report) effective["pool.run.keeper_report"] = static_cast<double>(run_cfg.keeper_report);
+            if (run_cfg.end_ts) effective["pool.run.end_timestamp"] = static_cast<double>(run_cfg.end_ts);
             if (run_cfg.yb_initial_state && run_cfg.yb_mode != arb::harness::YbMode::Off) {
                 effective["run.yb_initial_state"] =
                     arb::harness::yb_initial_state_json(*run_cfg.yb_initial_state);
             } else {
                 effective["run.yb_cash_multiplier"] = static_cast<double>(run_cfg.yb_cash_multiplier);
             }
+            if (!run_cfg.yb_aggregator_ts.empty())
+                effective["run.yb_stable_aggregator_samples"] = static_cast<double>(run_cfg.yb_aggregator_ts.size());
 
             trace_lease.emplace(TraceArena::global_instance().acquire());
             run_cfg.detailed_interval = std::max<size_t>(1, obs_spec.trace_interval);

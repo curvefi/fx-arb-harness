@@ -37,8 +37,9 @@ std::vector<std::string> split_csv_line(const std::string& line) {
 
 } // namespace
 
-std::vector<PriceFeedPoint> load_price_feed_csv(const std::string& path) {
-    if (std::filesystem::path(path).extension()==".npz") return load_price_feed_npz(path);
+std::vector<PriceFeedPoint> load_price_feed_csv(const std::string& path, ReportBankSpec* bank) {
+    if (bank) *bank = {};
+    if (std::filesystem::path(path).extension()==".npz") return load_price_feed_npz(path, bank);
     std::ifstream in(path);
     if (!in) {
         throw std::runtime_error("Cannot open price feed: " + path);
@@ -138,10 +139,34 @@ void attach_price_feed(
 } // namespace arb
 
 namespace arb::price_feeds {
-std::vector<PriceFeedPoint> load_price_feed_npz(const std::string& path) {
-    auto arrays = io::read_arrays(path, {"ts.npy", "price.npy"});
-    if (arrays.size()!=2) throw std::runtime_error("Price NPZ requires ts and price");
+std::vector<PriceFeedPoint> load_price_feed_npz(const std::string& path, ReportBankSpec* bank) {
+    // Research: "rate_ts" and "rate" with a scalar "bank_period_s" give a report bank a rate series read at each delivery.
+    auto arrays = io::read_arrays(path, {"ts.npy", "price.npy", "bank_period_s.npy", "rate_ts.npy", "rate.npy"});
+    if (!arrays.count("ts.npy") || !arrays.count("price.npy")) throw std::runtime_error("Price NPZ requires ts and price");
     const auto& ts=arrays.at("ts.npy"); const auto& price=arrays.at("price.npy");
+    const auto period_it = arrays.find("bank_period_s.npy");
+    const auto rate_ts_it = arrays.find("rate_ts.npy"), rate_it = arrays.find("rate.npy");
+    const bool rate = rate_it != arrays.end();
+    if (rate != (rate_ts_it != arrays.end()) || rate != (period_it != arrays.end()))
+        throw std::runtime_error("Price NPZ: rate_ts, rate and bank_period_s go together");
+    if (rate) {
+        const auto& a = period_it->second;
+        if (!a.shape.empty() || a.dtype != "<f8") throw std::runtime_error("Price NPZ: bank_period_s must be a float64 scalar");
+        double period = 0;
+        const auto bits = io::little(a.data(), 8); std::memcpy(&period, &bits, 8);
+        if (!(std::isfinite(period) && period > 0)) throw std::runtime_error("Price NPZ: bank_period_s must be positive");
+        const auto& t = rate_ts_it->second; const auto& v = rate_it->second;
+        if (t.shape.size() != 1 || v.shape != t.shape || t.dtype != "<f8" || v.dtype != "<f8" || t.shape[0] == 0)
+            throw std::runtime_error("Price NPZ: rate_ts and rate must be equal non-empty float64 arrays");
+        std::vector<double> rt(t.shape[0]), rv(t.shape[0]);
+        for (size_t i = 0; i < rt.size(); ++i) {
+            auto b = io::little(t.data() + 8 * i, 8); std::memcpy(&rt[i], &b, 8);
+            b = io::little(v.data() + 8 * i, 8); std::memcpy(&rv[i], &b, 8);
+            if (!std::isfinite(rt[i]) || !(std::isfinite(rv[i]) && rv[i] > 0) || (i > 0 && !(rt[i] > rt[i - 1])))
+                throw std::runtime_error("Price NPZ: rate_ts must increase and rate be positive");
+        }
+        if (bank) bank->period_s = period, bank->rate_ts = std::move(rt), bank->rate = std::move(rv);
+    }
     if (ts.shape.size()!=1 || price.shape!=ts.shape || price.dtype!="<f8" ||
         (ts.dtype!="<i8" && ts.dtype!="<f8"))
         throw std::runtime_error("Price NPZ requires Unix seconds ts and float64 price");

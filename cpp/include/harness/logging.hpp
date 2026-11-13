@@ -264,6 +264,8 @@ public:
         entry.n_rebalances = n_rebalances;
         entry.yb_initialized = 0;
         entry.yb_growth = MetricF<T>(0);
+        entry.yb_growth_par = MetricF<T>(-1);
+        entry.yb_par_valid = -1;
         entry.yb_fee = MetricF<T>(0);
         entry.yb_releverage_trades = 0;
         entry.yb_stable_balance = T(0);
@@ -271,6 +273,8 @@ public:
         entry.yb_collateral_lp = T(0);
         entry.yb_lp_oracle = T(0);
         entry.yb_lp_fair = T(0);
+        entry.yb_lt_stable_balance = T(0);
+        entry.yb_stable_aggregator = T(0);
         out_entries_->push_back(entry);
         return true;
     }
@@ -279,12 +283,16 @@ public:
         bool initialized,
         MetricF<T> growth,
         MetricF<T> fee,
-        uint64_t trades
+        uint64_t trades,
+        MetricF<T> growth_par,
+        bool par_valid
     ) {
         if (!enabled() || out_entries_->empty()) return;
         auto& entry = out_entries_->back();
         entry.yb_initialized = initialized ? uint64_t(1) : uint64_t(0);
         entry.yb_growth = growth;
+        entry.yb_growth_par = growth_par;
+        entry.yb_par_valid = par_valid ? 1.0 : 0.0;
         entry.yb_fee = fee;
         entry.yb_releverage_trades = trades;
     }
@@ -294,10 +302,14 @@ public:
         const T& debt,
         const T& collateral_lp,
         const T& lp_oracle,
-        const T& lp_fair
+        const T& lp_fair,
+        const T& lt_stable_balance,
+        const T& stable_aggregator
     ) {
         if (!enabled() || out_entries_->empty()) return;
         auto& entry = out_entries_->back();
+        entry.yb_lt_stable_balance = lt_stable_balance;
+        entry.yb_stable_aggregator = stable_aggregator;
         entry.yb_stable_balance = stable_balance;
         entry.yb_debt = debt;
         entry.yb_collateral_lp = collateral_lp;

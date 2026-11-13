@@ -46,11 +46,23 @@ struct EventSoA {
     // Complete independent report tape, including observations between events.
     std::vector<double> report_ts;
     std::vector<double> report_prices;
+    // Research, optional: a report bank (harness/report_bank.hpp): a rate series (sample times, values) read at each
+    // delivery and the bank's average period in seconds (empty / 0: no bank).
+    std::vector<double> report_rate_ts, report_rate;
+    double report_bank_period_s{0};
     // Optional: reports published at or before each event (empty = search).
     std::vector<uint32_t> report_upper;
     // Block mode only: the event price at each delay after the block (index = seconds); p_cex is the column of
     // the session's own delay. Empty otherwise.
     std::array<std::vector<double>, 3> p_cex_delay;
+    // Block mode, optional: the external price at which the native arbitrageur and the YieldBasis actor trade (e.g. the
+    // asset in the pool's stablecoin), NaN where neither trades. Empty: the event price. Sizing, profit and notional use
+    // this price; fee valuation, marks and metrics use the event price.
+    std::vector<double> p_arb;
+    // Block mode, optional (research, harness/oracle_rate.hpp): a rate oracle read at report delivery that divides the
+    // reports the fee terms read: its live value and the cache other writers left (value, write time) at each event, and
+    // the rule {calm age limit s, off-peg age limit s, peg band}. Empty: none.
+    std::vector<double> oracle_live, oracle_cached, oracle_cached_ts, oracle_rule;
 
     // Event prices of one run: the session's (delay_s < 0) or those at an explicit delay after the block.
     const std::vector<double>& prices(int delay_s) const {

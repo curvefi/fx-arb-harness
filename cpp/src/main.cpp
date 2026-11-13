@@ -134,16 +134,20 @@ static const std::vector<std::string> CANONICAL_METRIC_FIELDS = {
     "yb_external_max_drawdown_hourly", "yb_exposure_return", "yb_exposure_rms",
 
     "policy_target_calls", "policy_actuator_holds", "policy_gate_rejections",
-    "arb_offered_report_trades", "arb_withheld_report_trades",
+    "arb_offered_report_trades", "arb_withheld_report_trades", "oracle_refreshes",
     "yb_final_growth", "yb_fee",
     "yb_releverage_trades",
-    "yb_levamm_profit_coin0",
+    "yb_levamm_profit_coin0", "yb_touch_fires",
     "elapsed_ms", "total_notional_coin0", "lp_fee_coin0", "arb_pnl_coin0",
     "fee_capture_rate", "donations", "donation_coin0_total", "tvl_growth", "pool_nav_vs_hold", "supply_ratio",
     "early_stop_ts",
     "vp_growth_apy", "donated_apy", "donation_burn_apy", "xcp_growth_apy", "vp_growth_less_burn_apy",
     "step_cost_apy", "step_gain_apy", "net_step_cost_apy", "fee_xcp_apy",
-    "arb_take_apy", "fee_coin0_apy", "trades_per_year", "steps_per_year"
+    "arb_take_apy", "fee_coin0_apy", "trades_per_year", "steps_per_year",
+    "yb_apy_par", "yb_final_growth_par", "yb_par_valid", "yb_apy_par_gm",
+    "yb_apy_par_gm30", "yb_apy_par_gm60", "yb_apy_par_gm90",
+    "yb_apy_par_gm30_floor_share", "yb_apy_par_gm60_floor_share", "yb_apy_par_gm90_floor_share",
+    "yb_apy_par_gm30_worst", "yb_apy_par_gm60_worst", "yb_apy_par_gm90_worst", "yb_apy_par_gm60_worst_end"
 };
 
 const json::object& canonical_metric_schema() {
@@ -181,7 +185,7 @@ json::value normalize_pool_override_identity_value(
         return normalized;
     }
     const bool textual =
-        field == "tag" || field == "kind" || field == "policy";
+        field == "tag" || field == "kind" || field == "policy" || field == "block_hash";
     if (!textual && arb::pools::is_number_or_string(value)) {
         return json::value(arb::canonical_float_string(
             arb::parse_input_double(value)));
@@ -410,7 +414,7 @@ private:
                 "user_swap_size_frac", "user_swap_thresh",
                 "enable_slippage_probes", "yb_releverage_fee",
                 "yb_cash_multiplier", "yb_min_net_profit_coin0", "yb_initial_state", "yb_mode", "event_cursor",
-                "yb_arb", "yb_execution_bps",
+                "yb_arb", "yb_execution_bps", "yb_self_touch", "yb_stable_aggregator",
                 "early_stop_max_7d_rel_price_diff"
             })) {
             write_frame(std::cout, make_error_frame(
@@ -543,6 +547,7 @@ private:
                 if (!std::isfinite(cfg.yb_execution_bps) || cfg.yb_execution_bps < RealT(0))
                     throw std::invalid_argument("yb_execution_bps must be finite and nonnegative");
             }
+            cfg.yb_self_touch = req.if_contains("yb_self_touch") && req.at("yb_self_touch").as_bool();
             cfg.enable_slippage_probes =
                 req.if_contains("enable_slippage_probes") &&
                 req.at("enable_slippage_probes").as_bool();
@@ -572,6 +577,34 @@ private:
                 throw std::invalid_argument("yb_min_net_profit_coin0 must be finite and nonnegative");
             cfg.yb_cash_multiplier = static_cast<RealT>(
                 arb::get_double_opt(req, "yb_cash_multiplier", 1.0));
+            // {"t": [Unix seconds, strictly increasing], "price": [positive]}: the crvUSD aggregator price the LP oracle
+            // reads at each event (the last one observed strictly before it).
+            const auto parse_series = [&](const char* key, std::vector<uint64_t>& times, std::vector<double>& prices) {
+                const auto* series = req.if_contains(key);
+                if (series == nullptr || series->is_null()) return;
+                if (cfg.event_cursor != EventCursor::Scalar)
+                    throw std::invalid_argument(std::string(key) + " requires event_cursor='scalar'");
+                const auto* obj = series->if_object();
+                const auto* ts = obj ? obj->if_contains("t") : nullptr;
+                const auto* px = obj ? obj->if_contains("price") : nullptr;
+                if (!ts || !px || !ts->is_array() || !px->is_array() || obj->size() != 2 ||
+                    ts->as_array().size() != px->as_array().size() || ts->as_array().empty())
+                    throw std::invalid_argument(std::string(key) + " must be {t: [...], price: [...]} of equal nonzero length");
+                for (size_t k = 0; k < ts->as_array().size(); ++k) {
+                    const auto& t = ts->as_array()[k];
+                    if (!t.is_uint64() && !(t.is_int64() && t.as_int64() >= 0))
+                        throw std::invalid_argument(std::string(key) + " t must be nonnegative integers");
+                    const uint64_t tv = t.is_uint64() ? t.as_uint64() : static_cast<uint64_t>(t.as_int64());
+                    const double pv = arb::parse_input_double(px->as_array()[k]);
+                    if ((!times.empty() && tv <= times.back()) || !std::isfinite(pv) || !(pv > 0.0))
+                        throw std::invalid_argument(std::string(key) + " needs increasing t and positive prices");
+                    times.push_back(tv);
+                    prices.push_back(pv);
+                }
+            };
+            parse_series("yb_stable_aggregator", cfg.yb_aggregator_ts, cfg.yb_aggregator_price);
+            if (!cfg.yb_aggregator_ts.empty() && cfg.yb_mode != YbMode::Active2l)
+                throw std::invalid_argument("yb_stable_aggregator requires yb_mode='active_2l'");
             if (const auto* initial = req.if_contains("yb_initial_state");
                 initial != nullptr && !initial->is_null()) {
                 cfg.yb_initial_state = arb::harness::parse_yb_initial_state<RealT>(*initial);

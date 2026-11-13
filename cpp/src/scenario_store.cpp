@@ -48,8 +48,9 @@ void ScenarioStore<T>::load(
     }
     std::vector<arb::Candle> candles;
     std::vector<arb::price_feeds::PriceFeedPoint> feed_points;
+    arb::price_feeds::ReportBankSpec bank;  // research: a report bank, set below once the events exist
     if (!price_feed_path.empty()) {
-        feed_points = arb::price_feeds::load_price_feed_csv(price_feed_path);
+        feed_points = arb::price_feeds::load_price_feed_csv(price_feed_path, &bank);
         feed_points.erase(std::remove_if(feed_points.begin(), feed_points.end(), [&](const auto& point) {
             return excluded(point.ts);
         }), feed_points.end());
@@ -69,6 +70,9 @@ void ScenarioStore<T>::load(
 
     scenario.id = scenario_id;
     scenario.candles = std::move(candles);
+    scenario.events.report_bank_period_s = bank.period_s;
+    scenario.events.report_rate_ts = std::move(bank.rate_ts);
+    scenario.events.report_rate = std::move(bank.rate);
     for (const auto& report : feed_points) {
         scenario.events.report_ts.push_back(report.ts);
         scenario.events.report_prices.push_back(report.price);

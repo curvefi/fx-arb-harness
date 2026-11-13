@@ -133,7 +133,14 @@ and `volume` float64 `[N, 3]`, the base volume traded in `[B + o - 12, B + o)`.
 - **Events:** one per block `B` within `[start_time, end_time]` whose row window
   `[B - 12, B + 4)` avoids every exclusion, timestamped `B` and priced
   `P(B + d)`. Trace candles are synthetic.
-- **YieldBasis:** `active_2l` acts after native arbitrage at the same event price.
+- **Trade price:** an optional `arb_price` float64 `[N]` (positive or NaN) is the
+  price at which the native arbitrageur and `active_2l` trade at that block, for
+  example the asset in the pool's stablecoin; NaN means neither trades there.
+  Marks, fee valuation and metrics keep `P(B + d)`.
+- **Rate oracle:** optional `oracle_live`, `oracle_cached`, `oracle_cached_ts`
+  (float64 `[N]`) and `oracle_rule` (float64 `[3]`), all four or none; see
+  **Rate oracle** below.
+- **YieldBasis:** `active_2l` acts after native arbitrage at the same trade price.
 
 **Entry threshold.** `pool.costs.entry_edge_bps` (default 1.5) admits native
 arbitrage at an event only when the first unit's fee-inclusive edge against the
@@ -174,7 +181,8 @@ has touched the pool yet.
 
 `yb_mode` is `off` or `active_2l`.
 - `active_2l` uses `yb_releverage_fee` and `yb_cash_multiplier`, evaluates
-  after native arbitrage at every event, and hedges at the event price.
+  after native arbitrage at every event, and hedges at the trade price (the event
+  price unless a block tape gives `arb_price`).
 - Native CEX fees and gas are not charged to the YB actor.
 - `yb_arb` is `levamm` (default: `active_2l` trades the fee-paying LEVAMM exchange) or `none` (it never trades).
 - Summary valuation is hourly for GM accounting and once at the final endpoint
@@ -183,6 +191,11 @@ has touched the pool yet.
 `yb_execution_bps` (default 5) makes `active_2l` value coin 1 at the event price
 minus/plus that many bp (bid/ask): it closes short of the LEVAMM fee-band edge.
 Each event admits at most one fill, with no cap on its size.
+
+`yb_self_touch` (default false): without a fill at the pool as it stands, `active_2l`
+first touches the pool (a tick without a report) in a block nobody touched yet, when
+the price-scale step that touch asks for would open a fill. The touch is undone unless
+a fill follows. The metric `yb_touch_fires` counts those fills.
 
 `yb_min_net_profit_coin0` is a finite nonnegative session setting, default 1.0.
 `active_2l` fills must clear it. Full-trace effective inputs expose
@@ -194,15 +207,29 @@ a complete object with provenance fields `source_block`, `source_timestamp`, and
 `rate_mul`, `rate_time`, `minted`, `redeemed`, `stable_balance`,
 `lt_stable_balance`, and `killed`; and `stable_aggregator` and
 `lt_donation_discount`. `active_2l` multiplies its LP oracle by
-`stable_aggregator` (CryptopoolLPOracle: LP price times the crvUSD aggregator,
-held at its seed value; 1 for fresh
-initialization). Quantities
+`stable_aggregator` (CryptopoolLPOracle: LP price times the crvUSD aggregator;
+1 for fresh initialization), held at its seed value unless
+`yb_stable_aggregator` or a block tape's rate oracle sets it. Quantities
 are human-unit finite binary64 values. `debt` and `rate_mul` are the stored AMM
 values at `rate_time`, rather than projected getters. When the checkpoint is
 applied, its source block and timestamp must equal the native pool
 `historical_state`; `rate_time` may not be later than the source timestamp.
 Leverage is fixed at 2 and safety ratios are derived from it. Stable cash may
 be zero.
+
+`yb_stable_aggregator` (optional, `active_2l` and `event_cursor="scalar"` only) is
+`{"t": [...], "price": [...]}` with strictly increasing integer Unix seconds and
+positive prices: at each event the LP oracle reads the last price observed
+strictly before it. It cannot be combined with a block tape's rate oracle.
+
+A pool template's `historical_state.policy_state` may also carry `xp` (two
+entries) and `D`, a report policy's committed geometry, and `report_price` with
+`report_timestamp`, its stored report. Absent, the policy keeps the geometry the
+pool initialized and no stored report.
+
+`early_stop_max_7d_rel_price_diff` (default 0: off) stops a run at the first
+event where the worst 7-day mean relative gap between price scale and event
+price exceeds it; `early_stop_ts` records that time.
 
 With `active_2l`, the historical `fee` is authoritative. An explicitly supplied
 conflicting `yb_releverage_fee`, including a candidate override, is rejected; an
@@ -258,9 +285,17 @@ only the selected executed branch can update report memory. Repeated or older
 publications cannot replace the cached reference. Newly supplied reports still
 pass the admission-age check (12 s); cached reports expire at `relax_time_s`.
 Reports may come from an independent `price_feed_path`: CSV, or numeric NPZ
-with exactly `ts` (int64/float64 Unix seconds) and `price` (float64). The NPZ
+with `ts` (int64/float64 Unix seconds) and `price` (float64). The NPZ
 reader preserves observation timestamps and requires positive prices and strictly
 increasing timestamps. It shares the portable MiniZip/NPY decoder with block tapes.
+
+An NPZ feed may add `rate_ts` and `rate` (float64, equal length, strictly
+increasing times, positive rates) with a float64 scalar `bank_period_s`, all
+three together: a report bank. Each newer delivered report is stored with the
+latest rate sample strictly before its delivery block, and the pool reads the
+bank's latest report times the rate's exponential average (e-folding time
+`bank_period_s`) projected to the block, for the fee terms and the price scale
+alike. The policy's stored report is rewritten from the bank at every block.
 
 `pool.run.arb_report_max_age_s = 0` selects the latest independent report at or
 before the event, retaining its actual age even across feed gaps. If no independent
@@ -309,7 +344,10 @@ Only the winning committed swap writes the reference; idle events do not refresh
 it. Ties retain the withholding action when it was considered first.
 `K = 2000 + L` (`L` in `[0, 23]`) offers every report published in
 `[event - 12 s, event + L s]`; the arb sizes each and keeps the most profitable
-(the rational report-picking arb). Offsets `1000` through `1999` are rejected.
+(the rational report-picking arb). `K = 3000 + L` offers the latest report at
+or before the event plus every report published in `(event, event + L s]`, so
+`3000` equals `0`. Offsets `1000` through `1999` and `2024` through `2999` are
+rejected.
 
 `pool.run.keeper_report` selects a report keeper, a touch that carries the latest
 report: `0` (default) none, report-less idle touches only; `2` makes the due idle
@@ -320,13 +358,21 @@ or the last pool touch is `dustswap_freq_s` old, or once the latest report has
 moved the policy's fallback fee from the stored one,
 `|ln(latest / stored)| >= fallback_fee`. Mode `3` carries only a report the
 policy admits: newer than the stored one, observed within
-`[block - 12 s, block + 6 s]`.
+`[block - 12 s, block + 6 s]`. With a report bank, mode `3` delivers to the bank
+once the bank's report is `dustswap_freq_s` old (or absent), on any block; its
+dust touch needs an untouched block, and the fallback-fee move trigger is off.
+
+`pool.run.end_timestamp` (a positive integer below 2^53, not before the run start)
+ends a candidate's run: events after it are not processed and the run's metrics
+end at the last event at or before it. `pool.run.yb_initial_state` replaces the
+session's `yb_initial_state` for that candidate (the same object).
 
 The `report_lean` policy uses nine parameters: base fee, capture, fallback fee,
 relax time, fast and slow EMA half-lives, trend gate, step cap and report
 lifetime. A touch's price-scale observation is the report (the one submitted
 with the touch, else the stored one) while its age is below the report lifetime,
-else the pool's `last_prices`; lifetime `0` never uses a report, and a negative
+else the pool's spot stored by the previous update; it is clamped to
+`[scale / 2, 2 scale]`. Lifetime `0` never uses a report, and a negative
 lifetime uses only a report submitted with the touch.
 Its fee component computes `q = min(F, base + capture*max(edge-base,0))`, then
 `(1-w)*q + w*F` with `w = sqrt(clamp(age / relax, 0, 1))`. No usable reference, a
@@ -414,6 +460,49 @@ from the loop start, sampled on the `apy_net_gm` hourly clock. Its endpoint is
 `xcp_growth_apy`; unlike `lp_xcp_profit`, it falls when toward-spot steps burn
 seeded donation shares. `xcp_apy_gm30_60_90` is the cube root of
 `xcp_apy_gm30 * xcp_apy_gm60 * xcp_apy_gm90`, or `-1` unless all three are positive.
+
+### YieldBasis book valuation at par
+
+`yb_apy_par` and `yb_final_growth_par` value the same recorded collateral and
+projected debt with the LP oracle divided by the actor's live crvUSD aggregator.
+The nonlinear YB valuation is recomputed before normalization and rolling returns;
+neither APY nor growth is simply divided by the rate. Each series uses its own
+initial mark and the existing price-scale/leverage normalization.
+
+`yb_apy_par_gm30`, `yb_apy_par_gm60`, `yb_apy_par_gm90` and the `yb_apy_par_gm`
+90-day alias use the original YB hourly sampling clock and window rules. Matching
+`30/60/90_floor_share`, `30/60/90_worst`, and `60_worst_end` suffixes are exposed
+under the `yb_apy_par_gm` prefix. APY/final growth also sample the run endpoint,
+without adding an extra rolling window.
+
+`yb_par_valid` is 1 for an initialized, valid par mark; 0 if active YB has not
+initialized or a nonpositive/nonfinite sampled mark has occurred; and -1 when YB is off.
+An invalid par mark is permanent for that run: all par return summaries become
+unavailable (-1, with worst-window end 0), rather than silently skipping the loss
+or rebasing later. A valid mark can still have unavailable rolling metrics until
+their full window exists. These diagnostic metrics do not change trades, actor
+state, gap/stop gates, or the existing book metrics. They are a current-state
+valuation at crvUSD = 1, not a forecast of future redemption value.
+
+Full traces also carry `yb_growth_par` and `yb_par_valid` at each recorded row.
+The growth is the online tracker's normalized series, not rebased to the first
+displayed row. Traces also carry `yb_lt_stable_balance` (pending LT cash) and
+`yb_stable_aggregator` (the aggregator price the LP oracle read). Without an
+event feed (always in block mode), `p_price_feed` carries the report bank's rate
+average, or else the policy's stored report times its driver ratio (0 without one).
+
+### Rate oracle
+
+A block tape's rate oracle models a cached crvUSD rate that a report delivery
+reads. At each block the cache is the newer of this run's own write and the
+cache other writers left (`oracle_cached`, written at `oracle_cached_ts`). A
+delivery reads the cache unless it is older than the age limit: `oracle_rule[0]`
+seconds while the cached rate is within `oracle_rule[2]` of 1, `oracle_rule[1]`
+seconds otherwise. Then it reads `oracle_live`, which is stored once a report is
+actually delivered (`oracle_refreshes` counts these). An `active_2l` fill also
+writes the live value; the first write in a block stands. The policy's fee terms
+read reports divided by the rate; the price-scale driver observes the undivided
+report. The `active_2l` LP oracle follows `oracle_live` at every event.
 
 ### Report-selection diagnostics
 

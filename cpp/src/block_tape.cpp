@@ -42,8 +42,14 @@ BlockTape load_block_tape(const std::string& path) {
     if (std::filesystem::path(path).extension() != ".npz")
         throw std::invalid_argument("block tape requires NPZ; build it with data/market/build_block_tape.py");
     auto arrays = io::read_arrays(path, {"format_version.npy", "t0.npy", "block_s.npy",
-        "price_offsets_s.npy", "volume_offsets_s.npy", "price.npy", "volume.npy"});
-    if (arrays.size() != 7) invalid("missing arrays");
+        "price_offsets_s.npy", "volume_offsets_s.npy", "price.npy", "volume.npy", "arb_price.npy",
+        "oracle_live.npy", "oracle_cached.npy", "oracle_cached_ts.npy", "oracle_rule.npy"});
+    const bool has_arb = arrays.count("arb_price.npy") > 0;
+    const size_t oracle = arrays.count("oracle_live.npy") + arrays.count("oracle_cached.npy") +
+                          arrays.count("oracle_cached_ts.npy") + arrays.count("oracle_rule.npy");
+    if (oracle != 0 && oracle != 4) invalid("oracle arrays");
+    const size_t optional = has_arb + oracle;
+    if (arrays.size() != 7u + optional) invalid("missing arrays");
     if (scalar(arrays.at("format_version.npy"), "<u4", 4) != 1) invalid("format_version");
     BlockTape tape;
     tape.t0 = scalar(arrays.at("t0.npy"), "<i8", 8);
@@ -66,6 +72,29 @@ BlockTape load_block_tape(const std::string& path) {
         for (const double v : tape.volume[k])
             if (!(std::isfinite(v) && v >= 0)) invalid("volume");
     }
+    if (has_arb) {
+        const auto& arb = arrays.at("arb_price.npy");
+        if (arb.dtype != "<f8" || arb.shape != std::vector<size_t>{n}) invalid("arb_price");
+        tape.arb_price.resize(n);
+        std::memcpy(tape.arb_price.data(), arb.data(), n * sizeof(double));
+        for (const double p : tape.arb_price)
+            if (!std::isnan(p) && !(std::isfinite(p) && p > 0)) invalid("arb_price");
+    }
+    // A finite array of `count` doubles, positive unless `zero_ok`.
+    const auto column = [&](const char* name, std::vector<double>& out, size_t count, bool zero_ok) {
+        const auto found = arrays.find(std::string(name) + ".npy");
+        if (found == arrays.end()) return;
+        const auto& a = found->second;
+        if (a.dtype != "<f8" || a.shape != std::vector<size_t>{count}) invalid(name);
+        out.resize(count);
+        std::memcpy(out.data(), a.data(), count * sizeof(double));
+        for (const double q : out)
+            if (!(std::isfinite(q) && (q > 0 || (zero_ok && q == 0)))) invalid(name);
+    };
+    column("oracle_live", tape.oracle_live, n, false);
+    column("oracle_cached", tape.oracle_cached, n, false);
+    column("oracle_cached_ts", tape.oracle_cached_ts, n, false);
+    column("oracle_rule", tape.oracle_rule, 3, true);
     return tape;
 }
 
@@ -99,9 +128,16 @@ EventSoA gen_block_events(
         for (size_t d = 0; d < events.p_cex_delay.size(); ++d)  // a delay with no price yet takes the session's
             events.p_cex_delay[d].push_back(price[d] > 0 ? price[d] : seen);
         events.volume.push_back(volume);
+        if (!tape.arb_price.empty()) events.p_arb.push_back(tape.arb_price[k]);
+        if (!tape.oracle_live.empty()) {
+            events.oracle_live.push_back(tape.oracle_live[k]);
+            events.oracle_cached.push_back(tape.oracle_cached[k]);
+            events.oracle_cached_ts.push_back(tape.oracle_cached_ts[k]);
+        }
         events.candle_idx.push_back(static_cast<uint32_t>(candles.size()));
         candles.push_back({ts, price[0] > 0 ? price[0] : seen, high, low, seen, volume});
     }
+    events.oracle_rule = tape.oracle_rule;
     return events;
 }
 

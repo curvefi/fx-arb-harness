@@ -266,7 +266,9 @@ class EvaluatorClient:
         yb_min_net_profit_coin0: Optional[float] = None,
         yb_arb: str = "levamm",
         yb_execution_bps: Optional[float] = None,
+        yb_self_touch: Optional[bool] = None,
         yb_initial_state: Optional[Union[YbInitialState, Dict[str, Any]]] = None,
+        yb_stable_aggregator: Optional[Dict[str, Any]] = None,
         event_mode: str = "candles",
         block_tape_path: Optional[Union[str, Path]] = None,
         arb_settle_offset_s: Optional[int] = None,
@@ -325,7 +327,9 @@ class EvaluatorClient:
                 yb_min_net_profit_coin0=yb_min_net_profit_coin0,
                 yb_arb=yb_arb,
                 yb_execution_bps=yb_execution_bps,
+                yb_self_touch=yb_self_touch,
                 yb_initial_state=yb_initial_state,
+                yb_stable_aggregator=yb_stable_aggregator,
                 early_stop_max_7d_rel_price_diff=early_stop_max_7d_rel_price_diff,
             )
 

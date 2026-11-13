@@ -2,9 +2,11 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 #include "harness/metrics.hpp"
+#include "harness/yb_2l_apy.hpp"
 
 namespace {
 
@@ -19,9 +21,80 @@ void require(bool condition, const char* msg) {
     }
 }
 
+struct MarkPool { double cached_price_scale{1}; };
+struct MarkActor {
+    struct State {
+        double collateral{1}, debt{0.5}, lev_ratio{4.0/9}, leverage{2}, stable_aggregator{1};
+    } values;
+    const State& state() const { return values; }
+    double lp_oracle(const MarkPool& pool) const {
+        return std::sqrt(pool.cached_price_scale) * values.stable_aggregator;
+    }
+    double projected_debt(uint64_t) const { return values.debt; }
+};
+
+void par_mark_matches_book_at_one() {
+    MarkPool pool;
+    MarkActor actor;
+    arb::harness::Yb2LApyTracker<double> book, par;
+    arb::harness::RollingGeoApy<double> book_gm, par_gm;
+    for (uint64_t hour = 0; hour <= 96*24; ++hour) {
+        actor.values.collateral = std::exp(double(hour) * 1e-5);
+        book.sample(pool, actor, hour*3600);
+        par.sample_par(pool, actor, hour*3600);
+        require(par.valid() && par.growth() == book.growth(), "par mark must equal book when rate is one");
+        book_gm.sample(hour*3600, book.growth());
+        par_gm.sample(hour*3600, par.growth());
+    }
+    require(par.apy() == book.apy() && par.final_growth() == book.final_growth(), "par endpoints differ at rate one");
+    const auto a = book_gm.summary(), b = par_gm.summary();
+    require(a.gm30 == b.gm30 && a.gm60 == b.gm60 && a.gm90 == b.gm90 &&
+            a.floor_share30 == b.floor_share30 && a.floor_share60 == b.floor_share60 && a.floor_share90 == b.floor_share90 &&
+            a.worst30 == b.worst30 && a.worst60 == b.worst60 && a.worst90 == b.worst90 && a.worst60_end == b.worst60_end,
+            "par rolling family differs at rate one");
+}
+
+void par_mark_removes_only_the_mark_and_latches_invalidity() {
+    MarkPool pool;
+    MarkActor actor;
+    arb::harness::Yb2LApyTracker<double> par;
+    uint64_t ts = 0;
+    // Initial rate need not be one; changing only the mark cannot create returns.
+    for (double rate : {0.98, 0.90, 1.02, 1.0}) {
+        actor.values.stable_aggregator = rate;
+        par.sample_par(pool, actor, ts);
+        require(par.valid() && par.growth() == 1, "par normalization or fixed-state rate neutrality failed");
+        require(actor.values.stable_aggregator == rate, "par sampler mutated the actor rate");
+        ts += 3600;
+    }
+    const auto healthy = par;
+    actor.values.collateral = 0.99;
+    par.sample_par(pool, actor, ts);
+    require(near(par.growth(), 0.979789380293346), "par mark hid a collateral loss");
+    auto debt_loss = healthy;
+    actor.values.collateral = 1;
+    actor.values.debt = 0.505;
+    debt_loss.sample_par(pool, actor, ts);
+    require(near(debt_loss.growth(), 0.9897915761656364), "par mark hid accrued debt");
+    for (int failure = 0; failure < 3; ++failure) {
+        actor.values.debt = failure == 2 ? 1.0 : 0.5;
+        actor.values.stable_aggregator = failure == 0 ? 0.0 : failure == 1 ? std::numeric_limits<double>::quiet_NaN() : 1.0;
+        auto invalid = healthy;
+        invalid.sample_par(pool, actor, ts);
+        require(invalid.invalid() && !invalid.valid(), "invalid par value was accepted");
+        actor.values.debt = 0.5;
+        actor.values.stable_aggregator = 1;
+        invalid.sample_par(pool, actor, ts+3600);
+        require(invalid.invalid() && invalid.growth() == -1 && invalid.final_growth() == -1 && invalid.apy() == -1,
+                "par metric recovered by silently discarding an invalid sample");
+    }
+}
+
 } // namespace
 
 int main() {
+    par_mark_matches_book_at_one();
+    par_mark_removes_only_the_mark_and_latches_invalidity();
     // Coin0 cash and coin1 token units, with a coin0/coin1 external mark.
     // Initial inventory is 100 cash + 2 tokens; at price 100, hold is 300.
     using arb::harness::pool_nav_vs_hold;

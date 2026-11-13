@@ -24,6 +24,9 @@ struct BlockTape {
     uint64_t block_s{};
     std::vector<std::array<double, BLOCK_PRICE_OFFSETS>> price;
     std::vector<std::array<double, BLOCK_VOLUME_OFFSETS>> volume;
+    std::vector<double> arb_price;  // optional (arb_price.npy): the actors' trade price per block, see EventSoA::p_arb
+    // optional, together (oracle_*.npy): a rate oracle read at report delivery, see EventSoA::oracle_live
+    std::vector<double> oracle_live, oracle_cached, oracle_cached_ts, oracle_rule;
 
     size_t blocks() const { return price.size(); }
 };
@@ -36,7 +39,8 @@ BlockTape load_block_tape(const std::string& path);
 // carries the CEX state at B + delay_s, when the arbitrageur's information ends:
 // price P(B + delay_s) and volume V(B + delay_s). Each event gets a synthetic
 // candle (open P(B), high/low over the row's prices, close the event price). p_cex_delay keeps P(B + d) for
-// d = 0, 1, 2 s, so a run may price its events at its own delay (RunConfig::arb_settle_offset_s).
+// d = 0, 1, 2 s, so a run may price its events at its own delay (RunConfig::arb_settle_offset_s). A tape with
+// arb_price gives each event its row's value as p_arb, and one with the oracle arrays its rate oracle.
 EventSoA gen_block_events(
     const BlockTape& tape, size_t delay_s, std::vector<Candle>& candles,
     uint64_t start_ts, uint64_t end_ts, const TimeRanges& excluded);

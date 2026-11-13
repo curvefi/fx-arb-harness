@@ -51,6 +51,8 @@ struct Yb2LCosts {
     std::array<T, 2> execution_bps{T(5), T(5)};
     // A fill must clear this net coin0 profit (session yb_min_net_profit_coin0).
     T min_profit_coin0{T(YB_2L_MIN_PROFIT_COIN0)};
+    // Without a fill at the pool as it stands, the actor may touch the pool first (session yb_self_touch).
+    bool self_touch{false};
 };
 
 template <typename T>
@@ -67,6 +69,7 @@ struct Yb2LResult {
     size_t fill_adds{0};
     size_t fill_removes{0};
     size_t fill_add_price_scale_moves{0};
+    bool touched{false};  // the fill followed the actor's own pool touch
 };
 
 template <typename T>
@@ -153,10 +156,16 @@ public:
 
     bool enabled() const { return enabled_; }
     const State& state() const { return state_; }
+    // The aggregator price the LP oracle reads (AGG.price()); returns whether it changed.
+    bool set_stable_aggregator(const T& price) {
+        if (state_.stable_aggregator == price) return false;
+        state_.stable_aggregator = price;
+        return true;
+    }
 
     template <typename Pool>
     T lp_oracle(const Pool& pool) const {
-        // CryptopoolLPOracle.price(): the LP price times the seeded aggregator.
+        // CryptopoolLPOracle.price(): the LP price times the aggregator.
         const T sqrt_scale = std::sqrt(pool.cached_price_scale * one());
         return T(2) * pool.get_virtual_price() * sqrt_scale / one() * state_.stable_aggregator / one();
     }
@@ -192,13 +201,14 @@ public:
         uint64_t from{0}, to{0};
         T lo{}, hi{};
     };
+    // oracle_lo and oracle_hi scale the LP oracle on the bid and the ask side.
     template <typename Pool>
     NoTradeBand no_trade_band(const Pool& pool, const T& price, uint64_t from, uint64_t to,
-                              const Costs& costs) const {
+                              const Costs& costs, const T& oracle_lo = T(1), const T& oracle_hi = T(1)) const {
         NoTradeBand band{false, from, to, T(0), T(0)};
         if (!enabled_ || state_.killed || from < state_.rate_time || to < from) return band;
-        const auto early = marginal_quote(pool, T(1), from, costs);
-        const auto late = marginal_quote(pool, T(1), to, costs);
+        const auto early = marginal_quote(pool, T(1), from, costs, oracle_hi);
+        const auto late = marginal_quote(pool, T(1), to, costs, oracle_lo);
         if (early.hard_abstain || late.hard_abstain) return band;
         const T factor = one() - state_.fee;
         // At unit external price the quote's bid and ask are the per-price execution factors.
@@ -211,6 +221,59 @@ public:
         band.hi = hi - std::fabs(hi) * T(1e-9);
         band.valid = band.lo < band.hi;
         return band;
+    }
+
+    // The scale a pool touch at `timestamp` would ask for: the policy's target through the actuator, before the pool's
+    // profit gates. The current scale in a block already touched.
+    template <typename Pool>
+    static T touch_scale(const Pool& pool, uint64_t timestamp) {
+        if (!(pool.last_timestamp < timestamp)) return pool.cached_price_scale;
+        const T oracle = pool.projected_price_oracle_at(timestamp);
+        auto policy = pool.policy;
+        T target{};
+        if (policy.kind != pools::twocrypto_fx::PolicyKind::None) {
+            policy.prepare_price_scale_call(timestamp, oracle);
+            target = policy.get_price_scale();
+        }
+        return pools::twocrypto_fx::preview_price_scale_actuator(
+            target, oracle, pool.cached_price_scale, one(), pool.adjustment_step_min, pool.adjustment_step_max).p_new;
+    }
+
+    // The largest relative effect of a price-scale step on the virtual price, per unit of step.
+    template <typename Pool>
+    static T touch_slack(const Pool& pool) {
+        return T(4) * std::fabs(pool.last_prices / pool.cached_price_scale - one()) + T(1e-3);
+    }
+
+    // Whether the actor touches the pool before it decides: the LEVAMM price leaves the fee band at the LP oracle of the
+    // scale the touch asks for, with the virtual price anywhere within the step's largest effect on it. A marginal test
+    // (may_trade's) at each side's extreme, so a size or safety limit there cannot hide a fill; try_fire sizes after the
+    // touch. A quote that abstains at an extreme leaves the touch to decide.
+    template <typename Pool>
+    bool touch_may_fill(const Pool& pool, const T& external_cex_price, uint64_t timestamp, const Costs& costs) const {
+        if (!costs.self_touch || !enabled_ || state_.killed || timestamp < state_.rate_time) return false;
+        const T scale = pool.cached_price_scale, to = touch_scale(pool, timestamp);
+        if (to == scale) return false;
+        const T slack = std::fabs(to / scale - one()) * touch_slack(pool);
+        const T shift = std::sqrt(to / scale);
+        const auto outside = [&](const T& oracle_factor, bool bid) {
+            const auto q = marginal_quote(pool, external_cex_price, timestamp, costs, oracle_factor);
+            if (q.hard_abstain) return true;
+            const T raw = q.x / state_.collateral, factor = one() - state_.fee;
+            if (!std::isfinite(raw) || !std::isfinite(q.fair_bid) || !std::isfinite(q.fair_ask)) return true;
+            return bid ? raw / factor < q.fair_bid : raw * factor > q.fair_ask;
+        };
+        return outside(shift * (one() - slack), true) || outside(shift * (one() + slack), false);
+    }
+
+    // Prices where touch_may_fill is false at every timestamp in [from, to] for the current pool and actor state: the
+    // no-trade band at the LP oracles of the largest step a touch can make each way. Invalid without self_touch.
+    template <typename Pool>
+    NoTradeBand no_touch_band(const Pool& pool, uint64_t from, uint64_t to, const Costs& costs) const {
+        if (!costs.self_touch) return {};
+        const T step = pool.adjustment_step_max, slack = step * touch_slack(pool);
+        return no_trade_band(pool, T(1), from, to, costs, std::sqrt(one() - step) * (one() - slack),
+                             std::sqrt(one() + step) * (one() + slack));
     }
 
     template <typename Pool>
@@ -233,9 +296,9 @@ public:
         Decision decision = compute_decision(
             pool, external_cex_price, timestamp, costs
         );
-        if (decision.hard_abstain || decision.chosen_idx < 0) return result;
-        FillProposal chosen = decision.chosen_idx == 0
-            ? decision.p2 : decision.p1;
+        if (decision.hard_abstain) return result;
+        const bool touch = decision.chosen_idx < 0;
+        if (touch && !touch_may_fill(pool, external_cex_price, timestamp, costs)) return result;
 
         const T real_circulating = pool.totalSupply - pool.donation_shares
             - PoolTraits::MINIMUM_LIQUIDITY();
@@ -252,6 +315,25 @@ public:
             *this = std::move(pre_attempt_actor);
             result.fired = false;
         };
+
+        if (touch) {
+            const T scale_before = pool.cached_price_scale;
+            try {
+                pool.tick();
+            } catch (...) {
+                rollback_route();
+                return result;
+            }
+            decision = compute_decision(pool, external_cex_price, timestamp, costs);
+            if (decision.hard_abstain || decision.chosen_idx < 0) {
+                rollback_route();
+                return result;
+            }
+            result.touched = true;
+            result.fill_add_price_scale_moves += pool.cached_price_scale != scale_before;
+        }
+        FillProposal chosen = decision.chosen_idx == 0
+            ? decision.p2 : decision.p1;
 
         if (chosen.direction == 1) {
             const auto first_add = add_liquidity_to_mint(
@@ -452,11 +534,12 @@ private:
         const Pool& pool,
         const T& external_cex_price,
         uint64_t timestamp,
-        const Costs& costs
+        const Costs& costs,
+        const T& oracle_factor = T(1)
     ) const {
         MarginalQuote decision;
         const T debt = projected_debt(timestamp);
-        const T oracle = lp_oracle(pool);
+        const T oracle = lp_oracle(pool) * oracle_factor;
         decision.oracle = oracle;
         const auto old_x0 = x0(oracle, state_.collateral, debt, false);
         if (!old_x0.has_value()) {

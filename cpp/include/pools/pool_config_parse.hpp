@@ -14,6 +14,7 @@
 #include <boost/json.hpp>
 
 #include "core/json_utils.hpp"
+#include "harness/yb_initial_state.hpp"
 #include "pools/pool_init.hpp"
 #include "pools/twocrypto_fx/twocrypto.hpp"
 #include "trading/costs.hpp"
@@ -178,7 +179,8 @@ PoolHistoricalState<T> parse_historical_state(const boost::json::value& value) {
     if (const auto* policy = obj.if_contains("policy_state")) {
         if (!policy->is_object()) throw std::runtime_error("pool historical_state policy_state must be an object");
         const auto& p = policy->as_object();
-        reject_unknown_fields(p, {"last_update_ts", "last_prices", "fast_ema", "slow_ema", "price_scale"},
+        reject_unknown_fields(p, {"last_update_ts", "last_prices", "fast_ema", "slow_ema", "price_scale",
+                                  "xp", "D", "report_price", "report_timestamp"},
                               "pool historical_state policy_state");
         state.has_policy_state = true;
         state.policy_last_update_ts = get_u64_opt(p, "last_update_ts", 0);
@@ -188,6 +190,24 @@ PoolHistoricalState<T> parse_historical_state(const boost::json::value& value) {
         state.policy_price_scale = parse_historical_wad<T>(required_historical_field(p, "price_scale"));
         if (state.policy_last_update_ts > state.source_timestamp)
             throw std::runtime_error("pool historical_state policy_state is later than its source");
+        if (p.if_contains("xp") != nullptr || p.if_contains("D") != nullptr) {
+            const auto& raw = required_historical_field(p, "xp");
+            if (!raw.is_array() || raw.as_array().size() != 2)
+                throw std::runtime_error("pool historical_state policy_state xp must have exactly two entries");
+            const auto& arr = raw.as_array();
+            state.policy_xp = {parse_historical_wad<T>(arr[0]), parse_historical_wad<T>(arr[1])};
+            state.policy_D = parse_historical_wad<T>(required_historical_field(p, "D"));
+            if (!(state.policy_xp[0] > T(0)) || !(state.policy_xp[1] > T(0)) || !(state.policy_D > T(0)))
+                throw std::runtime_error("pool historical_state policy_state xp and D must be positive");
+            state.has_policy_geometry = true;
+        }
+        if (p.if_contains("report_price") != nullptr || p.if_contains("report_timestamp") != nullptr) {
+            state.policy_report_price = parse_historical_wad<T>(required_historical_field(p, "report_price"));
+            state.policy_report_timestamp = parse_historical_plain<double>(required_historical_field(p, "report_timestamp"));
+            if (!(state.policy_report_price > T(0)) || !(state.policy_report_timestamp > 0))
+                throw std::runtime_error("pool historical_state policy_state report must be positive");
+            state.has_policy_report = true;
+        }
     }
     if (state.source_timestamp == 0 || state.last_timestamp == 0) {
         throw std::runtime_error("pool historical_state requires nonzero source_timestamp and last_timestamp");
@@ -437,6 +457,8 @@ struct PoolOverride {
     std::optional<T> arb_report_offset{};
     std::optional<T> arb_settle_offset_s{};
     std::optional<T> keeper_report{};
+    std::optional<T> end_timestamp;
+    std::optional<arb::harness::YbInitialState<T>> yb_initial_state;
     uint32_t pool_fields{0};
     uint32_t cost_fields{0};
 
@@ -487,6 +509,8 @@ struct PoolOverride {
         if (patch.yb_releverage_fee.has_value()) {
             yb_releverage_fee = patch.yb_releverage_fee;
         }
+        if (patch.end_timestamp.has_value()) end_timestamp = patch.end_timestamp;
+        if (patch.yb_initial_state.has_value()) yb_initial_state = patch.yb_initial_state;
     }
 };
 
@@ -541,7 +565,17 @@ PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
             throw std::runtime_error("candidate run override must be an object");
         }
         const auto& ro = run->as_object();
-        reject_unknown_fields(ro, {"yb_releverage_fee", "arb_report_rate", "arb_report_max_age_s", "arb_report_count", "arb_report_random_count", "arb_report_offset", "arb_settle_offset_s", "keeper_report"}, "candidate run override");
+        reject_unknown_fields(ro, {"yb_releverage_fee", "arb_report_rate", "arb_report_max_age_s", "arb_report_count", "arb_report_random_count", "arb_report_offset", "arb_settle_offset_s", "keeper_report", "end_timestamp", "yb_initial_state"}, "candidate run override");
+        if (auto* end = ro.if_contains("end_timestamp"); end != nullptr) {
+            const T value = parse_plain_real<T>(*end);
+            const double number = static_cast<double>(value);
+            if (!std::isfinite(number) || number <= 0 || number > 9007199254740991.0 || std::floor(number) != number)
+                throw std::runtime_error("end_timestamp must be a positive integer below 2^53");
+            out.end_timestamp = value;
+        }
+        if (auto* initial = ro.if_contains("yb_initial_state"); initial != nullptr) {
+            out.yb_initial_state = arb::harness::parse_yb_initial_state<T>(*initial);
+        }
         if (auto* keeper = ro.if_contains("keeper_report"); keeper != nullptr) {
             const T value = parse_plain_real<T>(*keeper);
             if (!(value == T(0) || value == T(2) || value == T(3))) throw std::runtime_error("keeper_report must be 0, 2 or 3");
@@ -571,9 +605,9 @@ PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
         if (auto* offset = ro.if_contains("arb_report_offset"); offset != nullptr) {
             const T value = parse_plain_real<T>(*offset);
             const double number = static_cast<double>(value);
-            if (!std::isfinite(number) || number < -1 || number > 2023 || std::floor(number) != number ||
-                (number >= 1000 && number < 2000))
-                throw std::runtime_error("arb_report_offset must be -1, an integer in [0, 999], or 2000 + lead with lead in [0, 23]");
+            if (!std::isfinite(number) || number < -1 || number > 3023 || std::floor(number) != number ||
+                (number >= 1000 && number < 2000) || (number > 2023 && number < 3000))
+                throw std::runtime_error("arb_report_offset must be -1, an integer in [0, 999], 2000 + lead or 3000 + lead with lead in [0, 23]");
             out.arb_report_offset = value;
         }
         if (auto* age = ro.if_contains("arb_report_max_age_s"); age != nullptr) {

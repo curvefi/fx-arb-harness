@@ -75,7 +75,10 @@ struct SessionConfig {
     T yb_min_net_profit_coin0{static_cast<T>(1.0)};
     arb::harness::YbArb yb_arb{arb::harness::YbArb::Levamm};
     T yb_execution_bps{static_cast<T>(5.0)};
+    bool yb_self_touch{false};
     std::optional<arb::harness::YbInitialState<T>> yb_initial_state;
+    std::vector<uint64_t> yb_aggregator_ts;
+    std::vector<double> yb_aggregator_price;
 
 };
 

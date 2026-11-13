@@ -39,13 +39,19 @@ public:
 
     template <typename Visit>
     void at_offset(double now, size_t offset, Visit visit, size_t event = NO_EVENT) const {
-        // 2000 + lead: every report in [now - 12 s, now + lead] (the rational arb picks the most profitable one).
+        // 2000 + lead: every report in [now - 12 s, now + lead]; 3000 + lead: the latest report at or before now and
+        // every report in (now, now + lead]. The rational arb picks the most profitable one.
         if (offset >= 2000) {
-            const double lead_s = static_cast<double>(offset - 2000);
-            auto last = upper(now, event);
+            const double lead_s = static_cast<double>(offset % 1000);
+            const auto at_now = upper(now, event);
+            auto last = at_now;
             while (last != events.report_ts.end() && *last <= now + lead_s) ++last;
-            auto first = last;
-            while (first != events.report_ts.begin() && *(first - 1) >= now - 12.0) --first;
+            auto first = at_now;
+            if (offset >= 3000) {
+                if (first != events.report_ts.begin()) --first;
+            } else {
+                while (first != events.report_ts.begin() && *(first - 1) >= now - 12.0) --first;
+            }
             for (auto it = first; it != last; ++it) {
                 const auto i = static_cast<size_t>(it - events.report_ts.begin());
                 visit(events.report_prices[i], *it);

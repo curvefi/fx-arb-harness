@@ -9,7 +9,10 @@ rule is random.
 - **One external price per event.** Every actor sees the same event price `P`.
   In block mode `P` is the external price `arb_settle_offset_s` seconds after
   the block timestamp. Standard setting: 1. A pool may take its own delay of
-  0, 1 or 2 seconds with `pool.run.arb_settle_offset_s`.
+  0, 1 or 2 seconds with `pool.run.arb_settle_offset_s`. A block tape may give
+  both actors a separate trade price (`arb_price`, for example in the pool's
+  stablecoin); then `P` below is that price, while marks and fee valuation keep
+  the event price.
 - **Order within an event.** The native arbitrageur acts first, then the
   YieldBasis actor, both at the same `P`.
 - **At most one trade per actor per event.**
@@ -63,6 +66,7 @@ does not use the native arbitrageur's costs.
 | --- | --- | --- |
 | `yb_execution_bps` | execution margin of the actor's external leg | 5 |
 | `yb_min_net_profit_coin0` | least net profit of a fill | 1 |
+| `yb_self_touch` | the actor may touch the pool before it decides | off |
 
 ## What the rules exclude
 

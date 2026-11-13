@@ -50,6 +50,14 @@ struct PoolHistoricalState {
     T policy_fast_ema{T(0)};
     T policy_slow_ema{T(0)};
     T policy_price_scale{T(0)};
+    // Optional committed geometry (xp at price_scale, D) and stored report of a report policy
+    // (YBOraclizedPolicy.state() and report()); absent, the policy keeps what the pool initialized.
+    bool has_policy_geometry{false};
+    std::array<T, 2> policy_xp{T(0), T(0)};
+    T policy_D{T(0)};
+    bool has_policy_report{false};
+    T policy_report_price{T(0)};
+    double policy_report_timestamp{0};
 };
 
 // Pool initialization parameters (floating-point, unit-scaled).

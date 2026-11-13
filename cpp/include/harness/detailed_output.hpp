@@ -54,6 +54,8 @@ struct DetailedEntry {
     uint64_t n_rebalances{0}; // cumulative rebalance count
     uint64_t yb_initialized{0}; // whether the online YB tracker has a valid state
     MetricF<T> yb_growth{0}; // online YB deposit growth after this event
+    MetricF<T> yb_growth_par{-1}; // online mark at crvUSD = 1, using the runner's initial state
+    double yb_par_valid{-1}; // -1 unavailable, 0 invalid/uninitialized, 1 valid
     MetricF<T> yb_fee{0};    // YB releverage fee applied at this event
     uint64_t yb_releverage_trades{0}; // cumulative online YB trade count
     T yb_stable_balance{};
@@ -61,6 +63,8 @@ struct DetailedEntry {
     T yb_collateral_lp{};
     T yb_lp_oracle{};
     T yb_lp_fair{};
+    T yb_lt_stable_balance{};  // pending LT cash
+    T yb_stable_aggregator{};  // aggregator price the LP oracle read
 };
 
 } // namespace harness

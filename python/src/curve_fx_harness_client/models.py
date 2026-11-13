@@ -109,7 +109,9 @@ class OpenSessionFrame(ProtocolModel):
     yb_min_net_profit_coin0: Optional[FiniteFloat] = Field(default=None, ge=0)
     yb_arb: Literal["levamm", "none"] = "levamm"
     yb_execution_bps: Optional[FiniteFloat] = Field(default=None, ge=0)
+    yb_self_touch: Optional[bool] = None
     yb_initial_state: Optional[YbInitialState] = None
+    yb_stable_aggregator: Optional[Dict[str, Any]] = None  # {"t": [Unix seconds], "price": [...]}
     early_stop_max_7d_rel_price_diff: Optional[FiniteFloat] = Field(default=None, ge=0)
 
 

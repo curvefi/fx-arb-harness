@@ -1,4 +1,5 @@
 // Checks of docs/arbitrage_rules.md on a synthetic pool (coin0 USD, coin1 at 77,235.68) and a 12 s tape.
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <variant>
@@ -19,8 +20,10 @@ void require(bool condition, const char* message) {
 
 struct Run { arb::harness::EventLoopResult<double> result; Pool pool; std::vector<arb::harness::Action<double>> actions; };
 
-// Events closing at relative moves from PRICE; zero native costs; active_2l at its standard settings if yb.
-Run run(const std::vector<double>& moves, double entry_edge_bps, bool yb) {
+// Events closing at relative moves from PRICE; zero native costs; active_2l at its standard settings if yb. Without a trade
+// price (p_arb NaN at every event) neither actor may trade.
+Run run(const std::vector<double>& moves, double entry_edge_bps, bool yb, bool touch = false, bool fast = false, double yb_fee = 0.013,
+        bool no_trade_price = false) {
     Pool pool({1.0, 1.0}, 50'000.0, 1.1111111111e-8, 0.0146, 0.0170,
               0.054202748, 1e-10, 5e-3, 865.0, PRICE, 0.301010101, 0.0);
     pool.set_block_timestamp(TS - 1);
@@ -39,9 +42,12 @@ Run run(const std::vector<double>& moves, double entry_edge_bps, bool yb) {
     arb::harness::IdleTickCfg<double> idle; idle.freq_s = 0;
     arb::harness::UserSwapCfg<double> user;
     arb::harness::RunConfig<double> config;
-    if (yb) { config.yb_mode = arb::harness::YbMode::Active2l; config.yb_releverage_fee = 0.013; config.yb_cash_multiplier = 3.0; }
+    if (yb) { config.yb_mode = arb::harness::YbMode::Active2l; config.yb_releverage_fee = yb_fee; config.yb_cash_multiplier = 3.0; }
+    config.yb_self_touch = touch;
+    if (fast) config.event_cursor = arb::harness::EventCursor::FastSkip;
     std::vector<arb::Candle> candles;
-    const auto events = arb::EventSoA::from_events(arb::events::gen_candle_events(tape, candles, 0, 0, {}));
+    auto events = arb::EventSoA::from_events(arb::events::gen_candle_events(tape, candles, 0, 0, {}));
+    if (no_trade_price) events.p_arb.assign(events.size(), std::nan(""));
     out.result = arb::harness::run_event_loop(out.pool, events, costs, donation, idle, user, config, nullptr, 0, &out.actions);
     return out;
 }
@@ -105,10 +111,45 @@ void one_ordered_trade_per_actor_and_repeatable() {
             first.pool.D == second.pool.D && first.pool.cached_price_scale == second.pool.cached_price_scale &&
             first.pool.totalSupply == second.pool.totalSupply, "two runs of the same inputs differed");
 }
+
+// yb_self_touch (LEVAMM fee 0.2 %): after a jump the price rests, nobody touches the pool and the scale lags. The actor's
+// own touch steps the scale and fills where the pool as it stands gives none; the skipping cursor repeats the scalar one.
+void self_touch_fills_and_cursors_agree() {
+    for (const double jump : {0.04, -0.04}) {
+        std::vector<double> moves(40, 0.0);
+        moves.insert(moves.end(), 600, jump);
+        const auto off = run(moves, 1.5, true, false, false, 0.002), on = run(moves, 1.5, true, true, false, 0.002),
+                   fast = run(moves, 1.5, true, true, true, 0.002);
+        require(off.result.metrics.yb_touch_fires == 0 && on.result.metrics.yb_touch_fires > 1 &&
+                on.result.metrics.yb_2l_fires == off.result.metrics.yb_2l_fires + on.result.metrics.yb_touch_fires,
+                "the actor's touch opened no fill");
+        require(on.result.metrics.yb_touch_fires == fast.result.metrics.yb_touch_fires &&
+                on.result.metrics.yb_2l_fires == fast.result.metrics.yb_2l_fires && on.result.metrics.trades == fast.result.metrics.trades &&
+                on.result.metrics.yb_levamm_profit_coin0 == fast.result.metrics.yb_levamm_profit_coin0 &&
+                on.pool.balances == fast.pool.balances && on.pool.D == fast.pool.D &&
+                on.pool.cached_price_scale == fast.pool.cached_price_scale && on.pool.totalSupply == fast.pool.totalSupply,
+                "the skipping cursor differed from the scalar one with yb_self_touch");
+        const auto silent = run(moves, 1.5, true, true, false, 0.002, true);
+        require(silent.result.metrics.yb_2l_fires == 0 && silent.result.metrics.trades == 0,
+                "an actor traded at an event without a trade price");
+    }
+}
+
+// The aggregator's price_w(): the first write in a block stands, the next block writes again, and another writer's
+// cache from the same block stands too.
+void aggregator_writes_once_per_block() {
+    arb::harness::OracleRate o{14400, 14400, 0};
+    require(o.write(100, 0.98, 50) && o.own_rate == 0.98, "a first write in a block stores the live value");
+    require(!o.write(100, 0.97, 50) && o.own_rate == 0.98, "a second write in the same block keeps the first");
+    require(o.write(112, 0.97, 50) && o.own_rate == 0.97, "the next block writes again");
+    require(!o.write(124, 0.96, 124) && o.own_rate == 0.97, "another writer's cache from the same block stands");
+}
 } // namespace
 
 int main() {
     no_profitable_trade_remains();
     one_ordered_trade_per_actor_and_repeatable();
+    self_touch_fills_and_cursors_agree();
+    aggregator_writes_once_per_block();
     std::cout << "test_arbitrage_rules: PASSED\n";
 }

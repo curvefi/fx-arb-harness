@@ -7,6 +7,7 @@
 #include "events/block_tape.hpp"
 #include "events/candle_tape.hpp"
 #include "harness/event_loop.hpp"
+#include "harness/report_window.hpp"
 #include "pools/twocrypto_fx/twocrypto.hpp"
 
 namespace {
@@ -157,13 +158,84 @@ void a_run_takes_its_own_price_delay() {
     }
     require(trades[0] > 1 && (trades[0] != trades[1] || trades[1] != trades[2]), "the delays did not differ");
 }
+// The trade price (p_arb) replaces the event price for the actors' trades, here the native arbitrageur's; NaN: no trade
+// there (the YieldBasis actor: test_arbitrage_rules).
+void trade_price_replaces_the_event_price() {
+    const auto plain = blocks({0.05, -0.05, 0.05});
+    auto same = plain, none = plain, middle = plain;
+    same.p_arb = plain.p_cex;
+    none.p_arb.assign(plain.size(), std::nan(""));
+    middle.p_arb = none.p_arb;
+    middle.p_arb[1] = plain.p_cex[1];
+    for (const auto cursor : {arb::harness::EventCursor::Scalar, arb::harness::EventCursor::FastSkip}) {
+        const auto base = run_arb(plain, cursor), own = run_arb(same, cursor);
+        require(base.result.metrics.trades == 3 && own.result.metrics.trades == 3 && own.pool.balances == base.pool.balances,
+                "an arbitrage price equal to the event price changed the run");
+        require(run_arb(none, cursor).result.metrics.trades == 0, "an arbitrageur without a price traded");
+        const auto one = run_arb(middle, cursor);
+        require(one.result.metrics.trades == 1 && std::get<arb::harness::ExchangeAction<double>>(one.actions.front()).i == 1,
+                "the arbitrageur did not trade only where it has a price");
+        // A flat market with the arbitrageur's own price 5% above it: it buys coin 1 once, on its own price.
+        auto apart = blocks({0.0, 0.0});
+        apart.p_arb = {apart.p_cex[0] * 1.05, std::nan("")};
+        const auto own_view = run_arb(apart, cursor);
+        require(run_arb(blocks({0.0, 0.0}), cursor).result.metrics.trades == 0 && own_view.result.metrics.trades == 1 &&
+                std::get<arb::harness::ExchangeAction<double>>(own_view.actions.front()).i == 0,
+                "the arbitrageur did not trade on its own price");
+    }
+}
+// The tape rate oracle reads the newer cache until it is older than the limit (shorter off peg), then the live value,
+// which only a commit stores; another writer's newer cache wins again.
+void oracle_rate_reads_the_cache_until_its_age_limit() {
+    arb::harness::OracleRate o{3600, 180, 0.002};
+    auto r = o.preview(10'000, 0.9985, 0.999, 7'000);
+    require(r.rate == 0.999 && !r.refresh, "a cache younger than the calm limit was not read");
+    r = o.preview(10'601, 0.9985, 0.999, 7'000);
+    require(r.rate == 0.9985 && r.refresh, "a cache older than the calm limit was not refreshed");
+    r = o.preview(10'700, 0.9985, 0.999, 7'000);
+    require(r.rate == 0.9985 && r.refresh, "a preview stored the refresh");
+    o.commit(10'700, 0.9985);
+    r = o.preview(11'000, 0.990, 0.999, 7'000);
+    require(r.rate == 0.9985 && !r.refresh, "the own write was not the newer cache");
+    o.commit(11'000, 0.990);  // 100 bp off peg: the 180 s limit applies
+    require(o.preview(11'180, 0.995, 0.999, 7'000).rate == 0.990 && o.preview(11'181, 0.995, 0.999, 7'000).refresh,
+            "the off-peg limit did not apply");
+    r = o.preview(11'100, 0.995, 0.997, 11'050);
+    require(r.rate == 0.997 && !r.refresh, "another writer's newer cache was not read");
+    o.commit(11'200, 0.996);  // another writer's cache stamped in the same block keeps ours
+    r = o.preview(11'212, 0.98, 0.995, 11'200);
+    require(r.rate == 0.996 && !r.refresh, "a same-block cache replaced our write");
+}
+
+// Report access: 0 the latest report at or before the block; 2000 + lead the menu [block - 12 s, block + lead];
+// 3000 + lead the latest at or before the block plus (block, block + lead].
+void report_offsets_select_their_windows() {
+    arb::EventSoA ev;
+    ev.report_ts = {80.0, 87.0, 88.0, 99.0, 100.0, 101.0, 102.0, 103.0, 104.0};
+    ev.report_prices = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0};
+    const auto seen = [&](size_t offset) {
+        std::vector<double> out;
+        arb::harness::ReportWindow(ev, 0.0).at_offset(100.0, offset, [&](double p, double) { out.push_back(p); });
+        return out;
+    };
+    require(seen(0) == std::vector<double>{5.0}, "offset 0 is the latest report at or before the block");
+    require(seen(2003) == std::vector<double>{3.0, 4.0, 5.0, 6.0, 7.0, 8.0}, "the menu holds [block - 12 s, block + 3 s]");
+    require(seen(3002) == std::vector<double>{5.0, 6.0, 7.0}, "the fresh menu holds the latest at the block and (block, block + 2 s]");
+    require(seen(3000) == seen(0), "lead 0 of the fresh menu is offset 0");
+    double last_ts = 0.0;
+    arb::harness::ReportWindow(ev, 0.0).at_offset(100.0, 3002, [&](double, double t) { last_ts = t; });
+    require(last_ts == 102.0, "the fresh menu keeps the report's own timestamp and stops at block + 2 s");
+}
 } // namespace
 
 int main() {
+    oracle_rate_reads_the_cache_until_its_age_limit();
+    trade_price_replaces_the_event_price();
     a_run_takes_its_own_price_delay();
     candles_become_a_causal_bin_end_clock();
     block_tape_loads_and_prices_at_the_settle_offset();
     taker_trades_at_the_event_price();
     fast_skip_matches_scalar();
+    report_offsets_select_their_windows();
     std::cout << "test_events: PASSED\n";
 }

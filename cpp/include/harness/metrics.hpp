@@ -53,6 +53,7 @@ struct Metrics {
     size_t trades{0};
     size_t arb_offered_report_trades{0};
     size_t arb_withheld_report_trades{0};
+    size_t oracle_refreshes{0};  // research tape rate oracle: refreshes stored by report deliveries
     T notional{0};              // Total notional in coin0 units
     T lp_fee_coin0{0};          // Total LP fees in coin0 units
     T arb_pnl_coin0{0};         // Arbitrageur profit in coin0 units
@@ -64,6 +65,7 @@ struct Metrics {
     T donation_coin0_total{0};
 
     size_t yb_2l_fires{0};
+    size_t yb_touch_fires{0};         // fills that followed the actor's own pool touch
     T yb_levamm_profit_coin0{0};      // actor net profit of committed LEVAMM fills
 };
 
@@ -625,6 +627,11 @@ struct EventLoopResult {
     T yb_releverage_fee{T(0)};
     double yb_releverage_apy{-1.0};
     RollingGeoApySummary yb_apy_gm{};
+    // Same recorded position marked with the crvUSD aggregator at one.
+    double yb_apy_par{-1.0};
+    double yb_final_growth_par{-1.0};
+    double yb_par_valid{-1.0}; // 1 valid, 0 invalid/uninitialized, -1 YB disabled.
+    RollingGeoApySummary yb_apy_par_gm{};
     double yb_market_gm60{-1.0};  // 60-day rolling GM of the externally marked equity in coin 1
     double yb_external_equity_eth{-1.0};
     double yb_external_growth_eth{-1.0};

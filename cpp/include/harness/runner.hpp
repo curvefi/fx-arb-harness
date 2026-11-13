@@ -103,6 +103,10 @@ struct PoolResult {
     T yb_releverage_fee{T(0)};
     double yb_releverage_apy{-1.0};
     RollingGeoApySummary yb_apy_gm{};
+    double yb_apy_par{-1.0};
+    double yb_final_growth_par{-1.0};
+    double yb_par_valid{-1.0};
+    RollingGeoApySummary yb_apy_par_gm{};
     double yb_market_gm60{-1.0};
     double yb_external_equity_eth{-1.0};
     double yb_external_growth_eth{-1.0};
@@ -321,6 +325,10 @@ PoolResult<T> run_single_pool(
         result.yb_releverage_fee = loop_result.yb_releverage_fee;
         result.yb_releverage_apy = loop_result.yb_releverage_apy;
         result.yb_apy_gm = loop_result.yb_apy_gm;
+        result.yb_apy_par = loop_result.yb_apy_par;
+        result.yb_final_growth_par = loop_result.yb_final_growth_par;
+        result.yb_par_valid = loop_result.yb_par_valid;
+        result.yb_apy_par_gm = loop_result.yb_apy_par_gm;
         result.yb_market_gm60 = loop_result.yb_market_gm60;
         result.yb_external_equity_eth = loop_result.yb_external_equity_eth;
         result.yb_external_growth_eth = loop_result.yb_external_growth_eth;

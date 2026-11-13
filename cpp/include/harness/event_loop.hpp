@@ -20,11 +20,13 @@
 #include "harness/logging.hpp"
 #include "harness/donation.hpp"
 #include "harness/idle_tick.hpp"
+#include "harness/oracle_rate.hpp"
 #include "harness/yb_2l.hpp"
 #include "harness/yb_2l_apy.hpp"
 #include "harness/pool_snapshot.hpp"
 #include "harness/run_config.hpp"
 #include "harness/report_window.hpp"
+#include "harness/report_bank.hpp"
 #include "harness/user_swap.hpp"
 #include "trading/costs.hpp"
 #include "trading/arbitrageur.hpp"
@@ -66,16 +68,46 @@ struct StoredReport<Pool, std::void_t<decltype(std::declval<const Pool&>().polic
     }
 };
 
+// The policy's stored report in report units (price x driver ratio: USD for a crvUSD-divided report), 0 when it keeps none;
+// a trace diagnostic.
+template <typename Pool, typename = void>
+struct StoredReportUsd {
+    static double of(const Pool&) { return 0.0; }
+};
+template <typename Pool>
+struct StoredReportUsd<Pool, std::void_t<decltype(std::declval<const Pool&>().policy.compiled_state.report.driver_ratio)>> {
+    static double of(const Pool& pool) {
+        const auto& report = pool.policy.compiled_state.report;
+        return static_cast<double>(report.price) * static_cast<double>(report.driver_ratio);
+    }
+};
+
+// Research (report bank): overwrite the policy's stored report with what the pool reads from the bank at this block.
+template <typename Pool, typename = void>
+struct BankReportWriter {
+    static void set(Pool&, double, double, double) {}
+};
+template <typename Pool>
+struct BankReportWriter<Pool, std::void_t<decltype(std::declval<Pool&>().policy.compiled_state.report.driver_ratio)>> {
+    static void set(Pool& pool, double price, double timestamp, double driver_ratio) {
+        auto& report = pool.policy.compiled_state.report;
+        using R = std::decay_t<decltype(report.price)>;
+        report.price = static_cast<R>(price), report.timestamp = timestamp, report.driver_ratio = static_cast<R>(driver_ratio);
+    }
+};
+
 template <typename T>
 struct YbLoopState {
     using F = MetricF<T>;
 
     Yb2LActor<T> actor;
     Yb2LApyTracker<T> apy_tracker;
+    Yb2LApyTracker<T> apy_par_tracker;
     YbExternalEquity external_equity;
     // Bounded queues, advanced once per hour on the valuation clock and never
     // scanned across the simulation history.
     RollingGeoApy<F> apy_gm;
+    RollingGeoApy<F> apy_par_gm;
     RollingGeoApyWindow<F> market_gm60{60ULL * 86400, RollingGeoApy<F>::FLOOR_APY};  // 60-day windows of the position marked at the market price, in coin 1
     Yb2LCosts<T> actor_costs{};
     uint64_t last_valuation_ts{0};
@@ -120,9 +152,9 @@ EventLoopResult<T> run_event_loop_impl(
         throw std::invalid_argument("arb_report_random_count must be an integer in [0, 6]");
     const size_t random_count = static_cast<size_t>(random_count_value);
     const double offset_value = static_cast<double>(cfg.arb_report_offset);
-    if (!std::isfinite(offset_value) || offset_value < -1 || offset_value > 2023 || std::floor(offset_value) != offset_value ||
-        (offset_value >= 1000 && offset_value < 2000))
-        throw std::invalid_argument("arb_report_offset must be -1, an integer in [0, 999], or 2000 + lead with lead in [0, 23]");
+    if (!std::isfinite(offset_value) || offset_value < -1 || offset_value > 3023 || std::floor(offset_value) != offset_value ||
+        (offset_value >= 1000 && offset_value < 2000) || (offset_value > 2023 && offset_value < 3000))
+        throw std::invalid_argument("arb_report_offset must be -1, an integer in [0, 999], 2000 + lead or 3000 + lead with lead in [0, 23]");
     const bool fixed_report = offset_value >= 0;
     if (random_count > 0 && (fixed_report || report_count > 0 || report_max_age_s > 0))
         throw std::invalid_argument("random report count, offset, count, and time window are mutually exclusive");
@@ -159,6 +191,11 @@ EventLoopResult<T> run_event_loop_impl(
     const size_t n_events = events.size();
     if (n_events == 0) return result;
     const std::vector<double>& event_prices = events.prices(cfg.arb_settle_offset_s);
+    // The native arbitrageur's own price where the events carry one (NaN: no native arbitrage at that event).
+    if (!events.p_arb.empty() && events.p_arb.size() != n_events)
+        throw std::invalid_argument("native arbitrage prices and events differ in count");
+    // The YieldBasis actor trades at the same price (in the pool's stablecoin); marks and metrics use the event price.
+    const auto arb_price_at = [&](size_t index) { return events.p_arb.empty() ? event_prices[index] : events.p_arb[index]; };
     const size_t first_event_idx = event_start_floor_ts == 0
         ? 0
         : static_cast<size_t>(std::lower_bound(
@@ -166,8 +203,13 @@ EventLoopResult<T> run_event_loop_impl(
         ) - events.ts.begin());
     if (first_event_idx == n_events) return result;
 
+    // A run end (RunConfig::end_ts) bounds the event range: no event after it is processed, scanned or marked; an
+    // empty range returns the empty result.
+    const size_t n_bound = cfg.end_ts == 0 ? n_events
+        : static_cast<size_t>(std::upper_bound(events.ts.begin(), events.ts.end(), cfg.end_ts) - events.ts.begin());
+    if (n_bound <= first_event_idx) return result;
     result.t_start = events.ts[first_event_idx];
-    result.t_end = events.ts[n_events - 1];
+    result.t_end = events.ts[n_bound - 1];
 
     result.tvl_start = pool.balances[0] + pool.balances[1] * pool.cached_price_scale;
     const auto initial_balances = pool.balances;
@@ -236,6 +278,7 @@ EventLoopResult<T> run_event_loop_impl(
             if (yb_mode == YbMode::Active2l) {
                 yb->actor_costs.min_profit_coin0 = cfg.yb_min_net_profit_coin0;
                 yb->actor_costs.execution_bps = {cfg.yb_execution_bps, cfg.yb_execution_bps};
+                yb->actor_costs.self_touch = cfg.yb_self_touch;
                 yb->actor = cfg.yb_initial_state
                     ? Yb2LActor<T>::from_state(*cfg.yb_initial_state)
                     : Yb2LActor<T>::fresh_2l(
@@ -249,6 +292,101 @@ EventLoopResult<T> run_event_loop_impl(
             );
         }
     }
+    // Optional aggregator history for the LP oracle: the last price observed strictly before the event time.
+    if (!cfg.yb_aggregator_ts.empty() &&
+        (cfg.yb_aggregator_ts.size() != cfg.yb_aggregator_price.size() || cfg.event_cursor != EventCursor::Scalar))
+        throw std::invalid_argument("yb aggregator history needs matching lengths and the scalar cursor");
+    size_t aggregator_next = 0;
+    const auto set_aggregator_at = [&](uint64_t ts) -> bool {
+        if constexpr (EnableYb && std::is_floating_point_v<T>) {
+            const auto& times = cfg.yb_aggregator_ts;
+            if (times.empty() || !yb->actor.enabled()) return false;
+            while (aggregator_next < times.size() && times[aggregator_next] < ts) ++aggregator_next;
+            return aggregator_next > 0 &&
+                yb->actor.set_stable_aggregator(static_cast<T>(cfg.yb_aggregator_price[aggregator_next - 1]));
+        } else {
+            return false;
+        }
+    };
+    set_aggregator_at(result.t_start);
+    // A tape rate oracle (oracle_rate.hpp): the crvUSD rate a report delivery reads, set per event, also inside the fast
+    // cursor's skip test. Only the fee terms read the report divided by it (report_q): the price-scale driver's ratio
+    // equals it, so the driver observes the undivided (USD) report. Previews are pure; the main loop commits a refresh
+    // once a report is delivered.
+    double report_q = 1.0;
+    const auto rq = [&](double price) { return report_q == 1.0 ? price : price / report_q; };
+    const bool oracle_on = !events.oracle_live.empty();
+    if (oracle_on && (events.oracle_live.size() != n_events || events.oracle_cached.size() != n_events ||
+                      events.oracle_cached_ts.size() != n_events || events.oracle_rule.size() != 3))
+        throw std::invalid_argument("a rate oracle needs one value per event and a three-number rule");
+    OracleRate oracle;
+    if (oracle_on) oracle = {events.oracle_rule[0], events.oracle_rule[1], events.oracle_rule[2]};
+    // Returns whether a report delivered at this event refreshes the oracle.
+    const auto set_tape_divisor = [&](size_t index) {
+        if (!oracle_on) return false;
+        const auto read = oracle.preview(static_cast<double>(events.ts[index]), events.oracle_live[index],
+                                         events.oracle_cached[index], events.oracle_cached_ts[index]);
+        report_q = read.rate;
+        if constexpr (std::is_floating_point_v<T>) pool.policy.research.driver_ratio = static_cast<T>(report_q);
+        return read.refresh;
+    };
+    // Research: a report bank (report_bank.hpp). Each delivered report is stored with a rate read on chain at the delivery
+    // block, and the pool reads the bank's latest report times the rate's average at the block, for fees and the price
+    // scale alike. An offered report is priced on a preview of the bank after its delivery; a swap that delivers it, and
+    // every keeper delivery, commits it. At every block (and in the fast cursor's test) the policy's stored report is
+    // rewritten from the bank, so reads without a delivery see the bank's latest report with the average projected to
+    // that block.
+    const bool bank_on = !events.report_rate.empty();
+    if (bank_on && (events.report_rate_ts.size() != events.report_rate.size() || !(events.report_bank_period_s > 0) ||
+                    !(events.report_rate_ts.front() < static_cast<double>(events.ts[first_event_idx]))))
+        throw std::invalid_argument("a report bank needs a positive period and a rate sample before the first event");
+    ReportBank bank;
+    bank.period = events.report_bank_period_s;
+    const auto report_index = [&](double timestamp) -> size_t {
+        const auto it = std::lower_bound(events.report_ts.begin(), events.report_ts.end(), timestamp);
+        return it != events.report_ts.end() && *it == timestamp ? static_cast<size_t>(it - events.report_ts.begin()) : SIZE_MAX;
+    };
+    // Delivers the report (price, timestamp) to bank `b` at block time `now` with the rate read then (the latest sample
+    // strictly before it, the same for every report offered there). The rate is read only with a report newer than the
+    // bank's, which the bank skips otherwise.
+    const auto bank_store = [&](ReportBank& b, double price, double timestamp, double now) {
+        if (b.asset.set && !(timestamp > b.asset.observation)) return;
+        const auto it = std::lower_bound(events.report_rate_ts.begin(), events.report_rate_ts.end(), now);
+        b.deliver(price, timestamp, events.report_rate[static_cast<size_t>(it - events.report_rate_ts.begin()) - 1], now);
+    };
+    // The price the pool reads for a report delivered and read at `now` (the report itself without a bank): the bank's
+    // latest report after the delivery (it skips a report not newer) times the rate average.
+    const auto bank_price = [&](double price, double timestamp, double now) -> double {
+        if (!bank_on) return price;
+        ReportBank preview = bank;
+        bank_store(preview, price, timestamp, now);
+        return preview.asset.price * preview.ratio(now);
+    };
+    const auto bank_deliver = [&](double timestamp, double now) {
+        if (!bank_on) return;
+        const size_t i = report_index(timestamp);
+        if (i != SIZE_MAX) bank_store(bank, events.report_prices[i], timestamp, now);
+    };
+    // The policy's stored report as the pool reads it from the bank at `now` (in the policy's fee units, report_q).
+    const auto bank_refresh = [&](uint64_t now) {
+        if constexpr (std::is_floating_point_v<T>) {
+            if (bank_on && bank.asset.set)
+                BankReportWriter<Pool>::set(pool, rq(bank.asset.price * bank.ratio(static_cast<double>(now))),
+                                            bank.asset.observation, report_q);
+        }
+    };
+    // The YieldBasis book (CryptopoolLPOracle) values LP at the aggregator's live price: with a tape rate oracle it
+    // follows that price at every event, also inside the fast cursor's skip test. Returns whether it changed.
+    if (oracle_on && !cfg.yb_aggregator_ts.empty())
+        throw std::invalid_argument("a tape rate oracle sets the YieldBasis aggregator; drop the session history");
+    const auto set_book_rate = [&](size_t index) -> bool {
+        if constexpr (EnableYb && std::is_floating_point_v<T>)
+            return oracle_on && yb->actor.enabled() &&
+                   yb->actor.set_stable_aggregator(static_cast<T>(events.oracle_live[index]));
+        else
+            return false;
+    };
+    set_book_rate(first_event_idx);
 
     if constexpr (EnableYb && std::is_floating_point_v<T>) {
         const T initial_mark = static_cast<T>(event_prices[first_event_idx]);
@@ -345,7 +483,7 @@ EventLoopResult<T> run_event_loop_impl(
         fee_valid = true;
     };
     // Cached YB no-trade price band: valid until the pool or the actor changes.
-    typename Yb2LActor<T>::NoTradeBand yb_band{};
+    typename Yb2LActor<T>::NoTradeBand yb_band{}, yb_touch_band{};
     bool yb_band_ready = false;
     auto invalidate_edge_inputs = [&]() {
         geometry_valid = false;
@@ -486,10 +624,12 @@ EventLoopResult<T> run_event_loop_impl(
         return true;
     };
 
+    // Sized at the arbitrageur's price cex_price; fees and logs are valued at the event price mark_price.
     auto execute_arb = [&] (
         size_t ev_idx,
         uint64_t ev_ts,
-        T cex_price
+        T cex_price,
+        T mark_price
     ) -> bool {
         if (!native_may_trade(cex_price)) return false;
         refresh_edge_fee();
@@ -563,6 +703,7 @@ EventLoopResult<T> run_event_loop_impl(
                 visit_offered_reports(ev_idx, ev_ts, [&](double price, double timestamp) {
                     if (n_cands >= cands.size()) throw std::length_error("offered report window exceeds 64 candidates");
                     // Only a report beyond the spot can beat withholding.
+                    price = rq(bank_price(price, timestamp, static_cast<double>(ev_ts)));
                     if (sel_i == 0 ? !(static_cast<T>(price) > p_spot) : !(static_cast<T>(price) < p_spot)) return;
                     pool.refresh_policy_context(static_cast<T>(price), timestamp);
                     const auto t = pool.policy.report_terms(pool.policy.research, sel_i);
@@ -585,7 +726,7 @@ EventLoopResult<T> run_event_loop_impl(
                 }
             } else {
                 visit_offered_reports(ev_idx, ev_ts, [&](double price, double timestamp) {
-                    pool.refresh_policy_context(static_cast<T>(price), timestamp);
+                    pool.refresh_policy_context(static_cast<T>(rq(bank_price(price, timestamp, static_cast<double>(ev_ts)))), timestamp);
                     if (!((may_sell0 && pool.context_may_profit(pool.policy.research, 0, edge_p_now, cex_gate_bid * cex_price)) ||
                           (may_sell1 && pool.context_may_profit(pool.policy.research, 1, edge_p_now, cex_gate_ask * cex_price))))
                         return;
@@ -607,8 +748,9 @@ EventLoopResult<T> run_event_loop_impl(
         }
 
         if (!commit_swap(ev_ts, static_cast<size_t>(dec.i), dec.dx, dec.dy_after_fee, dec.fee_tokens,
-                         dec.profit, dec.notional_coin0, cex_price, winning_context.price_feed > T(0)))
+                         dec.profit, dec.notional_coin0, mark_price, winning_context.price_feed > T(0)))
             return false;
+        if (winning_context.price_feed > T(0)) { bank_deliver(winning_context.price_feed_timestamp, static_cast<double>(ev_ts)); bank_refresh(ev_ts); }
         return true;
     };
 
@@ -651,7 +793,7 @@ EventLoopResult<T> run_event_loop_impl(
     const bool keeper_period = keeper_fresh && icfg.enabled();
     // Mode 3's move threshold is the policy's fallback fee; 0 (no move trigger) for a policy without report terms.
     double keeper_move = 0.0;
-    if (keeper_fresh) {
+    if (keeper_fresh && !bank_on) {
         if (const auto terms = pool.policy.report_terms(pool.policy.research, 0)) keeper_move = static_cast<double>(terms->fallback);
     }
     // The report the keeper would carry at this event (the last one visited), {0, 0} when none.
@@ -665,7 +807,17 @@ EventLoopResult<T> run_event_loop_impl(
     // keeper_report 3: due on a block nobody touched yet, holding a report the policy admits (newer than the stored one,
     // observed within [block - 12 s, block + 6 s] and the run's report age limit), once the stored report or the last
     // touch is dustswap_freq_s old, or the report has moved the fallback fee from the stored one, |ln| >= fallback.
+    // In bank mode the keeper delivers to the bank once its reports are dustswap_freq_s old (or absent), whether or not the
+    // block was touched; its dust touch is optional and needs an untouched block.
     const auto keeper_due = [&](size_t index, uint64_t ts) {
+        if (bank_on) {
+            if (!keeper_period) return false;
+            const auto [price, timestamp] = latest_report(index, ts);
+            const double block = static_cast<double>(ts);
+            const double max_age = std::min(12.0, pool.policy.research.report_max_age_s);
+            if (!(price > 0.0) || block - timestamp > max_age || timestamp - block > 6.0) return false;
+            return !bank.asset.set || (timestamp > bank.asset.observation && block >= bank.asset.observation + static_cast<double>(icfg.freq_s));
+        }
         if (!(pool.last_timestamp < ts)) return false;
         const auto [price, timestamp] = latest_report(index, ts);
         const auto [stored_price, stored_ts] = StoredReport<Pool>::of(pool);
@@ -676,16 +828,29 @@ EventLoopResult<T> run_event_loop_impl(
         if (keeper_period && (!(stored_price > 0.0) || block >= stored_ts + static_cast<double>(icfg.freq_s) ||
                               ts - pool.last_timestamp >= icfg.freq_s))
             return true;
-        return keeper_move > 0 && (!(stored_price > 0.0) || std::abs(std::log(price / stored_price)) >= keeper_move);
+        return keeper_move > 0 && (!(stored_price > 0.0) || std::abs(std::log(rq(bank_price(price, timestamp, block)) / stored_price)) >= keeper_move);
     };
     const auto keeper_touch = [&](size_t index, uint64_t ts, bool legacy) {
-        const auto carry = [&](double price, double timestamp) { pool.refresh_policy_context(static_cast<T>(price), timestamp); };
+        if (bank_on && !(pool.last_timestamp < ts)) {  // a touched block: the bank delivery alone (the pool reads it next block)
+            const double timestamp = latest_report(index, ts).second;
+            if (timestamp > 0) bank_deliver(timestamp, static_cast<double>(ts));
+            return;
+        }
+        double carried_ts = -1.0;
+        const auto carry = [&](double price, double timestamp) {
+            pool.refresh_policy_context(static_cast<T>(rq(bank_price(price, timestamp, static_cast<double>(ts)))), timestamp);
+            carried_ts = timestamp;
+        };
         if (fixed_report) visit_offered_reports(index, ts, carry);
         else report_window.at_offset(ts, 0, carry, index);
         PoolTransactionSnapshot<Pool> snapshot(pool);
-        if (legacy ? try_idle_tick(pool, icfg, ts, m) : try_keeper_tick(pool, ts, m)) invalidate_edge_inputs();
+        const bool touched = legacy ? try_idle_tick(pool, icfg, ts, m) : try_keeper_tick(pool, ts, m);
+        if (touched) invalidate_edge_inputs();
         else snapshot.restore(pool);
         pool.clear_policy_price_feed();
+        // The keeper's delivery reaches the bank even if its touch fails; the pool reads it now only after a touch, which
+        // keeps the crvUSD oracle write (commit_delivery) tied to an actual pool operation.
+        if (carried_ts >= 0) { bank_deliver(carried_ts, static_cast<double>(ts)); if (touched) bank_refresh(ts); }
     };
     const bool detailed_on = detailed_logger.enabled();
     const bool user_swap_on = ucfg.enabled();
@@ -749,7 +914,10 @@ EventLoopResult<T> run_event_loop_impl(
                 icfg.freq_s
             ));
         }
-        if (keeper_period) {
+        if (keeper_period && bank_on) {
+            if (!bank.asset.set) return result.t_start;
+            include_due(due_after(static_cast<uint64_t>(std::ceil(std::max(0.0, bank.asset.observation))), icfg.freq_s));
+        } else if (keeper_period) {
             // The stored report's deadline; without a stored report the keeper is due at once.
             const auto [stored_price, stored_ts] = StoredReport<Pool>::of(pool);
             if (!(stored_price > 0.0)) return result.t_start;
@@ -790,7 +958,7 @@ EventLoopResult<T> run_event_loop_impl(
             }
             // A report not beyond the spot in a gated direction is not corrective there or, if inadmissible, is the
             // stored one, which withholding already tested.
-            const T reported = static_cast<T>(price);
+            const T reported = static_cast<T>(rq(bank_price(price, timestamp, static_cast<double>(ts))));
             if (!((may_sell0 && reported > edge_p_now) || (may_sell1 && reported < edge_p_now))) return;
             context.price_feed = reported;
             context.price_feed_timestamp = timestamp;
@@ -799,22 +967,28 @@ EventLoopResult<T> run_event_loop_impl(
         });
         return may;
     };
-    // Exactly may_trade: inside the cached band the actor provably abstains.
+    // Exactly may_trade or touch_may_fill: inside the cached bands the actor provably abstains, at the pool as it
+    // stands and after its own touch (yb_self_touch; that band lies inside the first).
     const auto yb_may_trade = [&](const T& mid, uint64_t ts) {
         if constexpr (EnableYb) {
             if (!yb_band_ready || ts < yb_band.from || ts > yb_band.to) {
                 yb_band = yb->actor.no_trade_band(pool, mid, ts, ts + 3600, yb->actor_costs);
+                yb_touch_band = yb->actor.no_touch_band(pool, ts, ts + 3600, yb->actor_costs);
                 yb_band_ready = true;
             }
-            if (yb_band.valid && ts >= yb_band.from && ts <= yb_band.to && mid >= yb_band.lo && mid <= yb_band.hi)
-                return false;
-            return yb->actor.may_trade(pool, mid, ts, yb->actor_costs);
+            const auto inside = [&](const auto& band) { return band.valid && mid >= band.lo && mid <= band.hi; };
+            if (inside(yb_touch_band)) return false;
+            if (inside(yb_band)) return yb->actor.touch_may_fill(pool, mid, ts, yb->actor_costs);
+            return yb->actor.may_trade(pool, mid, ts, yb->actor_costs) ||
+                yb->actor.touch_may_fill(pool, mid, ts, yb->actor_costs);
         } else {
             return false;
         }
     };
     const auto indexed_may_act = [&](size_t index, uint64_t ts) {
-        const double bid = event_prices[index], ask = bid;
+        set_tape_divisor(index);
+        bank_refresh(ts);
+        const double bid = arb_price_at(index), ask = bid;  // NaN fails every test below
         refresh_geometry();
         const T best_bid = static_cast<T>(bid), best_ask = static_cast<T>(ask);
         if ((omf_floor * (cex_gate_bid * best_bid) > edge_p_now ||
@@ -826,7 +1000,9 @@ EventLoopResult<T> run_event_loop_impl(
                 best_ask > T(0) && edge_floor_scaled_p > cex_gate_ask * best_ask * T(1 - 1e-12))))
             return true;
         if constexpr (EnableYb) {
-            if (yb_2l_trades && yb_may_trade(static_cast<T>(event_prices[index]), ts)) return true;
+            if (set_book_rate(index)) yb_band_ready = false;
+            // The YieldBasis actor trades at the native price too: none (NaN) at an event, no trade either.
+            if (yb_2l_trades && bid > 0 && yb_may_trade(best_bid, ts)) return true;
         }
         // keeper_report 3: an untouched block whose latest report moved the fallback fee from the stored one.
         if (keeper_move > 0 && keeper_due(index, ts)) return true;
@@ -837,31 +1013,39 @@ EventLoopResult<T> run_event_loop_impl(
         // First event at/after any deadline must reach the loop, even without
         // profitable actors. d3600 stays tied to the last committed pool touch.
         const uint64_t mandatory = next_mandatory_ts();
-        for (; start < n_events; ++start) {
+        for (; start < n_bound; ++start) {
             const auto ts = events.ts[start];
             if (ts >= mandatory || indexed_may_act(start, ts)) break;
         }
         return start;
     };
 
-    // One YB actor decision.
+    // One YB actor decision, at the native arbitrageur's price.
     const auto run_yb_2l_once = [&] (
+        size_t index,
         uint64_t ev_ts,
-        const T& cex_price,
         bool& did_any_trade
     ) {
         auto& yb_2l_actor = yb->actor;
         const auto& yb_2l_costs = yb->actor_costs;
-        if (!yb_2l_trades) return;
+        const T price = static_cast<T>(arb_price_at(index));
+        if (!yb_2l_trades || !(price > T(0))) return;
         if constexpr (std::is_floating_point_v<T>) {
-            if (fast_skip && !yb_may_trade(cex_price, ev_ts)) return;
+            if (fast_skip && !yb_may_trade(price, ev_ts)) return;
             auto actor_result = yb_2l_actor.try_fire(
-                pool, cex_price, ev_ts, yb_2l_costs
+                pool, price, ev_ts, yb_2l_costs
             );
             if (actor_result.fired) yb_band_ready = false;  // a refused route leaves the pool and ledger as they were
             if (!actor_result.fired) return;
+            // Its exchange called the aggregator's price_w(): a later delivery in this block reads that cache.
+            if (oracle_on && oracle.write(static_cast<double>(ev_ts), events.oracle_live[index],
+                                          events.oracle_cached_ts[index])) {
+                set_tape_divisor(index);
+                bank_refresh(ev_ts);  // the stored report in the new fee units
+            }
 
             ++m.yb_2l_fires;
+            m.yb_touch_fires += actor_result.touched;
             m.yb_levamm_profit_coin0 += actor_result.net_profit;
             did_any_trade = true;
             action_logger.log_injected(ev_ts, m.yb_2l_fires - 1, {actor_result.input, actor_result.output}, pool);
@@ -902,6 +1086,12 @@ EventLoopResult<T> run_event_loop_impl(
         yb->apy_tracker.sample(pool, market, ts);
         yb->last_valuation_ts = ts;
         const bool initialized = yb->apy_tracker.initialized();
+        // Share the original initialization event and valuation clock. The par
+        // tracker reads the same state; it never changes the live aggregator.
+        // It commits only on the hourly clock (and its first sample), so its
+        // validity and endpoint cannot depend on the trace interval.
+        if (initialized && (hourly_due || !yb->apy_par_tracker.initialized()))
+            yb->apy_par_tracker.sample_par(pool, market, ts);
         const F growth_now = initialized
             ? yb->apy_tracker.growth()
             : F(0);
@@ -909,15 +1099,21 @@ EventLoopResult<T> run_event_loop_impl(
         if (hourly_due && initialized) {
             yb->price_scale_variation.sample(ts, static_cast<F>(pool.cached_price_scale));
             yb->apy_gm.sample(ts, growth_now);
+            if (yb->apy_par_tracker.valid()) yb->apy_par_gm.sample(ts, yb->apy_par_tracker.growth());
             if (yb->external_equity.growth > 0) yb->market_gm60.sample(ts, static_cast<F>(yb->external_equity.growth));
         }
         if (!detailed_row_logged) return;
 
+        // A trace row between hourly samples shows the par mark on a copy.
+        auto par_row = yb->apy_par_tracker;
+        if (initialized && !hourly_due) par_row.sample_par(pool, market, ts);
         detailed_logger.annotate_last_yb(
             initialized,
             growth_now,
             static_cast<F>(market.state().fee),
-            m.yb_2l_fires
+            m.yb_2l_fires,
+            par_row.growth(),
+            par_row.valid()
         );
         const T lp_oracle = market.lp_oracle(pool);
         const T lp_fair = pool.totalSupply > T(0)
@@ -929,11 +1125,13 @@ EventLoopResult<T> run_event_loop_impl(
             market.projected_debt(ts),
             market.state().collateral,
             lp_oracle,
-            lp_fair
+            lp_fair,
+            market.state().lt_stable_balance,
+            market.state().stable_aggregator
         );
     };
     if (detailed_on) {
-        for (size_t ev_idx = first_event_idx; ev_idx < n_events; ++ev_idx) {
+        for (size_t ev_idx = first_event_idx; ev_idx < n_bound; ++ev_idx) {
             if (static_cast<size_t>(events.candle_idx[ev_idx]) >=
                 candles->size()) {
                 throw std::out_of_range("event.candle_idx out of range");
@@ -942,12 +1140,24 @@ EventLoopResult<T> run_event_loop_impl(
     }
 
     size_t ev_idx = first_event_idx;
-    size_t final_event_idx = n_events - 1;
-    while (ev_idx < n_events) {
+    size_t final_event_idx = n_bound - 1;
+    while (ev_idx < n_bound) {
         const uint64_t ev_ts = events.ts[ev_idx];
         pool.set_block_timestamp(ev_ts);
+        if (set_aggregator_at(ev_ts) || set_book_rate(ev_idx)) yb_band_ready = false;
+        const bool oracle_refresh = set_tape_divisor(ev_idx);
+        bank_refresh(ev_ts);
+        const double report_ts_before = oracle_refresh ? StoredReport<Pool>::of(pool).second : 0.0;
+        // A report delivered by the arbitrageur or the keeper made the due oracle read: price_w() writes it, in block
+        // order (after the arbitrageur, then after the keeper).
+        const auto commit_delivery = [&] {
+            if (oracle_refresh && StoredReport<Pool>::of(pool).second != report_ts_before &&
+                oracle.write(static_cast<double>(ev_ts), events.oracle_live[ev_idx], events.oracle_cached_ts[ev_idx]))
+                ++m.oracle_refreshes;
+        };
         const T cex_price = static_cast<T>(event_prices[ev_idx]);
-        const bool arb_may_trade = native_may_trade(cex_price);
+        const T arb_price = static_cast<T>(arb_price_at(ev_idx));
+        const bool arb_may_trade = native_may_trade(arb_price);
         if (swap_reports) {
             pool.clear_policy_price_feed();
             pool.refresh_policy_context();
@@ -985,22 +1195,25 @@ EventLoopResult<T> run_event_loop_impl(
                 // Start from withholding the report. execute_arb compares the
                 // fully sized alternatives before any state is committed.
             } else {
+                // A delivered feed report is divided like any offered report; the event-price fallback is
+                // already in the tape's units and is not.
                 pool.refresh_policy_context(
-                    have_price_feed ? static_cast<T>(events.p_price_feed[ev_idx]) : cex_price,
+                    have_price_feed ? static_cast<T>(rq(bank_price(events.p_price_feed[ev_idx], events.price_feed_ts[ev_idx], static_cast<double>(ev_ts)))) : cex_price,
                     have_price_feed ? events.price_feed_ts[ev_idx] : ev_ts);
             }
         }
         // Reports affect policy quotes, not pool geometry. Actual reserve,
         // invariant and price-scale mutations invalidate both caches below.
         if (swap_reports) fee_valid = false;
-        bool did_any_trade = arb_may_trade && execute_arb(ev_idx, ev_ts, cex_price);
+        bool did_any_trade = arb_may_trade && execute_arb(ev_idx, ev_ts, arb_price, cex_price);
         if (swap_reports) {
             pool.clear_policy_price_feed();
             fee_valid = false;
         }
+        commit_delivery();
         if constexpr (EnableYb) {
             if (yb_2l_on) {
-                run_yb_2l_once(ev_ts, cex_price, did_any_trade);
+                run_yb_2l_once(ev_idx, ev_ts, did_any_trade);
             }
         }
         // Retail is a transaction of its own: it waits for a block nobody touched yet, so the EMAs see it (dt > 0).
@@ -1016,6 +1229,7 @@ EventLoopResult<T> run_event_loop_impl(
             did_idle_tick = apply_idle_tick(ev_ts, cex_price);
             did_any_trade = did_idle_tick;
         }
+        commit_delivery();
         bool detailed_row_logged = false;
         if (detailed_on) {
             const size_t candle_idx =
@@ -1025,9 +1239,11 @@ EventLoopResult<T> run_event_loop_impl(
                 ev_ts,
                 (*candles)[candle_idx],
                 cex_price,
+                // block mode has no event feed: trace the report bank's rate average the pool applies at this block, else
+                // the policy's stored report in report units
                 have_price_feed
                     ? static_cast<T>(events.p_price_feed[ev_idx])
-                    : T(0),
+                    : static_cast<T>(bank_on ? bank.ratio(static_cast<double>(ev_ts)) : StoredReportUsd<Pool>::of(pool)),
                 dcfg.apy,
                 m.trades,
                 m.n_rebalances,
@@ -1065,9 +1281,13 @@ EventLoopResult<T> run_event_loop_impl(
         if constexpr (std::is_floating_point_v<T>) {
             const auto sample_yb_endpoint = [&](const auto& market) {
                 yb->external_equity.sample(pool, market, result.t_end, final_market_price);
-                if (yb->last_valuation_ts == result.t_end) return;
-                yb->apy_tracker.sample(pool, market, result.t_end);
-                yb->last_valuation_ts = result.t_end;
+                // The par endpoint follows its own last commit (a trace row at t_end does not commit it).
+                const bool par_due = yb->apy_par_tracker.last_time() != result.t_end;
+                if (yb->last_valuation_ts != result.t_end) {
+                    yb->apy_tracker.sample(pool, market, result.t_end);
+                    yb->last_valuation_ts = result.t_end;
+                }
+                if (par_due && yb->apy_tracker.initialized()) yb->apy_par_tracker.sample_par(pool, market, result.t_end);
             };
             if (yb_2l_on) {
                 sample_yb_endpoint(yb->actor);
@@ -1083,6 +1303,12 @@ EventLoopResult<T> run_event_loop_impl(
         result.yb_releverage_apy =
             yb_2l_on ? yb->apy_tracker.apy() : -1.0;
         result.yb_apy_gm = yb->apy_gm.summary();
+        result.yb_par_valid = yb_2l_on ? (yb->apy_par_tracker.valid() ? 1.0 : 0.0) : -1.0;
+        if (yb_2l_on && yb->apy_par_tracker.valid()) {
+            result.yb_apy_par = yb->apy_par_tracker.apy();
+            result.yb_final_growth_par = yb->apy_par_tracker.final_growth();
+            result.yb_apy_par_gm = yb->apy_par_gm.summary();
+        }
         result.yb_market_gm60 = yb->market_gm60.value();
         result.yb_price_scale_hourly_qv = yb->price_scale_variation.annualized();
         result.yb_releverage_final_growth = yb_2l_on
@@ -1110,6 +1336,9 @@ EventLoopResult<T> run_event_loop(
         throw std::invalid_argument("yb_min_net_profit_coin0 must be finite and nonnegative");
     if (cfg.yb_arb != YbArb::Levamm && cfg.yb_mode != YbMode::Active2l)
         throw std::invalid_argument("yb_arb='none' requires yb_mode='active_2l'");
+    // The touch is previewed with the policy's stored report: a feed delivered at every event is not in that preview.
+    if (cfg.yb_self_touch && !events.p_price_feed.empty() && !pool.uses_swap_reports())
+        throw std::invalid_argument("yb_self_touch does not support an event price feed");
     if (cfg.yb_mode == YbMode::Off) {
         return run_event_loop_impl<false>(
             pool, events, costs, dcfg, icfg, ucfg, cfg, candles,
