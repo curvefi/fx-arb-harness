@@ -457,6 +457,7 @@ struct PoolOverride {
     std::optional<T> arb_report_offset{};
     std::optional<T> arb_settle_offset_s{};
     std::optional<T> keeper_report{};
+    std::optional<T> driver_crvusd{};
     std::optional<T> end_timestamp;
     std::optional<arb::harness::YbInitialState<T>> yb_initial_state;
     uint32_t pool_fields{0};
@@ -506,6 +507,7 @@ struct PoolOverride {
         if (patch.arb_report_rate.has_value()) arb_report_rate = patch.arb_report_rate;
         if (patch.arb_settle_offset_s.has_value()) arb_settle_offset_s = patch.arb_settle_offset_s;
         if (patch.keeper_report.has_value()) keeper_report = patch.keeper_report;
+        if (patch.driver_crvusd.has_value()) driver_crvusd = patch.driver_crvusd;
         if (patch.yb_releverage_fee.has_value()) {
             yb_releverage_fee = patch.yb_releverage_fee;
         }
@@ -565,7 +567,7 @@ PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
             throw std::runtime_error("candidate run override must be an object");
         }
         const auto& ro = run->as_object();
-        reject_unknown_fields(ro, {"yb_releverage_fee", "arb_report_rate", "arb_report_max_age_s", "arb_report_count", "arb_report_random_count", "arb_report_offset", "arb_settle_offset_s", "keeper_report", "end_timestamp", "yb_initial_state"}, "candidate run override");
+        reject_unknown_fields(ro, {"yb_releverage_fee", "arb_report_rate", "arb_report_max_age_s", "arb_report_count", "arb_report_random_count", "arb_report_offset", "arb_settle_offset_s", "keeper_report", "driver_crvusd", "end_timestamp", "yb_initial_state"}, "candidate run override");
         if (auto* end = ro.if_contains("end_timestamp"); end != nullptr) {
             const T value = parse_plain_real<T>(*end);
             const double number = static_cast<double>(value);
@@ -580,6 +582,11 @@ PoolOverride<T> parse_pool_override(const boost::json::object& entry) {
             const T value = parse_plain_real<T>(*keeper);
             if (!(value == T(0) || value == T(2) || value == T(3))) throw std::runtime_error("keeper_report must be 0, 2 or 3");
             out.keeper_report = value;
+        }
+        if (auto* driver = ro.if_contains("driver_crvusd"); driver != nullptr) {
+            const T value = parse_plain_real<T>(*driver);
+            if (!(value == T(0) || value == T(1))) throw std::runtime_error("driver_crvusd must be 0 or 1");
+            out.driver_crvusd = value;
         }
         if (auto* delay = ro.if_contains("arb_settle_offset_s"); delay != nullptr) {
             const T value = parse_plain_real<T>(*delay);

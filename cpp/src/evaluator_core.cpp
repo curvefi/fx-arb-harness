@@ -357,6 +357,7 @@ void execute_scenario_job(
         run_cfg.arb_settle_offset_s = pool_override != nullptr && pool_override->arb_settle_offset_s.has_value()
             ? static_cast<int>(*pool_override->arb_settle_offset_s) : -1;
         run_cfg.keeper_report = pool_override != nullptr ? static_cast<int>(pool_override->keeper_report.value_or(RealT(0))) : 0;
+        run_cfg.driver_crvusd = pool_override != nullptr && pool_override->driver_crvusd.value_or(RealT(0)) == RealT(1);
         run_cfg.enable_slippage_probes = session_cfg.enable_slippage_probes;
         run_cfg.event_cursor = session_cfg.event_cursor;
         run_cfg.early_stop_max_7d_rel_price_diff = session_cfg.early_stop_max_7d_rel_price_diff;
@@ -422,6 +423,7 @@ void execute_scenario_job(
             if (run_cfg.arb_settle_offset_s >= 0)
                 effective["pool.run.arb_settle_offset_s"] = static_cast<double>(run_cfg.arb_settle_offset_s);
             if (run_cfg.keeper_report) effective["pool.run.keeper_report"] = static_cast<double>(run_cfg.keeper_report);
+            if (run_cfg.driver_crvusd) effective["pool.run.driver_crvusd"] = 1.0;
             if (run_cfg.end_ts) effective["pool.run.end_timestamp"] = static_cast<double>(run_cfg.end_ts);
             if (run_cfg.yb_initial_state && run_cfg.yb_mode != arb::harness::YbMode::Off) {
                 effective["run.yb_initial_state"] =

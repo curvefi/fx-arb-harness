@@ -362,6 +362,10 @@ policy admits: newer than the stored one, observed within
 once the bank's report is `dustswap_freq_s` old (or absent), on any block; its
 dust touch needs an untouched block, and the fallback-fee move trigger is off.
 
+`pool.run.driver_crvusd` (`0` default, `1`): with a block tape's rate oracle, the
+`report_lean` price-scale driver observes every report divided by the touch's
+crvUSD rate, like the fee terms, instead of in USD.
+
 `pool.run.end_timestamp` (a positive integer below 2^53, not before the run start)
 ends a candidate's run: events after it are not processed and the run's metrics
 end at the last event at or before it. `pool.run.yb_initial_state` replaces the

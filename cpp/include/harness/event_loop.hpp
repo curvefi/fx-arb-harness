@@ -311,10 +311,11 @@ EventLoopResult<T> run_event_loop_impl(
     set_aggregator_at(result.t_start);
     // A tape rate oracle (oracle_rate.hpp): the crvUSD rate a report delivery reads, set per event, also inside the fast
     // cursor's skip test. Only the fee terms read the report divided by it (report_q): the price-scale driver's ratio
-    // equals it, so the driver observes the undivided (USD) report. Previews are pure; the main loop commits a refresh
-    // once a report is delivered.
+    // equals it, so the driver observes the undivided (USD) report, or, with driver_crvusd, that report divided by the
+    // touch's rate. Previews are pure; the main loop commits a refresh once a report is delivered.
     double report_q = 1.0;
     const auto rq = [&](double price) { return report_q == 1.0 ? price : price / report_q; };
+    if constexpr (std::is_floating_point_v<T>) pool.policy.research.driver_scale = T(1);  // a reused pool starts in USD
     const bool oracle_on = !events.oracle_live.empty();
     if (oracle_on && (events.oracle_live.size() != n_events || events.oracle_cached.size() != n_events ||
                       events.oracle_cached_ts.size() != n_events || events.oracle_rule.size() != 3))
@@ -327,7 +328,10 @@ EventLoopResult<T> run_event_loop_impl(
         const auto read = oracle.preview(static_cast<double>(events.ts[index]), events.oracle_live[index],
                                          events.oracle_cached[index], events.oracle_cached_ts[index]);
         report_q = read.rate;
-        if constexpr (std::is_floating_point_v<T>) pool.policy.research.driver_ratio = static_cast<T>(report_q);
+        if constexpr (std::is_floating_point_v<T>) {
+            pool.policy.research.driver_ratio = static_cast<T>(report_q);
+            if (cfg.driver_crvusd) pool.policy.research.driver_scale = static_cast<T>(1.0 / report_q);
+        }
         return read.refresh;
     };
     // Research: a report bank (report_bank.hpp). Each delivered report is stored with a rate read on chain at the delivery

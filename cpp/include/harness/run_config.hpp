@@ -51,6 +51,9 @@ struct RunConfig {
     // arbitrageur. 3: due on a block nobody touched yet once the stored report or the last pool touch is
     // dustswap_freq_s old, or once the latest report has moved the policy's fallback fee from the stored one.
     int keeper_report{0};
+    // Research: with a tape rate oracle, the price-scale driver observes reports divided by the crvUSD rate of the touch
+    // (in crvUSD, like the fee terms) instead of in USD.
+    bool driver_crvusd{false};
 
     // Detailed per-event logging
     size_t detailed_interval{1};  // log every N-th event (1 = all)
